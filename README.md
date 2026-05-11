@@ -8,6 +8,7 @@
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
 - [setup-secrets.ps1](#setup-secretsps1)
+  - [Optional: install a JDK](#optional-install-a-jdk)
 - [provision.ps1](#provisionps1)
 - [deprovision.ps1](#deprovisionps1)
 - [CI](#ci)
@@ -113,6 +114,43 @@ All fields are required. After first boot, connect via `ssh username@ipAddress`.
 | `vhdPath`       | string | Windows path where VHDX files are stored           |
 | `switchName`    | string | Hyper-V Internal switch name. Default: `VmLAN`     |
 | `natName`       | string | Windows NAT rule name. Default: `VmLAN-NAT`        |
+| `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. See [Optional: install a JDK](#optional-install-a-jdk). |
+
+### Optional: install a JDK
+
+Add a `javaDevKit` object to any VM entry to install a JDK system-wide on
+first boot. When absent, no JDK is installed and the rest of provisioning is
+unaffected.
+
+```jsonc
+{
+  "vmName": "dev-01",
+  "...":    "...",
+  "javaDevKit": {
+    "vendor":  "temurin",
+    "version": "21"
+  }
+}
+```
+
+| Sub-field | Required | Allowed values                                                |
+|-----------|----------|---------------------------------------------------------------|
+| `vendor`  | yes      | `temurin` (Adoptium Temurin — currently the only supported vendor). |
+| `version` | yes      | A **string** in one of four granularities (see below).         |
+
+Version-string granularities — pick the level of pinning that suits you:
+
+| Example         | Meaning                                          |
+|-----------------|--------------------------------------------------|
+| `"21"`          | Latest GA of feature release 21                  |
+| `"21.0"`        | Latest GA on the 21.0 line                       |
+| `"21.0.5"`      | Latest build of 21.0.5                           |
+| `"21.0.5+11"`   | Exact build, no resolution                       |
+
+`version` must be a JSON string. Numeric values like `21` are rejected so that
+`"21.0"` cannot silently degrade to `21` through trailing-zero loss, and so
+that `"21.0.5+11"` (not a valid JSON number) follows the same rule as the
+other granularities.
 
 ---
 
