@@ -221,6 +221,7 @@ Infrastructure-VM-Provisioner/
 |     |- common/
 |     |  `- config/
 |     |     |- ConvertFrom-VmConfigJson.ps1  # JSON parsing and validation
+|     |     |- Assert-JavaDevKitField.ps1    # Validates optional javaDevKit field
 |     |     `- Get-SanitizedVmDisplay.ps1    # Masks password in diagnostic output
 |     |- up/
 |     |  |- config/
