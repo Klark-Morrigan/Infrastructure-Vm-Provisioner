@@ -157,8 +157,32 @@ At provision time the requested granularity is resolved against the
 (for example `"21"` -> `21.0.6+7`) along with its SHA-256 and download URL.
 The resolved build is then pinned in a host-side lockfile next to the cached
 tarball so subsequent provisioning runs reuse the exact same bytes — no
-silent upgrades between runs. See the cache-management notes further down
-for how to invalidate the pin.
+silent upgrades between runs.
+
+**Cache artifacts** — written into `vhdPath` (same directory as the cached
+Ubuntu VHDX):
+
+| File                                                | Purpose                                                                 |
+|-----------------------------------------------------|-------------------------------------------------------------------------|
+| `jdk-{vendor}-{requestedVersion}-linux-x64.tar.gz`  | The Temurin tarball, keyed by the requested (not resolved) version.     |
+| `jdk-{vendor}-{requestedVersion}-linux-x64.lock.json` | Sidecar pin recording `resolvedVersion`, `sha256`, `sourceUrl`, and download timestamp. |
+
+The cache key uses the **requested** version, so two VMs that both ask for
+`"21"` share one cache slot. The lockfile is authoritative on subsequent
+runs — the resolver is not re-invoked — so a `"21"` request cannot silently
+upgrade to a newer build between provisionings.
+
+To invalidate the pin:
+
+- **Delete the lockfile** to force re-resolution against the live Adoptium
+  API on the next run (use this to pull in a newer build for a coarse
+  request like `"21"`).
+- **Delete only the tarball** to trigger a self-heal redownload of the
+  exact build the lockfile pinned to (useful when the cached file is
+  corrupt but the pin is still wanted).
+
+Neither file is committed — the cache lives entirely on the host, same
+trust model as the cached Ubuntu VHDX.
 
 ---
 
@@ -275,6 +299,9 @@ Infrastructure-VM-Provisioner/
 |     |  |- disk/
 |     |  |  |- Invoke-DiskImageAcquisition.ps1  # Downloads, converts, caches base VHDX
 |     |  |  `- Invoke-BaseImagePatch.ps1        # Patches cloud-init datasource via WSL2
+|     |  |- jdk/
+|     |  |  |- Resolve-AdoptiumRelease.ps1      # Resolves version granularity via Adoptium v3 API
+|     |  |  `- Invoke-JdkAcquisition.ps1        # Downloads + verifies tarball, writes lockfile pin
 |     |  |- network/
 |     |  |  `- setup-network.ps1               # Creates VmLAN switch, host IP, NAT rule
 |     |  |- seed/
@@ -294,6 +321,7 @@ Infrastructure-VM-Provisioner/
 |  |- up/
 |  |  |- config/             # Unit tests for up/config helpers
 |  |  |- disk/               # Unit tests for up/disk
+|  |  |- jdk/                # Unit tests for up/jdk
 |  |  |- network/            # Unit tests for up/network
 |  |  |- seed/               # Unit tests for up/seed
 |  |  `- vm/                 # Unit tests for up/vm
