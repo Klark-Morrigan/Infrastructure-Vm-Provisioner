@@ -152,6 +152,14 @@ Version-string granularities — pick the level of pinning that suits you:
 that `"21.0.5+11"` (not a valid JSON number) follows the same rule as the
 other granularities.
 
+At provision time the requested granularity is resolved against the
+[Adoptium v3 API](https://api.adoptium.net/q/swagger-ui/) to a concrete build
+(for example `"21"` -> `21.0.6+7`) along with its SHA-256 and download URL.
+The resolved build is then pinned in a host-side lockfile next to the cached
+tarball so subsequent provisioning runs reuse the exact same bytes — no
+silent upgrades between runs. See the cache-management notes further down
+for how to invalidate the pin.
+
 ---
 
 ## provision.ps1
