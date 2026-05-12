@@ -41,6 +41,8 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\seed\iso.ps1"
 . "$PSScriptRoot\up\disk\Invoke-BaseImagePatch.ps1"
 . "$PSScriptRoot\up\disk\Invoke-DiskImageAcquisition.ps1"
+. "$PSScriptRoot\up\jdk\Resolve-AdoptiumRelease.ps1"
+. "$PSScriptRoot\up\jdk\Invoke-JdkAcquisition.ps1"
 . "$PSScriptRoot\up\seed\generate-seed-iso.ps1"
 . "$PSScriptRoot\up\network\setup-network.ps1"
 . "$PSScriptRoot\up\vm\create-vm.ps1"
@@ -118,7 +120,7 @@ Write-Host "$($vmsToProvision.Count) VM(s) queued for provisioning." `
 # ---------------------------------------------------------------------------
 # 6. Disk image acquisition
 #    Downloads, converts, patches, and copies the per-VM VHDX.
-#    Sets $vm._vhdxPath on each object for use in step 9.
+#    Sets $vm._vhdxPath on each object for use in step 10.
 #
 #    Invoke-BaseImagePatch (called internally) throws a 'Wsl2NotReady:'
 #    error if WSL2 is not yet installed or initialised. We catch it here
@@ -141,9 +143,27 @@ foreach ($vm in $vmsToProvision) {
 }
 
 # ---------------------------------------------------------------------------
-# 7. Cloud-init seed ISO generation
+# 7. JDK acquisition (optional, per VM)
+#    Runs only for VMs that opt in via the optional 'javaDevKit' field.
+#    Materialises the Temurin tarball on the host with a sidecar lockfile
+#    so re-provisioning is deterministic and offline-safe. Sets
+#    $vm._jdkTarballPath / $vm._jdkResolvedVersion for the seed-ISO step.
+#
+#    Placed after disk acquisition (which guarantees $vm.vhdPath exists)
+#    and before seed-ISO generation (which stages the tarball into the
+#    cidata payload).
+# ---------------------------------------------------------------------------
+
+foreach ($vm in $vmsToProvision) {
+    if ($vm.PSObject.Properties['javaDevKit']) {
+        Invoke-JdkAcquisition -Vm $vm
+    }
+}
+
+# ---------------------------------------------------------------------------
+# 8. Cloud-init seed ISO generation
 #    Builds meta-data, user-data, and network-config; writes the ISO.
-#    Sets $vm._seedIsoPath on each object for use in step 9.
+#    Sets $vm._seedIsoPath on each object for use in the VM-creation step.
 # ---------------------------------------------------------------------------
 
 foreach ($vm in $vmsToProvision) {
@@ -151,7 +171,7 @@ foreach ($vm in $vmsToProvision) {
 }
 
 # ---------------------------------------------------------------------------
-# 8. Virtual switch and NAT setup
+# 9. Virtual switch and NAT setup
 #    Switch and NAT names come from the config (default: VmLAN / VmLAN-NAT).
 #    Idempotent - safe to re-run.
 # ---------------------------------------------------------------------------
@@ -164,7 +184,7 @@ Invoke-NetworkSetup -VmsToProvision $vmsToProvision `
                     -NatName        $natName
 
 # ---------------------------------------------------------------------------
-# 9. VM creation
+# 10. VM creation
 #    Creates, configures, boots each VM, and waits for SSH readiness.
 # ---------------------------------------------------------------------------
 
