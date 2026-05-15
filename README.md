@@ -9,6 +9,7 @@
 - [Quick start](#quick-start)
 - [setup-secrets.ps1](#setup-secretsps1)
   - [Optional: install a JDK](#optional-install-a-jdk)
+  - [Optional: copy files to the VM](#optional-copy-files-to-the-vm)
 - [provision.ps1](#provisionps1)
 - [deprovision.ps1](#deprovisionps1)
 - [CI](#ci)
@@ -115,6 +116,7 @@ All fields are required. After first boot, connect via `ssh username@ipAddress`.
 | `switchName`    | string | Hyper-V Internal switch name. Default: `VmLAN`     |
 | `natName`       | string | Windows NAT rule name. Default: `VmLAN-NAT`        |
 | `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. See [Optional: install a JDK](#optional-install-a-jdk). |
+| `files`         | array?  | Optional. Copies arbitrary host files onto the VM. See [Optional: copy files to the VM](#optional-copy-files-to-the-vm). |
 
 ### Optional: install a JDK
 
@@ -184,6 +186,78 @@ To invalidate the pin:
 Neither file is committed — the cache lives entirely on the host, same
 trust model as the cached Ubuntu VHDX.
 
+**On the VM** — after the VM is up and cloud-init has finished, the
+post-provisioning orchestrator pushes the cached tarball over its
+already-open SSH session via the host file server (the same mechanism
+`Infrastructure-GitHubRunners` uses to ship the actions-runner binary).
+The `Install-Jdk` step then streams the tarball through `tar` directly
+into the install directory (no intermediate file on the VM disk) and
+writes a system-wide environment script:
+
+| Location                              | Purpose                                                                          |
+|---------------------------------------|----------------------------------------------------------------------------------|
+| `/opt/jdk-{vendor}-{resolvedVersion}/` | Install root. Path embeds the *resolved* build so coexisting installs do not collide if the requested version is later bumped. |
+| `/etc/profile.d/jdk.sh`               | Exports `JAVA_HOME` and prepends `$JAVA_HOME/bin` to `PATH`. Sourced by every login shell automatically. |
+
+The install runs **out-of-band**, not via cloud-init `runcmd`. cloud-init's
+job is to bootstrap the OS; the provisioner installs optional software.
+Same pattern as the runner install in Infrastructure-GitHubRunners. This
+keeps the seed ISO's lifecycle short (it carries the plaintext admin
+password and is detached as soon as SSH is reachable) and avoids putting
+cloud-init stage knowledge into the host provisioner.
+
+Because the export script lives under `/etc/profile.d/`, any user account
+later created on the VM — including those provisioned by
+[Infrastructure-Vm-Users](https://github.com/VitaliiAndreev/Infrastructure-Vm-Users) —
+sees `JAVA_HOME` and `java` on `PATH` without any additional configuration
+in that repo. This is the deliberate split of responsibilities: the
+provisioner owns "software the box needs"; Vm-Users owns identities.
+
+The extraction step is idempotent — if the install directory's `release`
+file already exists, re-runs of `provision.ps1` are a no-op for the JDK
+step.
+
+### Optional: copy files to the VM
+
+Add a `files` array to any VM entry to copy arbitrary host files onto the
+VM after cloud-init finishes. Each entry is a `{ source, target }` pair —
+local Windows path on the host, absolute Linux path on the VM.
+
+```jsonc
+{
+  "vmName": "dev-01",
+  "...":    "...",
+  "files": [
+    { "source": "C:\\jars\\mylib-1.0.jar", "target": "/opt/lib/mylib-1.0.jar" },
+    { "source": "C:\\fixtures\\seed.json", "target": "/var/data/seed.json" }
+  ]
+}
+```
+
+| Sub-field | Required | Notes                                                                  |
+|-----------|----------|------------------------------------------------------------------------|
+| `source`  | yes      | Windows path. **Must exist at validation time** — typos fail before any VM work begins. |
+| `target`  | yes      | Absolute Linux path on the VM (must start with `/`). Parent directory is created if absent. |
+
+The copy is performed over the same SSH session and host file server used
+by other post-provisioning steps (see [provision.ps1](#provisionps1) step
+10). The actual file transfer is delegated to
+`Infrastructure.HyperV`'s `Copy-VmFiles` cmdlet — the validator that
+backs the schema (`Assert-VmFilesField`) also lives there. Both are
+reused by `Infrastructure-Vm-Users` for its own (user-owned) file copies.
+Re-runs overwrite the target file with the current host source —
+the user's intent is "this file should look like this".
+
+**Ownership model in the provisioner**: every file copied by this step
+lands `root:root, 0644`. The provisioner runs *before* user creation, so
+no app users exist yet to chown to. Files needing a per-user owner belong
+in `Infrastructure-Vm-Users`'s `files` array, which runs after that step
+creates the users.
+
+`files` is **purely user data** — no install step (JDK, future Maven, …)
+reads from these paths. Each install is self-contained. This keeps the
+contract simple: the user owns the target paths and what lives there.
+
 ---
 
 ## provision.ps1
@@ -209,9 +283,14 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
    patched base image — no re-download or re-patch.
 5. Copies the base image to a per-VM disk (`{vmName}.vhdx`) and resizes it
    to `diskGB`.
-6. If the VM entry has a `javaDevKit` field, acquires the requested Temurin
-   tarball into `vhdPath` (see [Optional: install a JDK](#optional-install-a-jdk)).
-   Skipped entirely for VMs without `javaDevKit` - no network, no log noise.
+6. Runs host-side acquisitions for each VM via a small per-VM orchestrator
+   (`Invoke-VmAcquisitions`). Today it dispatches one acquirer:
+   - **`javaDevKit`** acquires the requested Temurin tarball into
+     `vhdPath` (see [Optional: install a JDK](#optional-install-a-jdk)).
+
+   Skipped silently for VMs that have no opt-in fields. New acquirers
+   plug in as one dispatch line in the orchestrator, not a new step
+   here.
 7. Generates a cloud-init seed ISO (`{vmName}-seed.iso`) in `vmConfigPath`
    containing `meta-data`, `user-data`, and `network-config`. On first boot
    cloud-init reads the ISO to create the OS user, enable SSH, and apply the
@@ -224,6 +303,20 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
    to `MicrosoftUEFICertificateAuthority` (required for Ubuntu), attaches
    the seed ISO, connects to `VmLAN`, and starts the VM. Polls port 22
    until cloud-init finishes, then detaches and deletes the seed ISO.
+10. For each VM, runs post-provisioning. Opens one host file server and
+    one SSH session per VM, waits once for cloud-init to finish, then
+    dispatches each enabled step:
+    - **`files`** copies host files to declared VM paths
+      (see [Optional: copy files to the VM](#optional-copy-files-to-the-vm)).
+    - **`javaDevKit`** extracts the prefetched Temurin tarball into
+      `/opt/jdk-{vendor}-{resolvedVersion}/` and writes
+      `/etc/profile.d/jdk.sh`
+      (see [Optional: install a JDK](#optional-install-a-jdk)).
+
+    Each step is self-contained — no step consumes files left by another
+    step. Adding a new step (e.g. Maven) is a one-function addition with
+    one dispatch line in `Invoke-VmPostProvisioning`. Skipped silently
+    for VMs that have no opt-in fields.
 
 ---
 
@@ -293,7 +386,7 @@ Infrastructure-VM-Provisioner/
 |     |- setup-secrets.ps1   # One-time vault setup
 |     |- common/
 |     |  `- config/
-|     |     |- ConvertFrom-VmConfigJson.ps1  # JSON parsing and validation
+|     |     |- ConvertFrom-VmConfigJson.ps1  # JSON parsing and validation; delegates the optional 'files' array to Infrastructure.HyperV's Assert-VmFilesField
 |     |     |- Assert-JavaDevKitField.ps1    # Validates optional javaDevKit field
 |     |     `- Get-SanitizedVmDisplay.ps1    # Masks password in diagnostic output
 |     |- up/
@@ -305,6 +398,11 @@ Infrastructure-VM-Provisioner/
 |     |  |- jdk/
 |     |  |  |- Resolve-AdoptiumRelease.ps1      # Resolves version granularity via Adoptium v3 API
 |     |  |  `- Invoke-JdkAcquisition.ps1        # Downloads + verifies tarball, writes lockfile pin
+|     |  |- acquire/
+|     |  |  `- Invoke-VmAcquisitions.ps1        # Per-VM host-side acquisition orchestrator; dispatches each per-software acquirer guarded by its opt-in field
+|     |  |- post/
+|     |  |  |- Invoke-VmPostProvisioning.ps1    # Per-VM transport orchestrator (file server + SSH + cloud-init wait), dispatches steps; calls Infrastructure.HyperV's Copy-VmFiles for the 'files' step
+|     |  |  `- Install-Jdk.ps1                  # Step: extracts the prefetched JDK tarball and writes /etc/profile.d/jdk.sh
 |     |  |- network/
 |     |  |  `- setup-network.ps1               # Creates VmLAN switch, host IP, NAT rule
 |     |  |- seed/
