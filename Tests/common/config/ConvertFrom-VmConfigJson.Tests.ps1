@@ -20,6 +20,12 @@ BeforeAll {
     # ConvertFrom-VmConfigJson.ps1 dot-sources Assert-JavaDevKitField.ps1, so
     # the real function is in scope. The wiring test below mocks it; behaviour
     # cases live in Assert-JavaDevKitField.Tests.ps1.
+    #
+    # Assert-VmFilesField is supplied by Infrastructure.HyperV at runtime.
+    # Stub it here so the wiring test can mock it without loading the module.
+    function Assert-VmFilesField {
+        param($Vm, $AllowedSubFields, $PostEntryValidator, $PostEntryValidatorContext)
+    }
 
     # Builds a minimal valid VM definition with all required fields populated.
     # Individual tests override specific fields as needed.
@@ -186,6 +192,28 @@ Describe 'ConvertFrom-VmConfigJson' {
             Mock Assert-JavaDevKitField { throw "javaDevKit.version must be a string" }
             { ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]" } |
                 Should -Throw -ExpectedMessage "*javaDevKit*"
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'Assert-VmFilesField wiring (Infrastructure.HyperV)' {
+    # ------------------------------------------------------------------
+
+        # Assert-VmFilesField is supplied by Infrastructure.HyperV at runtime.
+        # The function is stubbed in BeforeAll alongside the other module
+        # cmdlets so wiring tests can mock it without loading the module.
+
+        It 'invokes Assert-VmFilesField once per VM with default sub-fields' {
+            Mock Assert-VmFilesField {}
+            $json = "[$(New-ValidVmJson 'node-01'), $(New-ValidVmJson 'node-02')]"
+            @(ConvertFrom-VmConfigJson -Json $json)
+            Should -Invoke Assert-VmFilesField -Times 2 -Exactly
+        }
+
+        It 'propagates a throw from Assert-VmFilesField' {
+            Mock Assert-VmFilesField { throw "files[0].source path does not exist" }
+            { ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]" } |
+                Should -Throw -ExpectedMessage "*files*"
         }
     }
 
