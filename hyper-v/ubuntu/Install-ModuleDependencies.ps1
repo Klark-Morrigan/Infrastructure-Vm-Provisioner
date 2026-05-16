@@ -49,7 +49,7 @@ Import-Module Infrastructure.Common -Force -ErrorAction Stop
 # cloud-init readiness poll) and New-VmSshClient / Invoke-SshClientCommand /
 # Invoke-WithVmFileServer / Add-VmFileServerFile (used by the out-of-band
 # post-provisioning file transfers and software installs).
-Invoke-ModuleInstall -ModuleName 'Infrastructure.HyperV' -MinimumVersion '0.3.0'
+Invoke-ModuleInstall -ModuleName 'Infrastructure.HyperV' -MinimumVersion '0.3.1'
 
 # Posh-SSH is loaded only for its bundled Renci.SshNet.dll - the SSH.NET
 # types that New-VmSshClient instantiates. Posh-SSH's own cmdlets are not
