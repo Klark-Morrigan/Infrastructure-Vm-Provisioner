@@ -9,6 +9,7 @@
 - [Quick start](#quick-start)
 - [setup-secrets.ps1](#setup-secretsps1)
   - [Optional: install a JDK](#optional-install-a-jdk)
+  - [Removing a JDK](#removing-a-jdk)
   - [Optional: copy files to the VM](#optional-copy-files-to-the-vm)
 - [provision.ps1](#provisionps1)
 - [deprovision.ps1](#deprovisionps1)
@@ -135,10 +136,11 @@ unaffected.
 }
 ```
 
-| Sub-field | Required | Allowed values                                                |
-|-----------|----------|---------------------------------------------------------------|
-| `vendor`  | yes      | `temurin` (Adoptium Temurin — currently the only supported vendor). |
-| `version` | yes      | A **string** in one of four granularities (see below).         |
+| Sub-field   | Type      | Required | Default | Allowed values                                                |
+|-------------|-----------|----------|---------|---------------------------------------------------------------|
+| `vendor`    | string    | yes      | —       | `temurin` (Adoptium Temurin — currently the only supported vendor). |
+| `version`   | string    | yes      | —       | A **string** in one of four granularities (see below).         |
+| `uninstall` | boolean?  | no       | `false` | Set to `true` on a previously provisioned VM to remove the JDK on the next run. See [Removing a JDK](#removing-a-jdk). |
 
 Version-string granularities — pick the level of pinning that suits you:
 
@@ -216,6 +218,39 @@ provisioner owns "software the box needs"; Vm-Users owns identities.
 The extraction step is idempotent — if the install directory's `release`
 file already exists, re-runs of `provision.ps1` are a no-op for the JDK
 step.
+
+### Removing a JDK
+
+To remove a previously installed JDK from a long-lived VM without
+rebuilding it, set `javaDevKit.uninstall` to `true` on the same VM entry
+and re-run `provision.ps1`:
+
+```jsonc
+{
+  "vmName": "dev-01",
+  "...":    "...",
+  "javaDevKit": {
+    "vendor":    "temurin",
+    "version":   "21",
+    "uninstall": true
+  }
+}
+```
+
+`vendor` and `version` stay required so the schema is uniform whether the
+operator is installing or uninstalling. The removal step uses only
+`vendor` (as the `/opt/jdk-{vendor}-*` install-dir prefix); `version` is
+ignored.
+
+The provisioner does **not** rewrite the input JSON after a successful
+removal — the flag stays. Re-running with the flag still set is a clean
+no-op (everything is already gone), so it is safe to leave. When the
+operator is truly done with the JDK on that VM, delete the whole
+`javaDevKit` block in one explicit edit.
+
+The host-side tarball cache under `vhdPath` is **not** touched — it is
+keyed by `{vendor, requestedVersion}` and may be shared with other VMs
+that still want the install.
 
 ### Optional: copy files to the VM
 
