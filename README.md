@@ -335,6 +335,8 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
    dispatches one acquirer:
    - **`javaDevKit`** acquires the requested Temurin tarball into
      `vhdPath` (see [Optional: install a JDK](#optional-install-a-jdk)).
+     Skipped when `javaDevKit.uninstall` is `true` - no tarball is needed
+     for the removal path.
 
    Skipped silently for VMs that have no opt-in fields. Each acquirer is
    idempotent via its on-host lockfile, so a re-run against an already-
