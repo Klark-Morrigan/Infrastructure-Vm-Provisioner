@@ -242,6 +242,13 @@ operator is installing or uninstalling. The removal step uses only
 `vendor` (as the `/opt/jdk-{vendor}-*` install-dir prefix); `version` is
 ignored.
 
+On the VM, the removal step deletes `/opt/jdk-{vendor}-*` (matched by
+vendor prefix glob — the v1 invariant is one JDK per VM, so the prefix
+uniquely identifies the install), `/etc/profile.d/jdk.sh`, and any
+`/usr/local/bin` symlinks pointing into the removed install dir (the
+non-login-shell `PATH` wiring written by `Install-Jdk`). An empty glob
+match is a clean no-op.
+
 The provisioner does **not** rewrite the input JSON after a successful
 removal — the flag stays. Re-running with the flag still set is a clean
 no-op (everything is already gone), so it is safe to leave. When the
@@ -366,6 +373,10 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
       `/opt/jdk-{vendor}-{resolvedVersion}/` and writes
       `/etc/profile.d/jdk.sh`
       (see [Optional: install a JDK](#optional-install-a-jdk)).
+      When `javaDevKit.uninstall` is `true`, the orchestrator dispatches
+      the removal step instead (deletes `/opt/jdk-{vendor}-*`,
+      `/etc/profile.d/jdk.sh`, and stale `/usr/local/bin` symlinks) —
+      see [Removing a JDK](#removing-a-jdk).
 
     Each step is self-contained — no step consumes files left by another
     step. Adding a new step (e.g. Maven) is a one-function addition with
@@ -458,7 +469,8 @@ Infrastructure-VM-Provisioner/
 |     |  |  `- Invoke-VmAcquisitions.ps1        # Per-VM host-side acquisition orchestrator; dispatches each per-software acquirer guarded by its opt-in field
 |     |  |- post/
 |     |  |  |- Invoke-VmPostProvisioning.ps1    # Per-VM transport orchestrator (file server + SSH + cloud-init wait), dispatches steps; calls Infrastructure.HyperV's Copy-VmFiles for the 'files' step
-|     |  |  `- Install-Jdk.ps1                  # Step: extracts the prefetched JDK tarball and writes /etc/profile.d/jdk.sh
+|     |  |  |- Install-Jdk.ps1                  # Step: extracts the prefetched JDK tarball and writes /etc/profile.d/jdk.sh
+|     |  |  `- Uninstall-Jdk.ps1                # Step: removes /opt/jdk-{vendor}-*, /etc/profile.d/jdk.sh, and stale /usr/local/bin symlinks
 |     |  |- network/
 |     |  |  `- setup-network.ps1               # Creates VmLAN switch, host IP, NAT rule
 |     |  |- seed/
