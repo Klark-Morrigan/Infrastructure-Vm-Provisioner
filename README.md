@@ -403,9 +403,10 @@ Reads the same `VmProvisionerConfig` from the vault and for each VM definition:
    only file cleanup is attempted.
 3. Deletes the per-VM VHDX (`{vmName}.vhdx`) in `vhdPath`. If Windows VMMS
    still holds a handle after `Remove-VM`, deletion is retried up to 5 times
-   at 2-second intervals. If the file is still locked after all retries the
-   script throws with the path identified — re-running after a few seconds
-   retries the deletion.
+   with exponential backoff (capped at 30 s) via `Invoke-WithRetry` from
+   `Infrastructure.Common` using the file-lock retry strategy. If the file is
+   still locked after all retries the script throws with the path identified
+   — re-running after a few seconds retries the deletion.
 4. Deletes the seed ISO (`{vmName}-seed.iso`) in `vmConfigPath` if present.
    `provision.ps1` removes it after first boot, so absence is not an error.
 5. Deletes the VM configuration directory (`{vmConfigPath}/{vmName}/`) if

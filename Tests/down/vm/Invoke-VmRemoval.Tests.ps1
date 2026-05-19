@@ -5,7 +5,21 @@ BeforeAll {
     function Remove-VM     { param($Name, [switch]$Force) }
     function Remove-Item   { param($Path, [switch]$Recurse, [switch]$Force, $ErrorAction) }
     function Test-Path     { param($Path) }
-    function Start-Sleep   { param($Seconds) }
+
+    # remove-vm.ps1 wraps file deletions in Invoke-WithRetry (from
+    # Infrastructure.Common) with the file-lock retry strategy. Stub both
+    # as pass-throughs so these tests focus on Invoke-VmRemoval's
+    # orchestration; the retry loop itself is covered by
+    # Invoke-WithRetry.Tests.ps1 in Infrastructure.Common.
+    function Invoke-WithRetry {
+        param([scriptblock] $ScriptBlock, [hashtable[]] $RetryStrategy,
+              [hashtable] $BackoffStrategy, [int] $MaxAttempts,
+              [string] $OperationName)
+        return & $ScriptBlock
+    }
+    function New-FileLockRetryStrategy {
+        return @{ Name = 'FileLock'; ShouldRetry = { $false } }
+    }
 
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\down\vm\remove-vm.ps1"
 
@@ -20,12 +34,15 @@ BeforeAll {
 
     # Sets up all stubs in their neutral no-op form.
     function Initialize-Mocks {
-        Mock Get-VM      { [PSCustomObject]@{ State = 'Off' } }
-        Mock Stop-VM     { }
-        Mock Remove-VM   { }
-        Mock Test-Path   { $false }
-        Mock Remove-Item { }
-        Mock Start-Sleep { }
+        Mock Get-VM           { [PSCustomObject]@{ State = 'Off' } }
+        Mock Stop-VM          { }
+        Mock Remove-VM        { }
+        Mock Test-Path        { $false }
+        Mock Remove-Item      { }
+        Mock Invoke-WithRetry { param([scriptblock] $ScriptBlock) & $ScriptBlock }
+        Mock New-FileLockRetryStrategy {
+            @{ Name = 'FileLock'; ShouldRetry = { $false } }
+        }
     }
 }
 
@@ -147,35 +164,21 @@ Describe 'Invoke-VmRemoval' {
             { Invoke-VmRemoval -Vm (New-TestVm) } | Should -Not -Throw
         }
 
-        It 'retries VHDX deletion when the first attempt throws IOException' {
+        It 'wraps VHDX deletion in Invoke-WithRetry with the FileLock strategy and MaxAttempts 5' {
+            # The retry loop itself is covered by Invoke-WithRetry.Tests.ps1
+            # in Infrastructure.Common; here we only assert the call site
+            # plumbs the right strategy and attempt budget.
             Initialize-Mocks
             Mock Test-Path { param($Path) $Path -like '*node-01.vhdx' }
 
-            $script:_removeCallCount = 0
-            Mock Remove-Item {
-                $script:_removeCallCount++
-                # Succeed on the second attempt.
-                if ($script:_removeCallCount -eq 1) {
-                    throw [System.IO.IOException]::new('File locked')
-                }
+            Invoke-VmRemoval -Vm (New-TestVm)
+
+            Should -Invoke Invoke-WithRetry -Times 1 -Exactly -ParameterFilter {
+                $MaxAttempts -eq 5 -and
+                $RetryStrategy.Count -eq 1 -and
+                $RetryStrategy[0].Name -eq 'FileLock' -and
+                $OperationName -like '*node-01.vhdx*'
             }
-
-            { Invoke-VmRemoval -Vm (New-TestVm) } | Should -Not -Throw
-
-            Should -Invoke Remove-Item -Times 2 -Exactly -ParameterFilter {
-                $Path -like '*node-01.vhdx'
-            }
-        }
-
-        It 'throws after exhausting retries if the VHDX remains locked' {
-            Initialize-Mocks
-            Mock Test-Path { param($Path) $Path -like '*node-01.vhdx' }
-            Mock Remove-Item {
-                throw [System.IO.IOException]::new('File locked')
-            }
-
-            { Invoke-VmRemoval -Vm (New-TestVm) } |
-                Should -Throw -ExpectedMessage '*Could not delete*'
         }
     }
 
@@ -200,6 +203,18 @@ Describe 'Invoke-VmRemoval' {
 
             { Invoke-VmRemoval -Vm (New-TestVm) } | Should -Not -Throw
         }
+
+        It 'does not wrap seed ISO deletion in Invoke-WithRetry' {
+            # Seed ISOs are not held by VMMS - retry would only mask real
+            # errors. Asserting absence guards against accidental
+            # generalisation of the retry policy.
+            Initialize-Mocks
+            Mock Test-Path { param($Path) $Path -like '*node-01-seed.iso' }
+
+            Invoke-VmRemoval -Vm (New-TestVm)
+
+            Should -Invoke Invoke-WithRetry -Times 0
+        }
     }
 
     # ------------------------------------------------------------------
@@ -223,100 +238,19 @@ Describe 'Invoke-VmRemoval' {
 
             { Invoke-VmRemoval -Vm (New-TestVm) } | Should -Not -Throw
         }
-    }
-}
 
-Describe 'Remove-ItemWithRetry' {
+        It 'wraps config directory deletion in Invoke-WithRetry with the FileLock strategy and MaxAttempts 5' {
+            Initialize-Mocks
+            Mock Test-Path { param($Path) $Path -like '*Config\node-01' }
 
-    BeforeAll {
-        function Start-Sleep { param($Seconds) }
-        function Remove-Item { param($Path, [switch]$Recurse, [switch]$Force, $ErrorAction) }
-        Mock Start-Sleep { }
-    }
+            Invoke-VmRemoval -Vm (New-TestVm)
 
-    It 'succeeds without retrying when Remove-Item succeeds on first attempt' {
-        Mock Remove-Item { }
-
-        { Remove-ItemWithRetry -Path 'C:\test\file.vhdx' } | Should -Not -Throw
-
-        Should -Invoke Remove-Item -Times 1 -Exactly
-    }
-
-    It 'passes -Recurse and -Force to Remove-Item' {
-        # -Recurse is required for directories (e.g. VM config dir containing
-        # files); -Force covers read-only and hidden items.
-        Mock Remove-Item { }
-
-        Remove-ItemWithRetry -Path 'C:\test\dir'
-
-        Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter {
-            $Recurse -eq $true -and $Force -eq $true
-        }
-    }
-
-    It 'retries the specified number of times before throwing' {
-        Mock Remove-Item {
-            throw [System.IO.IOException]::new('File locked')
-        }
-
-        { Remove-ItemWithRetry -Path 'C:\test\file.vhdx' -MaxAttempts 3 } |
-            Should -Throw -ExpectedMessage '*Could not delete*'
-
-        Should -Invoke Remove-Item -Times 3 -Exactly
-    }
-
-    It 'includes the locked path in the error message' {
-        # The operator needs to know which file is still held so they can
-        # identify the locking process or re-run after it releases the handle.
-        Mock Remove-Item {
-            throw [System.IO.IOException]::new('File locked')
-        }
-
-        { Remove-ItemWithRetry -Path 'C:\Hyper-V\Disks\node-01.vhdx' -MaxAttempts 1 } |
-            Should -Throw -ExpectedMessage '*C:\Hyper-V\Disks\node-01.vhdx*'
-    }
-
-    It 'sleeps between retry attempts' {
-        $script:_attempt = 0
-        Mock Remove-Item {
-            $script:_attempt++
-            if ($script:_attempt -lt 3) {
-                throw [System.IO.IOException]::new('File locked')
+            Should -Invoke Invoke-WithRetry -Times 1 -Exactly -ParameterFilter {
+                $MaxAttempts -eq 5 -and
+                $RetryStrategy.Count -eq 1 -and
+                $RetryStrategy[0].Name -eq 'FileLock' -and
+                $OperationName -like '*Config\node-01*'
             }
         }
-
-        { Remove-ItemWithRetry -Path 'C:\test\file.vhdx' -MaxAttempts 3 -IntervalSeconds 2 } |
-            Should -Not -Throw
-
-        # 2 failures each followed by a sleep before the 3rd succeeds.
-        Should -Invoke Start-Sleep -Times 2 -Exactly -ParameterFilter {
-            $Seconds -eq 2
-        }
-    }
-
-    It 'does not sleep after the final failing attempt' {
-        Mock Remove-Item {
-            throw [System.IO.IOException]::new('File locked')
-        }
-
-        { Remove-ItemWithRetry -Path 'C:\test\file.vhdx' -MaxAttempts 3 } |
-            Should -Throw
-
-        # 3 attempts, 3 failures - sleep only between attempts 1-2 and 2-3,
-        # not after attempt 3 (would delay the throw with no retry following).
-        Should -Invoke Start-Sleep -Times 2 -Exactly
-    }
-
-    It 'does not retry non-IOException errors' {
-        # UnauthorizedAccessException (permissions) and similar errors should
-        # propagate immediately - retrying them is wrong and masks the real cause.
-        Mock Remove-Item {
-            throw [System.UnauthorizedAccessException]::new('Access denied')
-        }
-
-        { Remove-ItemWithRetry -Path 'C:\test\file.vhdx' -MaxAttempts 3 } |
-            Should -Throw -ExpectedMessage '*Access denied*'
-
-        Should -Invoke Remove-Item -Times 1 -Exactly
     }
 }

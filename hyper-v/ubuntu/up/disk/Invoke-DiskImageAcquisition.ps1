@@ -144,10 +144,18 @@ function Invoke-DiskImageAcquisition {
     }
 
     # ------------------------------------------------------------------
-    # Patch cloud-init datasource config in the base VHDX.
-    # See Invoke-BaseImagePatch.ps1 for full implementation details.
+    # Patch the base VHDX (cloud-init NoCloud datasource + sshd ordering
+    # after cloud-config.service). See Invoke-BaseImagePatch.ps1 for the
+    # full implementation. The sentinel name encodes the patch revision:
+    #   .nocloud-patched     - original (only NoCloud datasource)
+    #   .image-patched       - v1 of Patch 2, used cloud-init.target -
+    #                          BROKEN: caused sshd to never start
+    #   .image-patched-v2    - current (cloud-config.service, works)
+    # Bumping the name on each substantive change forces existing
+    # patched images to be re-patched and pick up the fix; the new
+    # patch run also cleans up obsolete drop-in files from prior revs.
     # ------------------------------------------------------------------
-    $patchedSentinel = $baseImagePath -replace '\.vhdx$', '.nocloud-patched'
+    $patchedSentinel = $baseImagePath -replace '\.vhdx$', '.image-patched-v2'
     Invoke-BaseImagePatch -BaseImagePath $baseImagePath -SentinelPath $patchedSentinel
 
     # ------------------------------------------------------------------

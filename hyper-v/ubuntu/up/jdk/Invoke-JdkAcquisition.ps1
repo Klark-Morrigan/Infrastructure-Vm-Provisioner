@@ -77,8 +77,9 @@ function Invoke-JdkAcquisition {
             )
 
             try {
-                Invoke-WithNetworkRetry `
+                Invoke-WithRetry `
                     -OperationName "JDK self-heal download ($cacheKey)" `
+                    -RetryStrategy (New-TransientNetworkRetryStrategy) `
                     -ScriptBlock {
                         Invoke-WebRequest -Uri $lock.sourceUrl `
                                           -OutFile $tarballPath `
@@ -124,8 +125,9 @@ function Invoke-JdkAcquisition {
         Write-Host "    From: $($release.DownloadUrl)"
         Write-Host "    To  : $tarballPath"
 
-        Invoke-WithNetworkRetry `
+        Invoke-WithRetry `
             -OperationName "JDK tarball download ($cacheKey)" `
+            -RetryStrategy (New-TransientNetworkRetryStrategy) `
             -ScriptBlock {
                 Invoke-WebRequest -Uri $release.DownloadUrl `
                                   -OutFile $tarballPath `

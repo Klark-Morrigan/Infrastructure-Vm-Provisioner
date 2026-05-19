@@ -14,15 +14,17 @@
 #        - If present: Stop (when running), then Remove-VM.
 #        - If absent: skip Hyper-V teardown (idempotent re-run after partial
 #          failure - VM may have been removed but file cleanup did not finish).
-#     2. Delete the per-VM VHDX with a retry loop.
+#     2. Delete the per-VM VHDX with a file-lock retry policy.
 #        Windows VMMS releases its handle on the VHDX asynchronously after
 #        Remove-VM returns. Immediate deletion would throw IOException. Up to
-#        5 attempts at 2-second intervals; throws on exhaustion identifying
-#        the locked path so the operator can re-run when the handle is freed.
+#        5 attempts with exponential backoff (capped at 30 s); throws on
+#        exhaustion identifying the locked path so the operator can re-run
+#        when the handle is freed. Retry is provided by Invoke-WithRetry
+#        (Infrastructure.Common) with New-FileLockRetryStrategy.
 #     3. Delete the seed ISO if present. Absence is not an error - provision.ps1
 #        removes it after first boot, so it is routinely absent.
-#     4. Delete the VM configuration directory with the same retry loop as the
-#        VHDX (Hyper-V config files are also held by VMMS until it flushes).
+#     4. Delete the VM configuration directory with the same retry policy as
+#        the VHDX (Hyper-V config files are also held by VMMS until it flushes).
 # ---------------------------------------------------------------------------
 function Invoke-VmRemoval {
     [CmdletBinding()]
@@ -58,7 +60,13 @@ function Invoke-VmRemoval {
     # ------------------------------------------------------------------
     $vhdxPath = Join-Path $Vm.vhdPath "$($Vm.vmName).vhdx"
     if (Test-Path $vhdxPath) {
-        Remove-ItemWithRetry -Path $vhdxPath
+        Invoke-WithRetry `
+            -OperationName "delete $vhdxPath" `
+            -RetryStrategy (New-FileLockRetryStrategy) `
+            -MaxAttempts   5 `
+            -ScriptBlock   {
+                Remove-Item -Path $vhdxPath -Recurse -Force -ErrorAction Stop
+            }
         Write-Host "  [OK] VHDX deleted." -ForegroundColor Green
     }
 
@@ -76,50 +84,15 @@ function Invoke-VmRemoval {
     # ------------------------------------------------------------------
     $vmConfigDir = Join-Path $Vm.vmConfigPath $Vm.vmName
     if (Test-Path $vmConfigDir) {
-        Remove-ItemWithRetry -Path $vmConfigDir
+        Invoke-WithRetry `
+            -OperationName "delete $vmConfigDir" `
+            -RetryStrategy (New-FileLockRetryStrategy) `
+            -MaxAttempts   5 `
+            -ScriptBlock   {
+                Remove-Item -Path $vmConfigDir -Recurse -Force -ErrorAction Stop
+            }
         Write-Host "  [OK] VM config directory deleted." -ForegroundColor Green
     }
 
     Write-Host "  [OK] $($Vm.vmName) removed." -ForegroundColor Green
-}
-
-# ---------------------------------------------------------------------------
-# Remove-ItemWithRetry
-#   Deletes a file or directory, retrying on IOException up to $MaxAttempts
-#   times with $IntervalSeconds between each attempt.
-#
-#   VMMS (Virtual Machine Management Service) releases its handles on VHDX
-#   and config directory files asynchronously after Remove-VM returns. An
-#   immediate Remove-Item would throw IOException: The process cannot access
-#   the file. Retrying allows the handle to be freed before giving up.
-# ---------------------------------------------------------------------------
-function Remove-ItemWithRetry {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string] $Path,
-
-        [int] $MaxAttempts    = 5,
-        [int] $IntervalSeconds = 2
-    )
-
-    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-        try {
-            Remove-Item -Path $Path -Recurse -Force -ErrorAction Stop
-            return
-        }
-        catch [System.IO.IOException] {
-            if ($attempt -lt $MaxAttempts) {
-                Write-Host ("  File still locked, retrying in $IntervalSeconds s " +
-                    "($attempt/$MaxAttempts) ...")
-                Start-Sleep -Seconds $IntervalSeconds
-            }
-        }
-    }
-
-    throw (
-        "Could not delete '$Path' after $MaxAttempts attempts - " +
-        "VMMS may still hold a handle. Re-run deprovision.ps1 after a " +
-        "few seconds to retry the file deletion."
-    )
 }

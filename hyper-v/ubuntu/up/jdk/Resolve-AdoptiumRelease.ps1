@@ -35,12 +35,13 @@ function Invoke-AdoptiumFeatureReleases {
         "&page_size=$PageSize&sort_order=DESC"
     )
 
-    # Wrapped in Invoke-WithNetworkRetry so transient DNS / connectivity
-    # blips against api.adoptium.net do not fail a provision run. 4xx
-    # responses (e.g. an unknown major version) propagate immediately -
-    # see Test-TransientNetworkException.
-    return Invoke-WithNetworkRetry `
+    # Wrapped in Invoke-WithRetry with the transient-network strategy so
+    # transient DNS / connectivity blips against api.adoptium.net do not
+    # fail a provision run. 4xx responses (e.g. an unknown major version)
+    # propagate immediately - see New-TransientNetworkRetryStrategy.
+    return Invoke-WithRetry `
         -OperationName "Adoptium feature_releases lookup (major $Major)" `
+        -RetryStrategy (New-TransientNetworkRetryStrategy) `
         -ScriptBlock { Invoke-RestMethod -Uri $uri -UseBasicParsing }
 }
 

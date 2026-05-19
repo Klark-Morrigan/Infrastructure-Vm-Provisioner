@@ -6,15 +6,38 @@
 
 # ---------------------------------------------------------------------------
 # Invoke-BaseImagePatch
-#   Patches the cloud-init datasource config inside a base VHDX so that the
-#   NoCloud seed ISO is consulted on first boot instead of the Azure IMDS.
+#   Applies two first-boot fixes inside a base VHDX so the same patch pass
+#   covers both. Both writes happen on the same mounted root partition.
 #
-#   The Ubuntu Azure cloud image ships with a datasource restriction:
-#     datasource_list: [ Azure ]
-#   On a local Hyper-V host, cloud-init cannot reach the Azure IMDS, falls
-#   back to 'None', and never reads the seed ISO. This function writes a
-#   higher-priority override file (99-nocloud.cfg) into
-#   /etc/cloud/cloud.cfg.d/ inside the VHDX to add NoCloud.
+#   Patch 1: cloud-init NoCloud datasource
+#     The Ubuntu Azure cloud image ships with a datasource restriction:
+#       datasource_list: [ Azure ]
+#     On a local Hyper-V host, cloud-init cannot reach the Azure IMDS,
+#     falls back to 'None', and never reads the seed ISO. This function
+#     writes a higher-priority override file (99-nocloud.cfg) into
+#     /etc/cloud/cloud.cfg.d/ inside the VHDX to add NoCloud.
+#
+#   Patch 2: order sshd after cloud-config.service
+#     Ubuntu cloud images ship with openssh-server already installed and
+#     enabled, so ssh.service binds port 22 at boot - BEFORE cloud-init's
+#     'users' and 'set_passwords' modules have provisioned the OS user.
+#     The host's TCP-port probe then returns "SSH reachable" while
+#     password auth still fails with "Permission denied (password)".
+#
+#     This drop-in adds After=cloud-config.service + Wants= to ssh.service
+#     and ssh.socket so sshd does not bind port 22 until the config stage
+#     has finished. cloud-config.service runs the set_passwords module,
+#     so once it completes the OS user has a usable password.
+#
+#     cloud-config.service was chosen over the broader cloud-init.target
+#     for two reasons: (1) it is a strictly narrower wait - only modules
+#     in the 'config' stage have to finish, not also 'final' stage which
+#     runs runcmd / scripts-user and could hang on user content; (2)
+#     ordering against cloud-init.target risks an activation deadlock
+#     because both ssh.service and cloud-init.target are WantedBy=
+#     multi-user.target, so a poisoned cloud-init.target keeps sshd
+#     held off indefinitely. cloud-config.service is a single oneshot
+#     unit with bounded runtime.
 #
 #   Implementation:
 #     1. Skip immediately if the sentinel file is present (already patched).
@@ -35,7 +58,15 @@
 #   Parameters:
 #     BaseImagePath  - absolute path to the base .vhdx to patch.
 #     SentinelPath   - absolute path to the sentinel file that marks the
-#                      patch as done (conventionally <base>.nocloud-patched).
+#                      patch as done (conventionally
+#                      <base>.image-patched-v2). The "-v2" suffix forces a
+#                      re-patch on images previously patched with v1 of
+#                      Patch 2, which used After=cloud-init.target and
+#                      caused sshd to never start (cloud-init.target was
+#                      the wrong sync point; see Patch 2 doc above for the
+#                      switch to cloud-config.service). The re-patch run
+#                      also removes the obsolete 10-wait-cloud-init.conf
+#                      drop-in left behind by v1.
 # ---------------------------------------------------------------------------
 
 function Invoke-BaseImagePatch {
@@ -136,10 +167,17 @@ function Invoke-BaseImagePatch {
 
         # Shell script: iterate partition devices (sdX1, sdX2, ...), try
         # mounting each as ext4, confirm root by checking /etc/os-release,
-        # then write 99-nocloud.cfg and sync before unmounting.
-        # sync ensures kernel buffers are flushed to the backing VHDX
-        # before we detach, which prevents a silent data-loss scenario
-        # where the write succeeds in kernel memory but never reaches disk.
+        # then write both patches (cloud-init NoCloud datasource + sshd
+        # ordering drop-in) and sync before unmounting. sync ensures
+        # kernel buffers are flushed to the backing VHDX before we detach,
+        # which prevents a silent data-loss scenario where the writes
+        # succeed in kernel memory but never reach disk.
+        #
+        # Patch 2 writes the same drop-in into both ssh.service.d/ and
+        # ssh.socket.d/. ssh.socket may not exist on every image (Ubuntu
+        # Server defaults to ssh.service); an orphan drop-in directory is
+        # harmless to systemd, so writing both unconditionally is simpler
+        # than introspecting which unit is active.
         #
         # The script is encoded as base64 so it can be passed to WSL as a
         # single argument to 'echo', avoiding:
@@ -156,6 +194,12 @@ function Invoke-BaseImagePatch {
             '      CFG="$M/etc/cloud/cloud.cfg.d"'
             '      mkdir -p "$CFG"'
             '      printf "datasource_list: [ NoCloud, None ]\n" > "$CFG/99-nocloud.cfg"'
+            '      for UNIT in ssh.service ssh.socket; do'
+            '        DROP="$M/etc/systemd/system/$UNIT.d"'
+            '        mkdir -p "$DROP"'
+            '        printf "[Unit]\nAfter=cloud-config.service\nWants=cloud-config.service\n" > "$DROP/10-wait-cloud-config.conf"'
+            '        rm -f "$DROP/10-wait-cloud-init.conf"'
+            '      done'
             '      echo "OK:$P:$(ls $CFG)"'
             '      sync'
             '      umount "$M"'
