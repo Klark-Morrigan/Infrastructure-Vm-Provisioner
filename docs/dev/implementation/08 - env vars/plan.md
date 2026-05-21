@@ -344,13 +344,16 @@ the env-vars path.
   "block written", "block updated with one entry removed", "block
   removed via empty entries" - and three phases is the minimum to
   cover them without inventing a per-feature cross-VM dimension.
-- **A pre-existing out-of-block line is seeded by cloud-init or by
-  phase 1 setup** (e.g. `MARKER_OUTSIDE=untouched` written outside
-  the managed block before the first provision run). Reason: lets
-  the assertions prove "lines outside the block are preserved
-  byte-for-byte" on real infrastructure rather than relying on
-  Ubuntu's default `PATH=...` line alone, which is not guaranteed
-  across base images.
+- **A pre-existing out-of-block line is seeded on VM1 via SSH after
+  phase 1's `provision.ps1` returns, and preservation is asserted in
+  phases 2 and 3** (the managed-block re-write and managed-block
+  removal paths). Reason: VM1 does not exist until phase 1's
+  `provision.ps1` creates it, so seeding "before the first provision"
+  would require either cloud-init plumbing (out of step 5's scope) or
+  invoking `provision.ps1` twice in phase 1. The meaningful claim -
+  "lines outside the block are preserved across re-runs" - is fully
+  covered by phases 2 and 3, where the transport rewrites and then
+  removes the block with the marker already present.
 - **No "two consumers, one file" phase.** Reason: only one consumer
   (the provisioner) writes to `/etc/environment` today; the
   multi-consumer claim is upstream's contract and is already covered
@@ -377,9 +380,9 @@ and the observed value on failure.
 
 | Phase | JSON state | Action | Assertions |
 |-------|-----------|--------|------------|
-| 1 | One VM, `envVars = { blockName: 'e2e-ci', entries: [FOO_HOME, BAR_VAR] }`; out-of-block sentinel `MARKER_OUTSIDE=untouched` seeded on the VM before `provision.ps1` runs. | `provision.ps1` | **On VM:** E1-E5 (below). |
-| 2 | `envVars.entries` reduced to `[FOO_HOME]` (BAR_VAR removed). | `provision.ps1` again | **On VM:** E1, E2, E3 (FOO_HOME still present, BAR_VAR's line gone from the block, MARKER_OUTSIDE untouched), plus E6 (file mtime updated relative to phase 1 - the transport rewrote the block). |
-| 3 | `envVars.entries: []` (operator's "remove the block" intent). | `provision.ps1` again | **On VM:** E7 (BEGIN/END markers are gone), E8 (FOO_HOME line is gone), E2/E3 still hold for MARKER_OUTSIDE. |
+| 1 | One VM, `envVars = { blockName: 'e2e-ci', entries: [FOO_HOME, BAR_VAR] }`. | `provision.ps1` | **On VM:** E1, E2, E4, E5. **After assertions:** seed `MARKER_OUTSIDE="untouched"` outside the managed block via SSH, then snapshot `/etc/environment`'s mtime so phase 2 can compare. |
+| 2 | `envVars.entries` reduced to `[FOO_HOME]` (BAR_VAR removed). | `provision.ps1` again | **On VM:** E1, E2, E3 (MARKER_OUTSIDE survived the re-write), E4' (FOO_HOME still inside the block, BAR_VAR line gone from the block), E6 (file mtime updated relative to the phase-1 post-seed snapshot - the transport rewrote the block). |
+| 3 | `envVars.entries: []` (operator's "remove the block" intent). | `provision.ps1` again | **On VM:** E7 (BEGIN/END markers are gone), E8 (FOO_HOME line is gone), E1 (mode unchanged), E3 (MARKER_OUTSIDE still present). |
 
 **Assertion blocks**
 
@@ -443,11 +446,11 @@ sequenceDiagram
     participant VM as VM (Ubuntu)
 
     Note over E2E,VM: Phase 1 - first provision (two entries)
-    E2E->>VM: seed MARKER_OUTSIDE="untouched"
     E2E->>Vault: write VM (envVars = block e2e-ci, [FOO_HOME, BAR_VAR])
     E2E->>Prov: provision.ps1
     Prov->>VM: Set-VmEnvironmentVariables (write block)
-    E2E->>VM: assert E1-E5, snapshot /etc/environment mtime
+    E2E->>VM: assert E1, E2, E4, E5
+    E2E->>VM: seed MARKER_OUTSIDE="untouched", snapshot /etc/environment mtime
 
     Note over E2E,VM: Phase 2 - re-provision with BAR_VAR removed
     E2E->>Vault: write VM (envVars.entries = [FOO_HOME])
