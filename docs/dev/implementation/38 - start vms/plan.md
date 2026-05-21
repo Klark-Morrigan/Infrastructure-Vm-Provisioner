@@ -271,10 +271,12 @@ provision diff.
 **Decisions locked**
 
 - Same dot-source placement and one-line replacement as Step 3.
-- No new test file is added: there is no
-  `Tests/deprovision.Tests.ps1` today. If one is added in the
-  future it inherits the same "mock the helper, do not spy on
-  SecretManagement" rule that Step 3 establishes.
+- A new `Tests/deprovision.Tests.ps1` lands alongside the script
+  change, mirroring `Tests/provision.Tests.ps1`'s AST-based
+  structural style (deprovision.ps1 has top-level side effects so
+  dot-sourcing it from a test is unsafe). The suite pins the
+  helper delegation **and** the load-bearing phase ordering so
+  future edits cannot silently regress either.
 
 **Files**
 
@@ -284,13 +286,30 @@ provision diff.
   "Parse and validate JSON" blocks. Add the helper dot-source
   and the one-line call. Section numbering in the surviving
   comments is shifted down accordingly.
+- `Tests/deprovision.Tests.ps1` (new) - Pester suite per the
+  matrix below.
 
 **Tests (unit, mocked)**
 
-- No new unit test is added for `deprovision.ps1` itself
-  (the suite does not exist today and adding one is a separate
-  concern). The bootstrap path is covered end-to-end by the
-  `Read-VmProvisionerConfig` suite from Step 2.
+AST-based structural assertions (no execution of `deprovision.ps1`).
+Behavioural coverage of each called function lives next to that
+function; this suite covers only the wiring `deprovision.ps1` itself
+adds.
+
+- Bootstrap delegation: dot-sources `Read-VmProvisionerConfig.ps1`;
+  invokes `Read-VmProvisionerConfig` exactly once; does not call
+  `Get-SecretVault`, `Get-Secret`, or `Import-Module` directly
+  (the helper owns the SecretManagement bootstrap).
+- Teardown wiring: dot-sources `Assert-GatewayConsistency.ps1`,
+  `remove-vm.ps1`, `teardown-network.ps1`; calls
+  `Assert-GatewayConsistency`, `Invoke-VmRemoval` (inside a
+  `foreach`), and `Invoke-NetworkTeardown` exactly once each.
+- Phase ordering: `Read-VmProvisionerConfig` precedes
+  `Assert-GatewayConsistency`; `Assert-GatewayConsistency`
+  precedes `Invoke-VmRemoval`; `Invoke-VmRemoval` precedes
+  `Invoke-NetworkTeardown` (running network teardown before
+  per-VM removal would cut the host vNIC out from under VMs that
+  still need to be stopped gracefully).
 
 **README update**
 
