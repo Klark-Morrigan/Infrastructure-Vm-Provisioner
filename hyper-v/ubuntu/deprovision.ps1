@@ -39,58 +39,23 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-. "$PSScriptRoot\common\config\Get-SanitizedVmDisplay.ps1"
 . "$PSScriptRoot\common\config\ConvertFrom-VmConfigJson.ps1"
+. "$PSScriptRoot\common\config\Get-SanitizedVmDisplay.ps1"
+. "$PSScriptRoot\common\config\Read-VmProvisionerConfig.ps1"
 . "$PSScriptRoot\down\config\Assert-GatewayConsistency.ps1"
 . "$PSScriptRoot\down\vm\remove-vm.ps1"
 . "$PSScriptRoot\down\network\teardown-network.ps1"
 
 # ---------------------------------------------------------------------------
-# 1. Ensure SecretManagement modules are loaded
-#    Import only - deprovisioning should have no side effects on the module
-#    environment. Installing modules is setup-secrets.ps1's responsibility.
+# 1. Load + parse + validate the VmProvisionerConfig secret in one call.
+#    Helper owns the SecretManagement bootstrap, vault read, and schema
+#    validation - keeping this script focused on the deprovisioning pipeline.
 # ---------------------------------------------------------------------------
 
-foreach ($mod in @(
-    'Microsoft.PowerShell.SecretManagement',
-    'Microsoft.PowerShell.SecretStore'
-)) {
-    if (-not (Get-Module -ListAvailable -Name $mod)) {
-        throw "Module '$mod' is not installed. Run setup-secrets.ps1 first."
-    }
-    Import-Module $mod -ErrorAction Stop
-}
+$vmDefs = Read-VmProvisionerConfig
 
 # ---------------------------------------------------------------------------
-# 2. Read VmProvisionerConfig from the local vault
-# ---------------------------------------------------------------------------
-
-$vaultName  = 'VmProvisioner'
-$secretName = 'VmProvisionerConfig'
-
-Write-Host "Reading '$secretName' from vault '$vaultName' ..." -ForegroundColor Cyan
-
-$vault = Get-SecretVault -Name $vaultName -ErrorAction SilentlyContinue
-if ($null -eq $vault) {
-    throw "Vault '$vaultName' not found. Run setup-secrets.ps1 first."
-}
-
-$configJson = Get-Secret -Vault $vaultName -Name $secretName `
-    -AsPlainText -ErrorAction Stop
-
-# ---------------------------------------------------------------------------
-# 3. Parse and validate JSON
-#    Done here (not relying solely on setup-secrets.ps1) because the vault
-#    could hold stale or manually-edited data. Failing fast is safer than
-#    discovering a missing field mid-deprovisioning.
-# ---------------------------------------------------------------------------
-
-$vmDefs = ConvertTo-Array (ConvertFrom-VmConfigJson -Json $configJson)
-Write-Host "[OK] Config validated - $($vmDefs.Count) VM definition(s) found." `
-    -ForegroundColor Green
-
-# ---------------------------------------------------------------------------
-# 4. Validate gateway consistency
+# 2. Validate gateway consistency
 #    All VMs must share the same gateway - they are all attached to the same
 #    Internal switch during provisioning. The gateway is needed to call
 #    Invoke-NetworkTeardown, so this check runs here rather than inside that
@@ -102,7 +67,7 @@ $switchName = $vmDefs[0].switchName
 $natName    = $vmDefs[0].natName
 
 # ---------------------------------------------------------------------------
-# 5. Per-VM removal
+# 3. Per-VM removal
 #    Each VM is stopped and removed from Hyper-V, then its VHDX, seed ISO,
 #    and config directory are deleted. If a VM is already absent from Hyper-V
 #    (re-run after partial failure), only the file cleanup is attempted.
@@ -113,7 +78,7 @@ foreach ($vm in $vmDefs) {
 }
 
 # ---------------------------------------------------------------------------
-# 6. Shared network teardown
+# 4. Shared network teardown
 #    Invoke-NetworkTeardown checks internally whether any VMs are still
 #    attached to VmLAN before removing network objects. VMs outside the
 #    config that remain on the switch will cause teardown to be skipped,

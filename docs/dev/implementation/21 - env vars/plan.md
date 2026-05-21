@@ -19,13 +19,13 @@ See [problem.md](problem.md) for context, schema, and rationale.
 provision-time, so the floor must be at least 0.7.0 before any later step
 can run on a clean machine. Splitting the version pin from the behavioural
 changes keeps diffs focused, mirroring
-[07 - ci jars Step 1](../07%20-%20ci%20jars/plan.md#step-1---bump-infrastructurehyperv-dependency-to-the-latest).
+[34 - ci jars Step 1](../34%20-%20ci%20jars/plan.md#step-1---bump-infrastructurehyperv-dependency-to-the-latest).
 
 **Decisions locked**
 
 - The current floor in
   [Install-ModuleDependencies.ps1](../../../../hyper-v/ubuntu/Install-ModuleDependencies.ps1)
-  is already `0.7.0` (set by 07 - ci jars). Read the
+  is already `0.7.0` (set by 34 - ci jars). Read the
   [HyperV psd1](../../../../../Infrastructure-HyperV/Infrastructure.HyperV/Infrastructure.HyperV.psd1)
   `ModuleVersion` at implementation time; if it has advanced past 0.7.0
   bump to that latest, otherwise this step is a no-op confirmation
