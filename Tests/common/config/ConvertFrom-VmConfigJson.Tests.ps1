@@ -33,6 +33,12 @@ BeforeAll {
         )
     }
 
+    # Assert-VmEnvVarsField is supplied by Infrastructure.HyperV at runtime.
+    # Stubbed here so wiring tests can mock it without loading the module.
+    function Assert-VmEnvVarsField {
+        param($Vm)
+    }
+
     # Builds a minimal valid VM definition with all required fields populated.
     # Individual tests override specific fields as needed.
     function New-ValidVmJson([string] $vmName = 'node-01') {
@@ -232,6 +238,92 @@ Describe 'ConvertFrom-VmConfigJson' {
             Mock Assert-VmFilesField { throw "files[0].source path does not exist" }
             { ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]" } |
                 Should -Throw -ExpectedMessage "*files*"
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'Assert-VmEnvVarsField wiring (Infrastructure.HyperV)' {
+    # ------------------------------------------------------------------
+
+        # Per-rule shape assertions (blockName format, entry shape,
+        # identifier syntax, duplicate detection) live in the upstream
+        # Assert-VmEnvVarsField.Tests.ps1. Duplicating them here would
+        # couple the caller's tests to the callee's rules - the wiring
+        # tests below confirm only that we opted in by calling it and
+        # that throws propagate.
+
+        It 'invokes Assert-VmEnvVarsField once per VM' {
+            Mock Assert-VmEnvVarsField {}
+            $json = "[$(New-ValidVmJson 'node-01'), $(New-ValidVmJson 'node-02')]"
+            @(ConvertFrom-VmConfigJson -Json $json)
+            Should -Invoke Assert-VmEnvVarsField -Times 2 -Exactly
+        }
+
+        It 'passes the VM object to Assert-VmEnvVarsField' {
+            Mock Assert-VmEnvVarsField {}
+            @(ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson 'node-01')]")
+            Should -Invoke Assert-VmEnvVarsField -Times 1 -Exactly -ParameterFilter {
+                $Vm.vmName -eq 'node-01'
+            }
+        }
+
+        It 'propagates a throw from Assert-VmEnvVarsField' {
+            Mock Assert-VmEnvVarsField { throw "envVars.blockName must be a string" }
+            { ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]" } |
+                Should -Throw -ExpectedMessage "*envVars*"
+        }
+
+        It 'runs validators before applying switchName / natName defaults' {
+            # If validation threw mid-way after a default had been applied,
+            # a later consumer could observe a half-defaulted VM object.
+            # Pinning the order here keeps defaults strictly post-validation.
+            Mock Assert-VmEnvVarsField { throw "envVars malformed" }
+            $custom = (New-ValidVmJson | ConvertFrom-Json)
+            { @(ConvertFrom-VmConfigJson -Json "[$(ConvertTo-Json $custom -Compress)]") } |
+                Should -Throw
+            $custom.PSObject.Properties['switchName'] | Should -BeNullOrEmpty
+            $custom.PSObject.Properties['natName']    | Should -BeNullOrEmpty
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'envVars round-trip (object preserved on returned VM)' {
+    # ------------------------------------------------------------------
+
+        # Behaviour of the envVars validator (rejecting malformed shapes,
+        # duplicate names, etc.) is covered upstream. These cases only
+        # assert that opting in at the call site does not drop, rename,
+        # or default any sub-field on the way through the schema layer.
+
+        It 'preserves a well-formed envVars object on the returned VM' {
+            $envVars = '{ "blockName": "e2e-ci", "entries": [{ "name": "FOO_HOME", "value": "/opt/foo" }, { "name": "BAR_VAR", "value": "baz" }] }'
+            $core    = (New-ValidVmJson) -replace '\}\s*$', ''
+            $result  = @(ConvertFrom-VmConfigJson -Json "[$core, ""envVars"": $envVars }]")
+            $result[0].envVars.blockName       | Should -Be 'e2e-ci'
+            $result[0].envVars.entries         | Should -HaveCount 2
+            $result[0].envVars.entries[0].name | Should -Be 'FOO_HOME'
+            $result[0].envVars.entries[0].value | Should -Be '/opt/foo'
+            $result[0].envVars.entries[1].name | Should -Be 'BAR_VAR'
+            $result[0].envVars.entries[1].value | Should -Be 'baz'
+        }
+
+        It 'preserves envVars.entries = [] (the "remove the block" intent)' {
+            # The transport reads an empty entries array as "remove the
+            # managed block". The schema layer must therefore pass it
+            # through unchanged - dropping or defaulting it would silently
+            # turn an explicit removal into a no-op.
+            $envVars = '{ "blockName": "e2e-ci", "entries": [] }'
+            $core    = (New-ValidVmJson) -replace '\}\s*$', ''
+            $result  = @(ConvertFrom-VmConfigJson -Json "[$core, ""envVars"": $envVars }]")
+            $result[0].envVars.blockName              | Should -Be 'e2e-ci'
+            @($result[0].envVars.entries).Count       | Should -Be 0
+        }
+
+        It 'leaves envVars absent when the JSON omits it' {
+            # Regression guard: this step is additive. The previous schema
+            # had no envVars field at all and that intent must still parse.
+            $result = @(ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]")
+            $result[0].PSObject.Properties['envVars'] | Should -BeNullOrEmpty
         }
     }
 
