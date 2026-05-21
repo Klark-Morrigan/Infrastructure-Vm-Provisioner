@@ -12,6 +12,7 @@
   - [Removing a JDK](#removing-a-jdk)
   - [Optional: copy files to the VM](#optional-copy-files-to-the-vm)
     - [Bulk entries](#bulk-entries)
+  - [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables)
 - [provision.ps1](#provisionps1)
 - [deprovision.ps1](#deprovisionps1)
 - [CI](#ci)
@@ -119,6 +120,7 @@ All fields are required. After first boot, connect via `ssh username@ipAddress`.
 | `natName`       | string | Windows NAT rule name. Default: `VmLAN-NAT`        |
 | `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. See [Optional: install a JDK](#optional-install-a-jdk). |
 | `files`         | array?  | Optional. Copies arbitrary host files onto the VM. See [Optional: copy files to the VM](#optional-copy-files-to-the-vm). |
+| `envVars`       | object? | Optional. Writes a managed block of system-wide environment variables into `/etc/environment`. See [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables). |
 
 ### Optional: install a JDK
 
@@ -341,6 +343,50 @@ The transport is delegated to `Infrastructure.HyperV`'s
 see its notes for the exact wildcard semantics (including the zero-match
 and target-collision pre-flight errors raised before any SSH I/O).
 
+### Optional: set system-wide environment variables
+
+Add an `envVars` object to any VM entry to write a sentinel-delimited
+managed block of `NAME="VALUE"` lines into `/etc/environment`. Unlike
+`/etc/profile.d/*.sh` snippets (sourced only by login shells), this file
+is read by `pam_env` for every login — including the non-login shells
+spawned by systemd-managed services.
+
+```jsonc
+{
+  "vmName": "ci-01",
+  "...":    "...",
+  "envVars": {
+    "blockName": "ci-01-app",
+    "entries": [
+      { "name": "FOO_HOME", "value": "/opt/foo" }
+    ]
+  }
+}
+```
+
+| Sub-field           | Required | Notes                                                                                                                                                              |
+|---------------------|----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `blockName`         | yes      | Sentinel name for the managed block (`# BEGIN <blockName>` / `# END <blockName>`). Operator-chosen so multiple consumers (this provisioner, Vm-Users, ...) can coexist. Validated against `^[A-Za-z0-9._ -]+$`, 1-128 chars, no leading / trailing whitespace. |
+| `entries`           | yes      | Array of `{ name, value }` pairs. May be empty — see the removal note below.                                                                                       |
+| `entries[].name`    | yes      | POSIX identifier (`^[A-Za-z_][A-Za-z0-9_]*$`). Unique across entries.                                                                                              |
+| `entries[].value`   | yes      | Non-empty, no `\n` / `\r` / `\0`. Written as `NAME="VALUE"` with `"` and `\` escaped.                                                                              |
+
+Lines outside the managed block — Ubuntu's default `PATH=...`, any
+operator additions, other consumers' blocks — are preserved
+byte-for-byte across re-runs. The file's ownership and mode stay
+`root:root, 0644`, the only mode `pam_env` reliably reads.
+
+Omitting `envVars` on a subsequent run is a **no-op** — the previously
+written block stays put. To remove the block explicitly, set
+`entries: []` on the same VM entry and re-run `provision.ps1`; the
+transport treats an empty array as "remove this managed block". Same
+explicit-removal model as the JDK `uninstall` flag.
+
+The transport is delegated to `Infrastructure.HyperV`'s
+[`Set-VmEnvironmentVariables`](https://github.com/VitaliiAndreev/Infrastructure-HyperV/blob/master/Infrastructure.HyperV/Public/EnvVars/Set-VmEnvironmentVariables.ps1) —
+see its notes for the exact managed-block, atomic-write, and
+skip-unchanged semantics.
+
 ---
 
 ## provision.ps1
@@ -420,13 +466,22 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
       the removal step instead (deletes `/opt/jdk-{vendor}-*`,
       `/etc/profile.d/jdk.sh`, and stale `/usr/local/bin` symlinks) —
       see [Removing a JDK](#removing-a-jdk).
+    - **`envVars`** writes a sentinel-delimited managed block of
+      `NAME="VALUE"` lines into `/etc/environment` via
+      `Set-VmEnvironmentVariables` (see
+      [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables)).
+      Dispatched after `files` and `javaDevKit` so a value pointing at
+      content one of the earlier steps placed is referencing something
+      that already exists when the file is rewritten.
 
     Each step is self-contained — no step consumes files left by another
     step. Adding a new step (e.g. Maven) is a one-function addition with
     one dispatch line in `Invoke-VmPostProvisioning`. Skipped silently
     for VMs that have no opt-in fields. Idempotent on the VM side: the
     JDK install no-ops when its `release` file is already present, file
-    copies overwrite with the current host source bytes.
+    copies overwrite with the current host source bytes, and the
+    env-vars step skips the SSH write when the desired block already
+    matches what is on disk.
 
 ---
 
@@ -514,7 +569,8 @@ Infrastructure-VM-Provisioner/
 |     |  |- post/
 |     |  |  |- Invoke-VmPostProvisioning.ps1    # Per-VM transport orchestrator (file server + SSH + cloud-init wait), dispatches steps; calls Infrastructure.HyperV's Copy-VmFiles for the 'files' step
 |     |  |  |- Install-Jdk.ps1                  # Step: extracts the prefetched JDK tarball and writes /etc/profile.d/jdk.sh
-|     |  |  `- Uninstall-Jdk.ps1                # Step: removes /opt/jdk-{vendor}-*, /etc/profile.d/jdk.sh, and stale /usr/local/bin symlinks
+|     |  |  |- Uninstall-Jdk.ps1                # Step: removes /opt/jdk-{vendor}-*, /etc/profile.d/jdk.sh, and stale /usr/local/bin symlinks
+|     |  |  `- Set-EnvironmentVariables.ps1     # Step: writes a managed block of NAME="VALUE" lines into /etc/environment via Infrastructure.HyperV's Set-VmEnvironmentVariables
 |     |  |- network/
 |     |  |  `- setup-network.ps1               # Creates VmLAN switch, host IP, NAT rule
 |     |  |- seed/

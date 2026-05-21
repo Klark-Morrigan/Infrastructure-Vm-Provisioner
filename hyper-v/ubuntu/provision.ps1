@@ -46,6 +46,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\acquire\Invoke-VmAcquisitions.ps1"
 . "$PSScriptRoot\up\post\Install-Jdk.ps1"
 . "$PSScriptRoot\up\post\Uninstall-Jdk.ps1"
+. "$PSScriptRoot\up\post\Set-EnvironmentVariables.ps1"
 . "$PSScriptRoot\up\post\Invoke-VmPostProvisioning.ps1"
 . "$PSScriptRoot\up\seed\generate-seed-iso.ps1"
 . "$PSScriptRoot\up\network\setup-network.ps1"
