@@ -14,6 +14,7 @@
     - [Bulk entries](#bulk-entries)
   - [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables)
 - [provision.ps1](#provisionps1)
+- [start-vms.ps1](#start-vmsps1)
 - [deprovision.ps1](#deprovisionps1)
 - [CI](#ci)
 - [Repo structure](#repo-structure)
@@ -54,7 +55,10 @@ PSGallery automatically on first run.
 # 2. Provision VMs (run as Administrator)
 .\hyper-v\ubuntu\provision.ps1
 
-# 3. Remove VMs when no longer needed (run as Administrator)
+# 3. Bring VMs back up after a reboot (run as Administrator)
+.\hyper-v\ubuntu\start-vms.ps1
+
+# 4. Remove VMs when no longer needed (run as Administrator)
 .\hyper-v\ubuntu\deprovision.ps1
 ```
 
@@ -485,6 +489,40 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
 
 ---
 
+## start-vms.ps1
+
+Run as Administrator after VMs have been created by `provision.ps1` to bring
+every VM in `VmProvisionerConfig` back to `Running` after a host reboot, a
+manual shutdown, or a Hyper-V "Saved" state caused by a host power event.
+
+```powershell
+.\start-vms.ps1
+```
+
+Reads the same `VmProvisionerConfig` from the vault and for each VM calls
+`Start-VmIfStopped` from
+[Infrastructure-HyperV](https://github.com/VitaliiAndreev/Infrastructure-HyperV) —
+see that repo for the per-VM state-machine contract (`Off` -> Started,
+`Saved` -> Resumed, `Running` -> AlreadyRunning, transient states throw).
+
+**Idempotency** — re-running with no external state change is a true no-op:
+every VM reports `AlreadyRunning`, exit code 0, no Hyper-V state change.
+
+**Per-VM failure policy** — a single bad VM (unknown to Hyper-V, in a
+transient state, etc.) does not strand the rest of the list. Each failure
+is recorded and surfaced after the loop with the upstream reason; the
+script exits 1 if any failure was recorded and 0 otherwise. Exit code is
+the only programmatic signal — the script does not throw past the loop.
+
+The script does **not** open an SSH session, start the host file server,
+or run any post-provisioning step. "Power on" is a distinct concern from
+"power on + reachable"; callers who need the latter compose `start-vms.ps1`
+with their own `Wait-VmSshReady` loop. Hyper-V's native per-VM
+`AutomaticStartAction` covers the auto-start-on-boot case and is
+deliberately not what this script does.
+
+---
+
 ## deprovision.ps1
 
 Run as Administrator to remove VMs that were created by `provision.ps1`.
@@ -548,13 +586,15 @@ Infrastructure-VM-Provisioner/
 |- hyper-v/
 |  `- ubuntu/
 |     |- provision.ps1       # Entry point - orchestrates all provisioning steps
+|     |- start-vms.ps1       # Entry point - brings provisioned VMs back to Running
 |     |- deprovision.ps1     # Entry point - reverses provision.ps1
 |     |- setup-secrets.ps1   # One-time vault setup
 |     |- common/
 |     |  `- config/
 |     |     |- ConvertFrom-VmConfigJson.ps1  # JSON parsing and validation; delegates the optional 'files' array to Infrastructure.HyperV's Assert-VmFilesField
 |     |     |- Assert-JavaDevKitField.ps1    # Validates optional javaDevKit field
-|     |     `- Get-SanitizedVmDisplay.ps1    # Masks password in diagnostic output
+|     |     |- Get-SanitizedVmDisplay.ps1    # Masks password in diagnostic output
+|     |     `- Read-VmProvisionerConfig.ps1  # Shared bootstrap helper: vault read + schema validation, reused by provision / start-vms / deprovision
 |     |- up/
 |     |  |- config/
 |     |  |  `- Select-VmsForProvisioning.ps1 # Pre-flight VM-existence and IP-conflict checks
