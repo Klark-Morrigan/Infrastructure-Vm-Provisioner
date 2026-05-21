@@ -19,7 +19,7 @@ strict unknown-field check in
 already rejects typos like `"unistall"` - the allow-list just grows by one
 entry and gets a type check so a string `"true"` does not silently sneak
 through. Keeping the validator self-contained preserves the
-[05 - Step 1](../05%20-%20java%20dev%20kit/plan.md#step-1---schema-validation-for-javadevkit)
+[20 - Step 1](../20%20-%20java%20dev%20kit/plan.md#step-1---schema-validation-for-javadevkit)
 shape (one validator, independently testable, called by
 `ConvertFrom-VmConfigJson`).
 
@@ -150,7 +150,7 @@ graph LR
 ## Step 3 - `Uninstall-Jdk` step + post-provisioning dispatch
 
 **Reason:** Bring the removal onto the VM. Mirrors the
-[05 - Step 5](../05%20-%20java%20dev%20kit/plan.md#step-5---out-of-band-post-provisioning-pipeline)
+[20 - Step 5](../20%20-%20java%20dev%20kit/plan.md#step-5---out-of-band-post-provisioning-pipeline)
 post-provisioning shape (one orchestrator + N self-contained step functions);
 the orchestrator just gains a new dispatch branch that picks the install
 vs. uninstall step based on the flag.
@@ -164,7 +164,7 @@ vs. uninstall step based on the flag.
   intent explicit in JSON.
 - `Uninstall-Jdk` removes by **glob** (`/opt/jdk-{vendor}-*`), not by the
   `version` string in the JSON. Reason: the v1 invariant from
-  [05 - Out of Scope](../05%20-%20java%20dev%20kit/problem.md#out-of-scope)
+  [20 - Out of Scope](../20%20-%20java%20dev%20kit/problem.md#out-of-scope)
   is "one JDK per VM", so a single vendor prefix uniquely identifies the
   install; globbing keeps the step honest if the installed version drifted
   from what the JSON now says.
@@ -312,7 +312,7 @@ graph TD
 shape, but only an E2E run proves the removal actually empties the
 install dir, removes the profile snippet, and prunes the symlinks on a
 real VM. Extends the existing E2E scaffold from
-[05 - Step 6](../05%20-%20java%20dev%20kit/plan.md#step-6---e2e-test-coverage-for-the-jdk-path)
+[20 - Step 6](../20%20-%20java%20dev%20kit/plan.md#step-6---e2e-test-coverage-for-the-jdk-path)
 into a four-phase scenario over two VMs so the install / uninstall /
 re-install / deprovision lifecycle is covered in one run. VM identities
 (`vmName`, `ipAddress`, `username`, `password`, etc.) are pinned at the
@@ -362,7 +362,7 @@ sequence diagram below.
 
 | Phase | JSON state | Action | Assertions |
 |-------|-----------|--------|------------|
-| 1 | VM1: `javaDevKit = temurin/21`. VM2 not in JSON. | `provision.ps1` | **On VM1:** full install assertions from [05 - Step 6](../05%20-%20java%20dev%20kit/plan.md#step-6---e2e-test-coverage-for-the-jdk-path) (JAVA_HOME under `/opt/jdk-temurin-`, `java` on PATH login + non-login, `java -version` prefix match). |
+| 1 | VM1: `javaDevKit = temurin/21`. VM2 not in JSON. | `provision.ps1` | **On VM1:** full install assertions from [20 - Step 6](../20%20-%20java%20dev%20kit/plan.md#step-6---e2e-test-coverage-for-the-jdk-path) (JAVA_HOME under `/opt/jdk-temurin-`, `java` on PATH login + non-login, `java -version` prefix match). |
 | 2 | VM1: `javaDevKit = temurin/21, uninstall = true`. VM2: added, no `javaDevKit`. | `provision.ps1` | **On VM1:** uninstall assertions A1-A5 (below). **On VM2:** existence assertions B1-B3 (below). **Blast-radius check:** VM2 must not have any `/opt/jdk-*` dir or `/etc/profile.d/jdk.sh` (VM2 never had a JDK, so this would only fire on a serious cross-VM bug). |
 | 3 | VM1: `javaDevKit = temurin/17` (uninstall removed). VM2: unchanged from phase 2. | `provision.ps1` | **On VM1:** install assertions, parameterised on version `"17"` so `JAVA_HOME` starts with `/opt/jdk-temurin-17` and `java -version` output contains `"17"`. The phase-1 install dir for 21 may legitimately still exist on disk (the install step is dir-scoped, not vendor-scoped) - do NOT assert its absence here. **On VM2:** re-run B1-B3 to confirm phase 3's run on VM1 did not touch VM2. |
 | 4 | (no JSON edit needed) | `deprovision.ps1` against the same JSON as phase 3 | **On host:** `Get-VM -Name VM1`, `Get-VM -Name VM2` return nothing. **On host:** the per-VM disk artifacts (VHDX, seed ISO) for both VMs are gone from `vhdPath`. Host-side JDK cache (tarball + lockfile) is left untouched - assert it is still there. |
@@ -398,7 +398,7 @@ VM2 existence (phases 2 and 3) - on `$sshClient2`:
 VM1 install with version `"17"` (phase 3) - on `$sshClient1`:
 
 - Same assertions as the install block from
-  [05 - Step 6](../05%20-%20java%20dev%20kit/plan.md#step-6---e2e-test-coverage-for-the-jdk-path),
+  [20 - Step 6](../20%20-%20java%20dev%20kit/plan.md#step-6---e2e-test-coverage-for-the-jdk-path),
   parameterised on `"17"`: `JAVA_HOME` starts with `/opt/jdk-temurin-17`,
   `command -v java` (both shell types) resolves under that `JAVA_HOME`,
   `java -version` output contains `"17"`.

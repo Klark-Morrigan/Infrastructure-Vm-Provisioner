@@ -19,9 +19,9 @@ See [problem.md](problem.md) for context, schema, and rationale.
 must be at least `0.8.0` before that step can run on a clean machine.
 Splitting the version pin from the behavioural changes keeps diffs
 focused, mirroring
-[07 - ci jars Step 1](../07%20-%20ci%20jars/plan.md#step-1---bump-infrastructurehyperv-dependency-to-the-latest)
+[34 - ci jars Step 1](../34%20-%20ci%20jars/plan.md#step-1---bump-infrastructurehyperv-dependency-to-the-latest)
 and
-[08 - env vars Step 1](../08%20-%20env%20vars/plan.md#step-1---confirm-infrastructurehyperv-dependency-floor).
+[21 - env vars Step 1](../21%20-%20env%20vars/plan.md#step-1---confirm-infrastructurehyperv-dependency-floor).
 
 **Decisions locked**
 

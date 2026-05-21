@@ -50,7 +50,7 @@ environment variables a workload needs.
   removes only the named block.
 
 The first concrete consumer is the same CI build farm covered by
-[07 - ci jars](../07%20-%20ci%20jars/problem.md): a CI agent running
+[34 - ci jars](../34%20-%20ci%20jars/problem.md): a CI agent running
 as a systemd-managed service needs the install root (pointing at the
 directory the bulk-files step populated) visible in the non-login
 shells the agent spawns - that one path is what the consumer's build
@@ -132,7 +132,7 @@ reference paths the `files` step placed).
   snippet via the `files` array, which fails for the CI workload
   that motivates the change.
 - The CI build farm scoped by
-  [07 - ci jars](../07%20-%20ci%20jars/problem.md) needs the
+  [34 - ci jars](../34%20-%20ci%20jars/problem.md) needs the
   install-root path it placed visible to a systemd-managed CI agent.
   The agent spawns non-login shells where `/etc/profile.d/*.sh` is
   not sourced, so the existing JDK trick does not solve the problem.
@@ -169,8 +169,8 @@ reference paths the `files` step placed).
   the time this feature is implemented (must be at least the version
   that ships `Assert-VmEnvVarsField` + `Set-VmEnvironmentVariables` -
   `0.7.0`). Same "bump to the latest" rule
-  [07 - ci jars Step 1](../07%20-%20ci%20jars/plan.md#step-1---bump-infrastructurehyperv-dependency-to-the-latest)
-  uses; if 07 has already landed at a later HyperV version this
+  [34 - ci jars Step 1](../34%20-%20ci%20jars/plan.md#step-1---bump-infrastructurehyperv-dependency-to-the-latest)
+  uses; if 34 has already landed at a later HyperV version this
   feature's bump may be a no-op.
 - [README.md](../../../../README.md) - new "Optional: set system-wide
   environment variables" section with one example, sub-field table,

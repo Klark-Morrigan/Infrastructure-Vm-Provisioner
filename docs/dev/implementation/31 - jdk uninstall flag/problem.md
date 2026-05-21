@@ -16,7 +16,7 @@
 
 ## Context
 
-The [05 - java dev kit](../05%20-%20java%20dev%20kit/problem.md) feature
+The [20 - java dev kit](../20%20-%20java%20dev%20kit/problem.md) feature
 added an optional `javaDevKit` block to a VM definition. When set, the
 provisioner:
 
@@ -60,8 +60,8 @@ provisioner removes the JDK from the VM on its next run.
 
 | Sub-field   | Type    | Required | Notes |
 |-------------|---------|----------|-------|
-| `vendor`    | string  | yes      | Unchanged from [05](../05%20-%20java%20dev%20kit/problem.md). Identifies the install-dir prefix `/opt/jdk-{vendor}-*` that the removal targets. |
-| `version`   | string  | yes      | Unchanged from [05](../05%20-%20java%20dev%20kit/problem.md). Kept required so the schema stays uniform whether the operator is installing or uninstalling; the removal step does not use the value (see [Guest-side removal step](#guest-side-removal-step)). |
+| `vendor`    | string  | yes      | Unchanged from [20](../20%20-%20java%20dev%20kit/problem.md). Identifies the install-dir prefix `/opt/jdk-{vendor}-*` that the removal targets. |
+| `version`   | string  | yes      | Unchanged from [20](../20%20-%20java%20dev%20kit/problem.md). Kept required so the schema stays uniform whether the operator is installing or uninstalling; the removal step does not use the value (see [Guest-side removal step](#guest-side-removal-step)). |
 | `uninstall` | boolean | no       | Defaults to `false`. `true` switches the post-provisioning step from install to removal. |
 
 Validation lives in
@@ -88,7 +88,7 @@ mirrors the install's responsibilities in reverse:
 
 | Layer            | Removal action |
 |------------------|----------------|
-| Install root     | `rm -rf /opt/jdk-{vendor}-*` (glob - one JDK per VM is the v1 invariant from [05](../05%20-%20java%20dev%20kit/problem.md#out-of-scope), so a single vendor prefix uniquely identifies the install). |
+| Install root     | `rm -rf /opt/jdk-{vendor}-*` (glob - one JDK per VM is the v1 invariant from [20](../20%20-%20java%20dev%20kit/problem.md#out-of-scope), so a single vendor prefix uniquely identifies the install). |
 | `JAVA_HOME` / `PATH` | `rm -f /etc/profile.d/jdk.sh` so new login shells stop exporting a dead `JAVA_HOME`. |
 | `/usr/local/bin` symlinks | Iterate `/usr/local/bin/*`, delete any that are symlinks resolving into a removed `/opt/jdk-{vendor}-*` path. Plain files and symlinks pointing elsewhere are left alone. |
 | Idempotency      | All operations no-op when the targets are already gone, so a second run with the flag still set is a clean no-op. |
@@ -120,7 +120,7 @@ uninstall. Rationale:
   removal path is "destroy and recreate", which is overkill.
 - The install path is settled and well-tested, so adding the symmetric
   removal path is a small, well-scoped delta against a known surface.
-- Keeps the principle from [05](../05%20-%20java%20dev%20kit/problem.md):
+- Keeps the principle from [20](../20%20-%20java%20dev%20kit/problem.md):
   one JSON file in, reproducible VM state out - in either direction.
 
 ---
@@ -197,7 +197,7 @@ sequenceDiagram
 - Auto-clearing the `uninstall` flag (or the whole `javaDevKit` block)
   after success. See [Flag stays after success](#flag-stays-after-success-idempotent).
 - Selective removal when multiple JDKs coexist on one VM. The v1 invariant
-  from [05 - Out of Scope](../05%20-%20java%20dev%20kit/problem.md#out-of-scope)
+  from [20 - Out of Scope](../20%20-%20java%20dev%20kit/problem.md#out-of-scope)
   is "one JDK per VM", so the removal step deletes the single
   `/opt/jdk-{vendor}-*` match by glob. Multi-JDK support is a separate
   feature and would need to revisit both install and uninstall together.

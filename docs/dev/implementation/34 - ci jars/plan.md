@@ -287,7 +287,7 @@ with the right ownership / mode on a real VM, and that a re-run with
 the same JSON is a no-op for externally visible state per
 [problem.md - Acceptance Criteria](problem.md#acceptance-criteria).
 Extends the existing E2E scaffold from
-[05 - Step 6](../05%20-%20java%20dev%20kit/plan.md#step-6---e2e-test-coverage-for-the-jdk-path)
+[20 - Step 6](../20%20-%20java%20dev%20kit/plan.md#step-6---e2e-test-coverage-for-the-jdk-path)
 into a small two-phase scenario over one VM (bulk transport is already
 covered by `Infrastructure-HyperV`'s integration suite; here the focus
 is "the provisioner wires it correctly end-to-end").
@@ -299,7 +299,7 @@ the bulk path.
 
 - **One VM, two phases.** Reason: this feature has no cross-VM
   blast-radius surface to assert (unlike
-  [06 - Step 4](../06%20-%20jdk%20uninstall%20flag/plan.md#step-4---e2e-test-coverage-for-the-uninstall-path)).
+  [31 - Step 4](../31%20-%20jdk%20uninstall%20flag/plan.md#step-4---e2e-test-coverage-for-the-uninstall-path)).
   A second VM would test something this feature does not affect.
 - **One bulk entry + one single entry in the same `files` array.**
   Reason: directly covers the "mixed dispatch" acceptance criterion
