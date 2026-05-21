@@ -32,13 +32,14 @@ BeforeAll {
     # Global invocation log + reset helper. Reset is called from BeforeEach
     # in the Describe below.
     $global:_PostProv_Calls = @{
-        'New-VmSshClient'         = @()
-        'Invoke-SshClientCommand' = @()
-        'Install-Jdk'             = @()
-        'Uninstall-Jdk'           = @()
-        'Copy-VmFiles'            = @()
-        'Copy-VmFilesByPattern'   = @()
-        'Invoke-WithVmFileServer' = @()
+        'New-VmSshClient'           = @()
+        'Invoke-SshClientCommand'   = @()
+        'Install-Jdk'               = @()
+        'Uninstall-Jdk'             = @()
+        'Copy-VmFiles'              = @()
+        'Copy-VmFilesByPattern'     = @()
+        'Invoke-WithVmFileServer'   = @()
+        'Set-EnvironmentVariables'  = @()
     }
     function global:Reset-PostProvCallLog {
         foreach ($k in @($global:_PostProv_Calls.Keys)) {
@@ -114,6 +115,11 @@ BeforeAll {
     function global:Copy-VmFiles {
         param($SshClient, $Server, $Entries)
         $global:_PostProv_Calls['Copy-VmFiles'] += @{ Entries = $Entries }
+    }
+
+    function global:Set-EnvironmentVariables {
+        param($SshClient, $Vm)
+        $global:_PostProv_Calls['Set-EnvironmentVariables'] += @{ Vm = $Vm }
     }
 
     function global:Copy-VmFilesByPattern {
@@ -196,6 +202,30 @@ BeforeAll {
         $vm
     }
 
+    function New-VmWithEnvVars {
+        $vm = New-PlainVm
+        Add-Member -InputObject $vm -MemberType NoteProperty -Name 'envVars' -Value (
+            [PSCustomObject]@{
+                blockName = 'ci-01-app'
+                entries   = @(
+                    [PSCustomObject]@{ name = 'FOO_HOME'; value = '/opt/foo' }
+                )
+            }
+        )
+        $vm
+    }
+
+    function New-VmWithEmptyEnvVarsEntries {
+        $vm = New-PlainVm
+        Add-Member -InputObject $vm -MemberType NoteProperty -Name 'envVars' -Value (
+            [PSCustomObject]@{
+                blockName = 'ci-01-app'
+                entries   = @()
+            }
+        )
+        $vm
+    }
+
     function New-VmWithMixedFiles {
         $vm = New-PlainVm
         Add-Member -InputObject $vm -MemberType NoteProperty -Name 'files' -Value @(
@@ -212,6 +242,7 @@ AfterAll {
             'Invoke-WithVmFileServer', 'New-VmSshClient',
             'Invoke-SshClientCommand', 'Install-Jdk', 'Uninstall-Jdk',
             'Copy-VmFiles', 'Copy-VmFilesByPattern',
+            'Set-EnvironmentVariables',
             'Reset-PostProvCallLog')) {
         Remove-Item -Path "function:global:$name" -ErrorAction SilentlyContinue
     }
@@ -241,7 +272,7 @@ Describe 'Invoke-VmPostProvisioning' {
 
     Context 'no opt-in fields' {
 
-        It 'is a no-op when neither files nor javaDevKit is set' {
+        It 'is a no-op when none of files, javaDevKit, envVars is set' {
             Invoke-VmPostProvisioning -Vm (New-PlainVm)
 
             $global:_PostProv_Calls['Invoke-WithVmFileServer'].Count | Should -Be 0
@@ -497,6 +528,90 @@ Describe 'Invoke-VmPostProvisioning' {
                 ${function:global:Copy-VmFiles} = $originalCopy
                 ${function:global:Install-Jdk}  = $originalInst
                 Remove-Variable -Name _PostProv_Order -Scope Global -ErrorAction SilentlyContinue
+            }
+        }
+
+        It 'does NOT dispatch Set-EnvironmentVariables when envVars is absent' {
+            # Regression guard: the new dispatch branch must be opt-in.
+            Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
+            $global:_PostProv_Calls['Set-EnvironmentVariables'].Count | Should -Be 0
+        }
+
+        It 'dispatches Set-EnvironmentVariables when envVars is the only opt-in field' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithEnvVars)
+
+            $calls = $global:_PostProv_Calls['Set-EnvironmentVariables']
+            $calls.Count                | Should -Be 1
+            $calls[0].Vm.envVars.blockName | Should -Be 'ci-01-app'
+            @($calls[0].Vm.envVars.entries).Count | Should -Be 1
+        }
+
+        It 'still opens the file server and SSH for an envVars-only VM' {
+            # Plan decision: an envVars-only VM still opens the file server
+            # because the existing always-open contract is what every other
+            # branch relies on. Changing that contract is a separate cleanup.
+            Invoke-VmPostProvisioning -Vm (New-VmWithEnvVars)
+            $global:_PostProv_Calls['Invoke-WithVmFileServer'].Count | Should -Be 1
+            $global:_PostProv_Calls['New-VmSshClient'].Count         | Should -Be 1
+        }
+
+        It 'routes envVars.entries: @() through to the wrapper as-is' {
+            # Empty entries is the operator's "remove the managed block"
+            # intent; the orchestrator must not second-guess it.
+            Invoke-VmPostProvisioning -Vm (New-VmWithEmptyEnvVarsEntries)
+
+            $calls = $global:_PostProv_Calls['Set-EnvironmentVariables']
+            $calls.Count                            | Should -Be 1
+            @($calls[0].Vm.envVars.entries).Count   | Should -Be 0
+            $calls[0].Vm.envVars.blockName          | Should -Be 'ci-01-app'
+        }
+
+        It 'dispatches files -> javaDevKit -> envVars when all three are set' {
+            $vm = New-VmWithEnvVars
+            Add-Member -InputObject $vm -MemberType NoteProperty -Name 'javaDevKit' `
+                -Value ([PSCustomObject]@{ vendor = 'temurin'; version = '21' })
+            Add-Member -InputObject $vm -MemberType NoteProperty -Name 'files' -Value @(
+                [PSCustomObject]@{ source = 'C:\src\a'; target = '/opt/a' }
+            )
+
+            $originalCopy   = ${function:global:Copy-VmFiles}
+            $originalInst   = ${function:global:Install-Jdk}
+            $originalEnv    = ${function:global:Set-EnvironmentVariables}
+            $global:_PostProv_Order = @()
+            ${function:global:Copy-VmFiles}             = { param($SshClient, $Server, $Entries) $global:_PostProv_Order += 'files' }
+            ${function:global:Install-Jdk}              = { param($SshClient, $Server, $Vm)      $global:_PostProv_Order += 'jdk' }
+            ${function:global:Set-EnvironmentVariables} = { param($SshClient, $Vm)               $global:_PostProv_Order += 'envVars' }
+            try {
+                Invoke-VmPostProvisioning -Vm $vm
+                $global:_PostProv_Order | Should -Be @('files', 'jdk', 'envVars')
+            }
+            finally {
+                ${function:global:Copy-VmFiles}             = $originalCopy
+                ${function:global:Install-Jdk}              = $originalInst
+                ${function:global:Set-EnvironmentVariables} = $originalEnv
+                Remove-Variable -Name _PostProv_Order -Scope Global -ErrorAction SilentlyContinue
+            }
+        }
+
+        It 'propagates Set-EnvironmentVariables failures and still disposes the SSH client' {
+            $originalEnv = ${function:global:Set-EnvironmentVariables}
+            $script:_DisposedClient = $null
+            $global:_PostProv_FakeSshClient | Add-Member -MemberType ScriptMethod `
+                -Name 'Dispose' -Force -Value { $script:_DisposedClient = $true }
+            ${function:global:Set-EnvironmentVariables} = {
+                param($SshClient, $Vm)
+                throw "Set-EnvironmentVariables failed on $($Vm.vmName): boom"
+            }
+            try {
+                { Invoke-VmPostProvisioning -Vm (New-VmWithEnvVars) } |
+                    Should -Throw -ExpectedMessage '*Set-EnvironmentVariables failed on node-01*'
+                $script:_DisposedClient | Should -Be $true
+            }
+            finally {
+                ${function:global:Set-EnvironmentVariables} = $originalEnv
+                $global:_PostProv_FakeSshClient | Add-Member -MemberType ScriptMethod `
+                    -Name 'Dispose' -Force -Value {}
+                Remove-Variable -Name _DisposedClient -Scope Script -ErrorAction SilentlyContinue
             }
         }
 

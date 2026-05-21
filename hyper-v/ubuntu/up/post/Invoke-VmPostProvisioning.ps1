@@ -31,10 +31,14 @@ function Invoke-VmPostProvisioning {
 
     # Decide which steps apply before opening any transport. If nothing
     # applies, exit silently - no file server, no SSH, no log noise.
-    $hasFiles = $Vm.PSObject.Properties['files'] -and
-                @($Vm.files).Count -gt 0
-    $hasJdk   = $Vm.PSObject.Properties['javaDevKit']
-    if (-not ($hasFiles -or $hasJdk)) {
+    $hasFiles   = $Vm.PSObject.Properties['files'] -and
+                  @($Vm.files).Count -gt 0
+    $hasJdk     = $Vm.PSObject.Properties['javaDevKit']
+    # Gate on field presence (not entries.Count): `entries: []` is the
+    # operator's explicit "remove the managed block" intent, so it must
+    # still route through to the transport.
+    $hasEnvVars = $Vm.PSObject.Properties['envVars']
+    if (-not ($hasFiles -or $hasJdk -or $hasEnvVars)) {
         return
     }
 
@@ -59,10 +63,11 @@ function Invoke-VmPostProvisioning {
     # entirely - the variables themselves are preserved by GetNewClosure().
     # Module-exported cmdlets (e.g. Copy-VmFiles) work the same way under
     # this approach, so the dispatch is uniform.
-    $copyVmFiles          = ${function:Copy-VmFiles}
-    $copyVmFilesByPattern = ${function:Copy-VmFilesByPattern}
-    $installJdk           = ${function:Install-Jdk}
-    $uninstallJdk         = ${function:Uninstall-Jdk}
+    $copyVmFiles             = ${function:Copy-VmFiles}
+    $copyVmFilesByPattern    = ${function:Copy-VmFilesByPattern}
+    $installJdk              = ${function:Install-Jdk}
+    $uninstallJdk            = ${function:Uninstall-Jdk}
+    $setEnvironmentVariables = ${function:Set-EnvironmentVariables}
 
     $postBlock = {
         param($server)
@@ -156,6 +161,15 @@ function Invoke-VmPostProvisioning {
                 } else {
                     & $installJdk -SshClient $sshClient -Server $server -Vm $vmRef
                 }
+            }
+            if ($hasEnvVars) {
+                # Stylistically last: env-var values may legitimately
+                # reference paths the `files` step placed or the JDK
+                # install root, so writing /etc/environment after both
+                # keeps log-reading less surprising. The transport itself
+                # does not read the target paths it writes, so this
+                # ordering is convention, not correctness.
+                & $setEnvironmentVariables -SshClient $sshClient -Vm $vmRef
             }
         }
         finally {
