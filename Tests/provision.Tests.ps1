@@ -81,6 +81,40 @@ BeforeAll {
     }
 }
 
+Describe 'provision.ps1 - bootstrap wiring (Read-VmProvisionerConfig)' {
+
+    # The vault read / SecretManagement bootstrap was extracted to
+    # common/config/Read-VmProvisionerConfig.ps1. These tests pin the
+    # delegation so a future change cannot silently reintroduce the inline
+    # vault-handling code (which would split error wording across two
+    # places and break the helper's test coverage).
+
+    It 'dot-sources Read-VmProvisionerConfig.ps1' {
+        $text = Get-Content -Path $script:provisionPath -Raw
+        $text | Should -Match 'Read-VmProvisionerConfig\.ps1'
+    }
+
+    It 'invokes Read-VmProvisionerConfig exactly once' {
+        $calls = $script:commands |
+            Where-Object { $_.GetCommandName() -eq 'Read-VmProvisionerConfig' }
+        @($calls).Count | Should -Be 1
+    }
+
+    It 'does not call Get-SecretVault directly (helper owns it)' {
+        $calls = $script:commands |
+            Where-Object { $_.GetCommandName() -eq 'Get-SecretVault' }
+        @($calls).Count | Should -Be 0 `
+            -Because 'vault discovery moved into Read-VmProvisionerConfig'
+    }
+
+    It 'does not call Get-Secret directly (helper owns it)' {
+        $calls = $script:commands |
+            Where-Object { $_.GetCommandName() -eq 'Get-Secret' }
+        @($calls).Count | Should -Be 0 `
+            -Because 'secret retrieval moved into Read-VmProvisionerConfig'
+    }
+}
+
 Describe 'provision.ps1 - acquisition wiring (Step 4)' {
 
     It 'dot-sources Invoke-VmAcquisitions.ps1' {

@@ -35,8 +35,9 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-. "$PSScriptRoot\common\config\Get-SanitizedVmDisplay.ps1"
 . "$PSScriptRoot\common\config\ConvertFrom-VmConfigJson.ps1"
+. "$PSScriptRoot\common\config\Get-SanitizedVmDisplay.ps1"
+. "$PSScriptRoot\common\config\Read-VmProvisionerConfig.ps1"
 . "$PSScriptRoot\up\config\Select-VmsForProvisioning.ps1"
 . "$PSScriptRoot\up\seed\iso.ps1"
 . "$PSScriptRoot\up\disk\Invoke-BaseImagePatch.ps1"
@@ -60,50 +61,15 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\Install-ModuleDependencies.ps1"
 
 # ---------------------------------------------------------------------------
-# 2. Ensure the SecretStore vault provider modules are loaded.
-#    setup-secrets.ps1 installs them; provisioning is import-only.
+# 2. Load + parse + validate the VmProvisionerConfig secret in one call.
+#    Helper owns the SecretManagement bootstrap, vault read, and schema
+#    validation - keeping this script focused on the provisioning pipeline.
 # ---------------------------------------------------------------------------
 
-foreach ($mod in @(
-    'Microsoft.PowerShell.SecretManagement',
-    'Microsoft.PowerShell.SecretStore'
-)) {
-    if (-not (Get-Module -ListAvailable -Name $mod)) {
-        throw "Module '$mod' is not installed. Run setup-secrets.ps1 first."
-    }
-    Import-Module $mod -ErrorAction Stop
-}
+$vmDefs = Read-VmProvisionerConfig
 
 # ---------------------------------------------------------------------------
-# 3. Read VmProvisionerConfig from the local vault
-# ---------------------------------------------------------------------------
-
-$vaultName  = 'VmProvisioner'
-$secretName = 'VmProvisionerConfig'
-
-Write-Host "Reading '$secretName' from vault '$vaultName' ..." -ForegroundColor Cyan
-
-$vault = Get-SecretVault -Name $vaultName -ErrorAction SilentlyContinue
-if ($null -eq $vault) {
-    throw "Vault '$vaultName' not found. Run setup-secrets.ps1 first."
-}
-
-$configJson = Get-Secret -Vault $vaultName -Name $secretName `
-    -AsPlainText -ErrorAction Stop
-
-# ---------------------------------------------------------------------------
-# 4. Parse and validate JSON
-#    Done here (not relying solely on setup-secrets.ps1) because the vault
-#    could hold stale or manually-edited data. Failing fast is safer than
-#    discovering a missing field mid-provisioning.
-# ---------------------------------------------------------------------------
-
-$vmDefs = ConvertTo-Array (ConvertFrom-VmConfigJson -Json $configJson)
-Write-Host "[OK] Config validated - $($vmDefs.Count) VM definition(s) found." `
-    -ForegroundColor Green
-
-# ---------------------------------------------------------------------------
-# 5. Idempotency and safety checks
+# 3. Idempotency and safety checks
 #    Filters $vmDefs down to VMs that are safe to provision:
 #      a) no existing Hyper-V VM with the same vmName
 #      b) no machine already responding to the target ipAddress
@@ -133,9 +99,9 @@ Write-Host ("Queued: $($newVms.Count) new VM(s), " +
     -ForegroundColor Cyan
 
 # ---------------------------------------------------------------------------
-# 6. Disk image acquisition (new VMs only)
+# 4. Disk image acquisition (new VMs only)
 #    Downloads, converts, patches, and copies the per-VM VHDX.
-#    Sets $vm._vhdxPath on each object for use in step 10. Skipped for
+#    Sets $vm._vhdxPath on each object for use in step 8. Skipped for
 #    existing VMs - their disks already exist and re-copying would lose
 #    data.
 #
@@ -160,7 +126,7 @@ foreach ($vm in $newVms) {
 }
 
 # ---------------------------------------------------------------------------
-# 7. Host-side acquisitions (per VM - new AND existing)
+# 5. Host-side acquisitions (per VM - new AND existing)
 #    Per-VM orchestrator that dispatches each per-software acquirer whose
 #    opt-in field is set on the VM definition. Self-skips for VMs with no
 #    opt-in fields. Adding a new acquirer is one dispatch line in
@@ -177,7 +143,7 @@ foreach ($vm in $vmsToProcess) {
 }
 
 # ---------------------------------------------------------------------------
-# 8. Cloud-init seed ISO generation (new VMs only)
+# 6. Cloud-init seed ISO generation (new VMs only)
 #    Builds meta-data, user-data, and network-config; writes the ISO.
 #    Sets $vm._seedIsoPath on each object for use in the VM-creation step.
 #    Skipped for existing VMs - cloud-init already ran on their first boot.
@@ -188,7 +154,7 @@ foreach ($vm in $newVms) {
 }
 
 # ---------------------------------------------------------------------------
-# 9. Virtual switch and NAT setup
+# 7. Virtual switch and NAT setup
 #    Switch and NAT names come from the config (default: VmLAN / VmLAN-NAT).
 #    Idempotent - safe to re-run. Always runs so a rebuilt host gets the
 #    network re-applied around already-existing VMs.
@@ -202,7 +168,7 @@ Invoke-NetworkSetup -VmsToProvision $vmsToProcess `
                     -NatName        $natName
 
 # ---------------------------------------------------------------------------
-# 10. VM creation (new VMs only)
+# 8. VM creation (new VMs only)
 #    Creates, configures, boots each VM, and waits for SSH readiness.
 #    Skipped for existing VMs.
 # ---------------------------------------------------------------------------
@@ -212,7 +178,7 @@ foreach ($vm in $newVms) {
 }
 
 # ---------------------------------------------------------------------------
-# 11. Post-provisioning (per VM - new AND existing)
+# 9. Post-provisioning (per VM - new AND existing)
 #     Opens one host file server + SSH session per VM, waits for cloud-init
 #     to finish, then dispatches each enabled step. Each step is
 #     self-contained - no cross-step file dependencies - so order between
