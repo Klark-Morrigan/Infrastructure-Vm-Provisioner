@@ -22,6 +22,28 @@ BeforeAll {
     }
     function Assert-VmEnvVarsField { param($Vm) }
 
+    # SecretManagement cmdlet stubs. Real implementations live in
+    # Microsoft.PowerShell.SecretManagement, which is not installed on CI
+    # runners. Pester 5's Mock cannot attach to a command that does not
+    # exist in the session, so we provide function shells with matching
+    # parameter surfaces. [CmdletBinding()] lets PowerShell wire up the
+    # common parameters (-ErrorAction in particular) the same way the
+    # real cmdlets do, so each test's ParameterFilter sees $ErrorAction
+    # without us having to redeclare it. Each test then Mocks these
+    # per-scenario.
+    function Get-SecretVault {
+        [CmdletBinding()]
+        param([string] $Name)
+    }
+    function Get-Secret {
+        [CmdletBinding()]
+        param(
+            [string] $Vault,
+            [string] $Name,
+            [switch] $AsPlainText
+        )
+    }
+
     function ConvertTo-Array {
         param([AllowNull()] $InputObject)
         if ($null -eq $InputObject) { return , @() }
