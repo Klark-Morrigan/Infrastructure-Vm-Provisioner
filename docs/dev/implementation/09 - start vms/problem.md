@@ -188,11 +188,6 @@ reboot needs the other four back up immediately.
   and [08 - env vars Step 1](../08%20-%20env%20vars/plan.md#step-1---confirm-infrastructurehyperv-dependency-floor)
   established. If the floor has already advanced past `0.8.0` by the
   time this lands, the bump is a no-op confirmation commit.
-- [hyper-v/ubuntu/start-vms.bat](../../../../hyper-v/ubuntu/start-vms.bat) (new) -
-  cmd-line launcher mirroring `provision.bat` / `deprovision.bat` so
-  the script can be double-clicked from Explorer with elevation.
-  Optional but matches the existing convention - dropping it would
-  make `start-vms` the only entry-point without a `.bat` neighbour.
 - [README.md](../../../../README.md) - new "Starting VMs" section
   between `provision.ps1` and `deprovision.ps1` (lifecycle order), one
   short usage example, and a sentence each on the idempotency
