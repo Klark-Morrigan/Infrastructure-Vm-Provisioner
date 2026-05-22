@@ -441,8 +441,8 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
    cached artefact is cheap. New acquirers plug in as one dispatch line
    in the orchestrator, not a new step here.
 6. **(new VMs only)** Generates a cloud-init seed ISO
-   (`{vmName}-seed.iso`) in `vmConfigPath` containing `meta-data`,
-   `user-data`, and `network-config`. On first boot cloud-init reads the
+   (`{vmName}-seed.iso`) in `vmConfigPath` containing `meta-data` and
+   `user-data`. On first boot cloud-init reads the
    ISO to create the OS user, enable SSH, and apply the static IP - no
    interactive installer needed. The static IP is installed via
    `user-data` `write_files`: cloud-init drops the netplan document at
@@ -623,7 +623,7 @@ Infrastructure-VM-Provisioner/
 |     |  |  `- setup-network.ps1               # Creates VmLAN switch, host IP, NAT rule
 |     |  |- seed/
 |     |  |  |- generate-seed-iso.ps1           # Builds cloud-init seed ISO
-|     |  |  |- New-StaticNetplanYaml.ps1       # Builds netplan v2 YAML for the VM's static NIC (shared by network-config and user-data write_files)
+|     |  |  |- New-StaticNetplanYaml.ps1       # Builds netplan v2 YAML for the VM's static NIC (embedded in user-data write_files)
 |     |  |  `- iso.ps1                         # IMAPI2 ISO creation helper
 |     |  `- vm/
 |     |     `- create-vm.ps1                   # Creates, boots, and polls each VM
