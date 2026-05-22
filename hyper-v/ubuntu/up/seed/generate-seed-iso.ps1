@@ -79,6 +79,41 @@ local-hostname: $($Vm.vmName)
     # relies on vault encryption at rest and the short session lifetime.
     $yamlPassword = $Vm.password -replace '\\', '\\' -replace '"', '\"'
 
+    # ------------------------------------------------------------------
+    # Static netplan YAML, shared between the seed's legacy
+    # network-config file (cloud-init's network module input) and
+    # user-data's write_files entry (the on-disk file netplan owns
+    # after first boot). See problem.md for why the on-disk file is
+    # the authoritative one going forward.
+    # ------------------------------------------------------------------
+    $networkConfig = New-StaticNetplanYaml `
+        -IpAddress  $Vm.ipAddress `
+        -SubnetMask $Vm.subnetMask `
+        -Gateway    $Vm.gateway `
+        -Dns        $Vm.dns
+
+    # ------------------------------------------------------------------
+    # Indent the netplan YAML for embedding as a literal block scalar
+    # (`content: |`) under a write_files entry. Each line gets six
+    # spaces: two for the list item and four for the content key.
+    # ------------------------------------------------------------------
+    $netplanIndented = ($networkConfig -split "`r?`n" |
+        ForEach-Object { "      $_" }) -join "`n"
+
+    # ------------------------------------------------------------------
+    # user-data (cloud-config)
+    #
+    # write_files lands two files before cloud-init's network module
+    # runs:
+    #   1. /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg with
+    #      `network: {config: disabled}` - stops cloud-init from
+    #      ever rewriting /etc/netplan/*.yaml again.
+    #   2. /etc/netplan/99-static.yaml - the static config netplan
+    #      owns. The 99- prefix outranks the legacy 50-cloud-init.yaml
+    #      so behaviour stays deterministic during the transition.
+    # runcmd then applies the new config so the IP is live before
+    # cloud-init finishes first boot.
+    # ------------------------------------------------------------------
     $userData = @"
 #cloud-config
 
@@ -97,19 +132,19 @@ packages:
 
 package_update: true
 package_upgrade: false
-"@
 
-    # ------------------------------------------------------------------
-    # network-config (cloud-init network configuration v2 / netplan)
-    #
-    # The YAML body is produced by New-StaticNetplanYaml so the same
-    # template can be reused by user-data's write_files in a later step.
-    # ------------------------------------------------------------------
-    $networkConfig = New-StaticNetplanYaml `
-        -IpAddress  $Vm.ipAddress `
-        -SubnetMask $Vm.subnetMask `
-        -Gateway    $Vm.gateway `
-        -Dns        $Vm.dns
+write_files:
+  - path: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+    permissions: '0644'
+    content: 'network: {config: disabled}'
+  - path: /etc/netplan/99-static.yaml
+    permissions: '0600'
+    content: |
+$netplanIndented
+
+runcmd:
+  - netplan apply
+"@
 
     $seedIsoPath = Join-Path $Vm.vmConfigPath "$($Vm.vmName)-seed.iso"
     Write-Host "  Writing: $seedIsoPath"

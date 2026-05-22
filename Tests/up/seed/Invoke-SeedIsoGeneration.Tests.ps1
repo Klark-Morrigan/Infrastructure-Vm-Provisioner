@@ -195,6 +195,103 @@ Describe 'Invoke-SeedIsoGeneration' {
     }
 
     # ------------------------------------------------------------------
+    Context 'user-data write_files for static networking' {
+    # ------------------------------------------------------------------
+    # These entries are what makes netplan - not cloud-init - the owner
+    # of /etc/netplan/99-static.yaml on every boot after the first. See
+    # problem.md (40 - static network config).
+
+        It 'declares a write_files block in user-data' {
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-SeedIsoGeneration -Vm (New-TestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match '(?m)^write_files:'
+            }
+        }
+
+        It 'writes the cloud-init network disable flag at the expected path' {
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-SeedIsoGeneration -Vm (New-TestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match `
+                    'path: /etc/cloud/cloud\.cfg\.d/99-disable-network-config\.cfg'
+            }
+        }
+
+        It 'writes the disable flag content exactly as cloud-init parses it verbatim' {
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-SeedIsoGeneration -Vm (New-TestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match `
+                    ([regex]::Escape("content: 'network: {config: disabled}'"))
+            }
+        }
+
+        It 'writes the disable flag with mode 0644' {
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-SeedIsoGeneration -Vm (New-TestVm)
+            # The disable flag block comes first; assert the 0644 line
+            # appears between its path and the next path entry.
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match `
+                    "(?s)99-disable-network-config\.cfg.*?permissions: '0644'.*?99-static\.yaml"
+            }
+        }
+
+        It 'writes the static netplan at /etc/netplan/99-static.yaml' {
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-SeedIsoGeneration -Vm (New-TestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match 'path: /etc/netplan/99-static\.yaml'
+            }
+        }
+
+        It 'writes the static netplan with mode 0600' {
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-SeedIsoGeneration -Vm (New-TestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match `
+                    "(?s)99-static\.yaml.*?permissions: '0600'"
+            }
+        }
+
+        It 'embeds the New-StaticNetplanYaml output verbatim under the netplan write_files entry' {
+            # Re-derive the expected YAML the same way the source does
+            # (same Vm config -> same template output) and assert each
+            # line lands inside user-data indented by six spaces.
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            $vm       = New-TestVm
+            $expected = New-StaticNetplanYaml `
+                -IpAddress  $vm.ipAddress `
+                -SubnetMask $vm.subnetMask `
+                -Gateway    $vm.gateway `
+                -Dns        $vm.dns
+            $expectedIndented = ($expected -split "`r?`n" |
+                ForEach-Object { "      $_" }) -join "`n"
+            Invoke-SeedIsoGeneration -Vm $vm
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'].Contains($expectedIndented)
+            }
+        }
+
+        It 'runs netplan apply via runcmd so the static IP is live during first boot' {
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-SeedIsoGeneration -Vm (New-TestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match "(?m)^runcmd:\s*`r?`n\s*-\s*netplan apply\s*$"
+            }
+        }
+    }
+
+    # ------------------------------------------------------------------
     Context 'ISO file structure' {
     # ------------------------------------------------------------------
 
