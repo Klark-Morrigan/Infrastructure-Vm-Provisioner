@@ -615,6 +615,7 @@ Infrastructure-VM-Provisioner/
 |     |  |  `- setup-network.ps1               # Creates VmLAN switch, host IP, NAT rule
 |     |  |- seed/
 |     |  |  |- generate-seed-iso.ps1           # Builds cloud-init seed ISO
+|     |  |  |- New-StaticNetplanYaml.ps1       # Builds netplan v2 YAML for the VM's static NIC (shared by network-config and user-data write_files)
 |     |  |  `- iso.ps1                         # IMAPI2 ISO creation helper
 |     |  `- vm/
 |     |     `- create-vm.ps1                   # Creates, boots, and polls each VM
