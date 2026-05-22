@@ -4,6 +4,7 @@ BeforeAll {
     # generate-seed-iso.ps1 so the function reference resolves without error.
     function New-SeedIso { param($OutputPath, $Files) }
 
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\New-StaticNetplanYaml.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\generate-seed-iso.ps1"
 
     function New-TestVm {

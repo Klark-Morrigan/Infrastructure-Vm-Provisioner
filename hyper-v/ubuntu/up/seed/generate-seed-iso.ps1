@@ -102,27 +102,14 @@ package_upgrade: false
     # ------------------------------------------------------------------
     # network-config (cloud-init network configuration v2 / netplan)
     #
-    # Matching on driver: hv_netvsc rather than a fixed interface name
-    # (eth0, enp0s*, etc.) because the kernel-assigned name varies across
-    # Ubuntu releases and Hyper-V generations. hv_netvsc is the driver for
-    # all Hyper-V synthetic NICs, so this match always hits the right NIC.
+    # The YAML body is produced by New-StaticNetplanYaml so the same
+    # template can be reused by user-data's write_files in a later step.
     # ------------------------------------------------------------------
-    $networkConfig = @"
-version: 2
-ethernets:
-  eth0:
-    match:
-      driver: hv_netvsc
-    dhcp4: false
-    addresses:
-      - $($Vm.ipAddress)/$($Vm.subnetMask)
-    routes:
-      - to: default
-        via: $($Vm.gateway)
-    nameservers:
-      addresses:
-        - $($Vm.dns)
-"@
+    $networkConfig = New-StaticNetplanYaml `
+        -IpAddress  $Vm.ipAddress `
+        -SubnetMask $Vm.subnetMask `
+        -Gateway    $Vm.gateway `
+        -Dns        $Vm.dns
 
     $seedIsoPath = Join-Path $Vm.vmConfigPath "$($Vm.vmName)-seed.iso"
     Write-Host "  Writing: $seedIsoPath"
