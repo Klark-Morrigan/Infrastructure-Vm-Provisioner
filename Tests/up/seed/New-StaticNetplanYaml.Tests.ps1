@@ -1,12 +1,32 @@
 BeforeAll {
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\New-StaticNetplanYaml.ps1"
 
+    # powershell-yaml is a test-only dependency used to round-trip the
+    # generated YAML into a hashtable so assertions are made against
+    # parsed structure rather than literal whitespace. Installed here on
+    # demand because it is not part of Install-ModuleDependencies (which
+    # covers production dependencies only).
+    if (-not (Get-Module -ListAvailable -Name powershell-yaml)) {
+        Install-Module powershell-yaml -Scope CurrentUser `
+            -Force -AllowClobber -ErrorAction Stop
+    }
+    Import-Module powershell-yaml -Force -ErrorAction Stop
+
     function New-TestYaml {
         New-StaticNetplanYaml `
             -IpAddress  '192.168.1.10' `
             -SubnetMask '24' `
             -Gateway    '192.168.1.1' `
             -Dns        '8.8.8.8'
+    }
+
+    function ConvertTo-NetplanModel {
+        param([Parameter(Mandatory)] [string] $Yaml)
+        # ConvertFrom-Yaml returns nested hashtables for mappings and
+        # object arrays for sequences. Strict mode is in effect, so the
+        # tests use ['key'] access (which returns $null for missing keys)
+        # rather than dot access (which throws under strict mode).
+        return (ConvertFrom-Yaml $Yaml)
     }
 }
 
@@ -17,26 +37,38 @@ Describe 'New-StaticNetplanYaml' {
     # ------------------------------------------------------------------
 
         It 'returns a single string' {
-            $yaml = New-TestYaml
-            $yaml | Should -BeOfType ([string])
+            (New-TestYaml) | Should -BeOfType ([string])
+        }
+
+        It 'parses as valid YAML' {
+            { ConvertTo-NetplanModel -Yaml (New-TestYaml) } |
+                Should -Not -Throw
         }
 
         It 'declares netplan v2 schema' {
-            (New-TestYaml) | Should -Match '(?m)^version: 2$'
+            $model = ConvertTo-NetplanModel -Yaml (New-TestYaml)
+            $model['version'] | Should -Be 2
         }
 
-        It 'configures the eth0 ethernet entry' {
-            (New-TestYaml) | Should -Match '(?ms)^ethernets:\s*\r?\n\s+eth0:'
+        It 'configures exactly one ethernet entry, keyed eth0' {
+            # eth0 is the netplan logical name; the actual kernel NIC is
+            # selected by the match block (driver: hv_netvsc).
+            $eths = (ConvertTo-NetplanModel -Yaml (New-TestYaml))['ethernets']
+            $eths | Should -BeOfType ([hashtable])
+            @($eths.Keys) | Should -Be @('eth0')
         }
 
-        It 'matches the Hyper-V synthetic NIC by driver' {
-            # Driver match keeps the file working across kernel NIC names
-            # (eth0, enp0s*, etc.) which differ between Ubuntu releases.
-            (New-TestYaml) | Should -Match 'driver: hv_netvsc'
+        It 'matches the Hyper-V synthetic NIC by driver, not by name' {
+            # Matching by driver keeps the file portable across kernel
+            # NIC names (eth0 / enp0s* / etc.) that differ between Ubuntu
+            # releases and Hyper-V generations.
+            $eth = (ConvertTo-NetplanModel -Yaml (New-TestYaml))['ethernets']['eth0']
+            $eth['match']['driver'] | Should -Be 'hv_netvsc'
         }
 
         It 'disables DHCPv4 so the static address is authoritative' {
-            (New-TestYaml) | Should -Match 'dhcp4: false'
+            $eth = (ConvertTo-NetplanModel -Yaml (New-TestYaml))['ethernets']['eth0']
+            $eth['dhcp4'] | Should -Be $false
         }
     }
 
@@ -44,26 +76,19 @@ Describe 'New-StaticNetplanYaml' {
     Context 'address composition' {
     # ------------------------------------------------------------------
 
-        It 'composes CIDR from IpAddress and SubnetMask' {
-            (New-TestYaml) | Should -Match '- 192\.168\.1\.10/24'
+        It 'composes a single CIDR address from IpAddress and SubnetMask' {
+            $eth = (ConvertTo-NetplanModel -Yaml (New-TestYaml))['ethernets']['eth0']
+            @($eth['addresses']) | Should -Be @('192.168.1.10/24')
         }
 
-        It 'reflects the supplied IpAddress' {
+        It 'reflects the supplied IpAddress and SubnetMask' {
             $yaml = New-StaticNetplanYaml `
                 -IpAddress  '10.20.30.40' `
                 -SubnetMask '16' `
                 -Gateway    '10.20.0.1' `
                 -Dns        '1.1.1.1'
-            $yaml | Should -Match '- 10\.20\.30\.40/16'
-        }
-
-        It 'reflects the supplied SubnetMask' {
-            $yaml = New-StaticNetplanYaml `
-                -IpAddress  '192.168.1.10' `
-                -SubnetMask '23' `
-                -Gateway    '192.168.1.1' `
-                -Dns        '8.8.8.8'
-            $yaml | Should -Match '- 192\.168\.1\.10/23'
+            $eth = (ConvertTo-NetplanModel -Yaml $yaml)['ethernets']['eth0']
+            @($eth['addresses']) | Should -Be @('10.20.30.40/16')
         }
     }
 
@@ -71,8 +96,12 @@ Describe 'New-StaticNetplanYaml' {
     Context 'default route' {
     # ------------------------------------------------------------------
 
-        It 'uses the supplied Gateway as the default route via' {
-            (New-TestYaml) | Should -Match '(?ms)- to: default\s*\r?\n\s+via: 192\.168\.1\.1'
+        It 'declares a single default route via the supplied Gateway' {
+            $eth = (ConvertTo-NetplanModel -Yaml (New-TestYaml))['ethernets']['eth0']
+            $routes = @($eth['routes'])
+            $routes.Count | Should -Be 1
+            $routes[0]['to']  | Should -Be 'default'
+            $routes[0]['via'] | Should -Be '192.168.1.1'
         }
 
         It 'reflects a different Gateway when changed' {
@@ -81,7 +110,8 @@ Describe 'New-StaticNetplanYaml' {
                 -SubnetMask '24' `
                 -Gateway    '192.168.99.254' `
                 -Dns        '8.8.8.8'
-            $yaml | Should -Match 'via: 192\.168\.99\.254'
+            $route = @((ConvertTo-NetplanModel -Yaml $yaml)['ethernets']['eth0']['routes'])[0]
+            $route['via'] | Should -Be '192.168.99.254'
         }
     }
 
@@ -89,27 +119,20 @@ Describe 'New-StaticNetplanYaml' {
     Context 'DNS' {
     # ------------------------------------------------------------------
 
-        It 'lists only the supplied DNS server under nameservers' {
-            $yaml = New-TestYaml
-            $yaml | Should -Match '(?ms)nameservers:\s*\r?\n\s+addresses:\s*\r?\n\s+- 8\.8\.8\.8'
+        It 'lists exactly the supplied DNS server under nameservers' {
+            $eth = (ConvertTo-NetplanModel -Yaml (New-TestYaml))['ethernets']['eth0']
+            @($eth['nameservers']['addresses']) | Should -Be @('8.8.8.8')
         }
 
         It 'does not include any DNS address other than the one supplied' {
-            # Guards against accidentally hard-coding a fallback (e.g. 1.1.1.1).
+            # Guards against accidentally hard-coding a fallback resolver.
             $yaml = New-StaticNetplanYaml `
                 -IpAddress  '192.168.1.10' `
                 -SubnetMask '24' `
                 -Gateway    '192.168.1.1' `
                 -Dns        '9.9.9.9'
-            $addresses = [regex]::Matches(
-                $yaml,
-                '(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d|/)'
-            ) | ForEach-Object { $_.Value }
-            # Expected non-DNS addresses in the document: gateway + host IP.
-            $dnsAddresses = $addresses | Where-Object {
-                $_ -ne '192.168.1.10' -and $_ -ne '192.168.1.1'
-            }
-            $dnsAddresses | Should -Be @('9.9.9.9')
+            $eth = (ConvertTo-NetplanModel -Yaml $yaml)['ethernets']['eth0']
+            @($eth['nameservers']['addresses']) | Should -Be @('9.9.9.9')
         }
     }
 }
