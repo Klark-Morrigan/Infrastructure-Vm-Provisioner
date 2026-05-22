@@ -151,50 +151,6 @@ Describe 'Invoke-SeedIsoGeneration' {
     }
 
     # ------------------------------------------------------------------
-    Context 'network-config content' {
-    # ------------------------------------------------------------------
-
-        It 'includes the IP address and subnet mask in CIDR notation' {
-            Mock Test-Path { $true }
-            Mock New-SeedIso {}
-            Invoke-SeedIsoGeneration -Vm (New-TestVm)
-            Should -Invoke New-SeedIso -ParameterFilter {
-                $Files['network-config'] -match '192\.168\.1\.10/24'
-            }
-        }
-
-        It 'includes the gateway as the default route' {
-            Mock Test-Path { $true }
-            Mock New-SeedIso {}
-            Invoke-SeedIsoGeneration -Vm (New-TestVm)
-            Should -Invoke New-SeedIso -ParameterFilter {
-                $Files['network-config'] -match 'via: 192\.168\.1\.1'
-            }
-        }
-
-        It 'includes the DNS server address' {
-            Mock Test-Path { $true }
-            Mock New-SeedIso {}
-            Invoke-SeedIsoGeneration -Vm (New-TestVm)
-            Should -Invoke New-SeedIso -ParameterFilter {
-                $Files['network-config'] -match '8\.8\.8\.8'
-            }
-        }
-
-        It 'matches on hv_netvsc driver so the config is NIC-name-independent' {
-            # Matching by driver rather than interface name (eth0, enp0s*) means
-            # the config works regardless of how the kernel names the NIC across
-            # Ubuntu versions or Hyper-V generations.
-            Mock Test-Path { $true }
-            Mock New-SeedIso {}
-            Invoke-SeedIsoGeneration -Vm (New-TestVm)
-            Should -Invoke New-SeedIso -ParameterFilter {
-                $Files['network-config'] -match 'driver: hv_netvsc'
-            }
-        }
-    }
-
-    # ------------------------------------------------------------------
     Context 'user-data write_files for static networking' {
     # ------------------------------------------------------------------
     # These entries are what makes netplan - not cloud-init - the owner
@@ -295,14 +251,17 @@ Describe 'Invoke-SeedIsoGeneration' {
     Context 'ISO file structure' {
     # ------------------------------------------------------------------
 
-        It 'passes all three required cloud-init file names to New-SeedIso' {
+        It 'passes exactly meta-data and user-data to New-SeedIso' {
+            # network-config is intentionally absent: cloud-init's network
+            # module is disabled via write_files, so the seed no longer
+            # ships a network-config file. See plan.md step 3.
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-SeedIsoGeneration -Vm (New-TestVm)
             Should -Invoke New-SeedIso -ParameterFilter {
-                $Files.ContainsKey('meta-data')      -and
-                $Files.ContainsKey('user-data')      -and
-                $Files.ContainsKey('network-config')
+                $Files.Keys.Count -eq 2          -and
+                $Files.ContainsKey('meta-data')  -and
+                $Files.ContainsKey('user-data')
             }
         }
 

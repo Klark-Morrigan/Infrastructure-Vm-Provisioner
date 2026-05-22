@@ -10,14 +10,14 @@
 #   single VM. The ISO is placed in Vm.vmConfigPath.
 #
 #   cloud-init's NoCloud datasource reads from a filesystem volume labelled
-#   'cidata'. Three files are placed in the root of the ISO:
+#   'cidata'. Two files are placed in the root of the ISO:
 #
-#     meta-data      - instance identity (instance-id, local-hostname).
-#     user-data      - cloud-config: OS user, SSH, installed packages.
-#     network-config - cloud-init network v2 format: static IP, gateway,
-#                      DNS. Kept separate from user-data so cloud-init's
-#                      network module processes it before other modules
-#                      that require network access (e.g. package install).
+#     meta-data - instance identity (instance-id, local-hostname).
+#     user-data - cloud-config: OS user, SSH, installed packages, and
+#                 write_files entries that disable cloud-init's network
+#                 module and drop a static netplan file owned by netplan
+#                 from first boot onwards. See
+#                 docs/dev/implementation/40 - static network config.
 #
 #   SECURITY - user-data contains Vm.password in plaintext so cloud-init
 #   can hash it internally (plain_text_passwd). The ISO persists on the
@@ -80,13 +80,12 @@ local-hostname: $($Vm.vmName)
     $yamlPassword = $Vm.password -replace '\\', '\\' -replace '"', '\"'
 
     # ------------------------------------------------------------------
-    # Static netplan YAML, shared between the seed's legacy
-    # network-config file (cloud-init's network module input) and
-    # user-data's write_files entry (the on-disk file netplan owns
-    # after first boot). See problem.md for why the on-disk file is
-    # the authoritative one going forward.
+    # Static netplan YAML for the user-data write_files entry - the
+    # on-disk file netplan owns from first boot onwards. cloud-init's
+    # network module is disabled by the companion write_files entry,
+    # so the seed no longer ships a separate network-config file.
     # ------------------------------------------------------------------
-    $networkConfig = New-StaticNetplanYaml `
+    $netplanYaml = New-StaticNetplanYaml `
         -IpAddress  $Vm.ipAddress `
         -SubnetMask $Vm.subnetMask `
         -Gateway    $Vm.gateway `
@@ -97,7 +96,7 @@ local-hostname: $($Vm.vmName)
     # (`content: |`) under a write_files entry. Each line gets six
     # spaces: two for the list item and four for the content key.
     # ------------------------------------------------------------------
-    $netplanIndented = ($networkConfig -split "`r?`n" |
+    $netplanIndented = ($netplanYaml -split "`r?`n" |
         ForEach-Object { "      $_" }) -join "`n"
 
     # ------------------------------------------------------------------
@@ -150,9 +149,8 @@ runcmd:
     Write-Host "  Writing: $seedIsoPath"
 
     New-SeedIso -OutputPath $seedIsoPath -Files @{
-        'meta-data'      = $metaData
-        'user-data'      = $userData
-        'network-config' = $networkConfig
+        'meta-data' = $metaData
+        'user-data' = $userData
     }
 
     Write-Host "  [OK] Seed ISO ready: $seedIsoPath" -ForegroundColor Green
