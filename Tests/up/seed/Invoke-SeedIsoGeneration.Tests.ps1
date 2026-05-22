@@ -4,6 +4,7 @@ BeforeAll {
     # generate-seed-iso.ps1 so the function reference resolves without error.
     function New-SeedIso { param($OutputPath, $Files) }
 
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\New-StaticNetplanYaml.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\generate-seed-iso.ps1"
 
     function New-TestVm {
@@ -150,45 +151,98 @@ Describe 'Invoke-SeedIsoGeneration' {
     }
 
     # ------------------------------------------------------------------
-    Context 'network-config content' {
+    Context 'user-data write_files for static networking' {
     # ------------------------------------------------------------------
+    # These entries are what makes netplan - not cloud-init - the owner
+    # of /etc/netplan/99-static.yaml on every boot after the first. See
+    # problem.md (40 - static network config).
 
-        It 'includes the IP address and subnet mask in CIDR notation' {
+        It 'declares a write_files block in user-data' {
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-SeedIsoGeneration -Vm (New-TestVm)
             Should -Invoke New-SeedIso -ParameterFilter {
-                $Files['network-config'] -match '192\.168\.1\.10/24'
+                $Files['user-data'] -match '(?m)^write_files:'
             }
         }
 
-        It 'includes the gateway as the default route' {
+        It 'writes the cloud-init network disable flag at the expected path' {
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-SeedIsoGeneration -Vm (New-TestVm)
             Should -Invoke New-SeedIso -ParameterFilter {
-                $Files['network-config'] -match 'via: 192\.168\.1\.1'
+                $Files['user-data'] -match `
+                    'path: /etc/cloud/cloud\.cfg\.d/99-disable-network-config\.cfg'
             }
         }
 
-        It 'includes the DNS server address' {
+        It 'writes the disable flag content exactly as cloud-init parses it verbatim' {
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-SeedIsoGeneration -Vm (New-TestVm)
             Should -Invoke New-SeedIso -ParameterFilter {
-                $Files['network-config'] -match '8\.8\.8\.8'
+                $Files['user-data'] -match `
+                    ([regex]::Escape("content: 'network: {config: disabled}'"))
             }
         }
 
-        It 'matches on hv_netvsc driver so the config is NIC-name-independent' {
-            # Matching by driver rather than interface name (eth0, enp0s*) means
-            # the config works regardless of how the kernel names the NIC across
-            # Ubuntu versions or Hyper-V generations.
+        It 'writes the disable flag with mode 0644' {
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-SeedIsoGeneration -Vm (New-TestVm)
+            # The disable flag block comes first; assert the 0644 line
+            # appears between its path and the next path entry.
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match `
+                    "(?s)99-disable-network-config\.cfg.*?permissions: '0644'.*?99-static\.yaml"
+            }
+        }
+
+        It 'writes the static netplan at /etc/netplan/99-static.yaml' {
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-SeedIsoGeneration -Vm (New-TestVm)
             Should -Invoke New-SeedIso -ParameterFilter {
-                $Files['network-config'] -match 'driver: hv_netvsc'
+                $Files['user-data'] -match 'path: /etc/netplan/99-static\.yaml'
+            }
+        }
+
+        It 'writes the static netplan with mode 0600' {
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-SeedIsoGeneration -Vm (New-TestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match `
+                    "(?s)99-static\.yaml.*?permissions: '0600'"
+            }
+        }
+
+        It 'embeds the New-StaticNetplanYaml output verbatim under the netplan write_files entry' {
+            # Re-derive the expected YAML the same way the source does
+            # (same Vm config -> same template output) and assert each
+            # line lands inside user-data indented by six spaces.
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            $vm       = New-TestVm
+            $expected = New-StaticNetplanYaml `
+                -IpAddress  $vm.ipAddress `
+                -SubnetMask $vm.subnetMask `
+                -Gateway    $vm.gateway `
+                -Dns        $vm.dns
+            $expectedIndented = ($expected -split "`r?`n" |
+                ForEach-Object { "      $_" }) -join "`n"
+            Invoke-SeedIsoGeneration -Vm $vm
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'].Contains($expectedIndented)
+            }
+        }
+
+        It 'runs netplan apply via runcmd so the static IP is live during first boot' {
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-SeedIsoGeneration -Vm (New-TestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match "(?m)^runcmd:\s*`r?`n\s*-\s*netplan apply\s*$"
             }
         }
     }
@@ -197,14 +251,41 @@ Describe 'Invoke-SeedIsoGeneration' {
     Context 'ISO file structure' {
     # ------------------------------------------------------------------
 
-        It 'passes all three required cloud-init file names to New-SeedIso' {
+        It 'passes meta-data, user-data, and network-config to New-SeedIso' {
+            # network-config carries the disable flag. cloud-init reads it
+            # in the init stage (BEFORE write_files), so it is the only
+            # place the flag can land in time to prevent first-boot DHCP
+            # fallback. See generate-seed-iso.ps1 file header.
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-SeedIsoGeneration -Vm (New-TestVm)
             Should -Invoke New-SeedIso -ParameterFilter {
+                $Files.Keys.Count -eq 3              -and
                 $Files.ContainsKey('meta-data')      -and
                 $Files.ContainsKey('user-data')      -and
                 $Files.ContainsKey('network-config')
+            }
+        }
+
+        It 'ships network-config equal to New-StaticNetplanYaml output' {
+            # Same template as the write_files entry, so first-boot
+            # (network-config -> 50-cloud-init.yaml) and on-disk
+            # (write_files -> 99-static.yaml) cannot drift. Disabling
+            # cloud-init networking entirely on first boot is not viable
+            # because cc_package_update_upgrade_install needs the NIC
+            # up - so cloud-init owns first-boot bring-up via this slot,
+            # and the write_files disable flag handles subsequent boots.
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            $vm       = New-TestVm
+            $expected = New-StaticNetplanYaml `
+                -IpAddress  $vm.ipAddress `
+                -SubnetMask $vm.subnetMask `
+                -Gateway    $vm.gateway `
+                -Dns        $vm.dns
+            Invoke-SeedIsoGeneration -Vm $vm
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['network-config'] -eq $expected
             }
         }
 

@@ -10,14 +10,27 @@
 #   single VM. The ISO is placed in Vm.vmConfigPath.
 #
 #   cloud-init's NoCloud datasource reads from a filesystem volume labelled
-#   'cidata'. Three files are placed in the root of the ISO:
+#   'cidata'. Two files are placed in the root of the ISO:
 #
-#     meta-data      - instance identity (instance-id, local-hostname).
-#     user-data      - cloud-config: OS user, SSH, installed packages.
-#     network-config - cloud-init network v2 format: static IP, gateway,
-#                      DNS. Kept separate from user-data so cloud-init's
-#                      network module processes it before other modules
-#                      that require network access (e.g. package install).
+#     meta-data - instance identity (instance-id, local-hostname).
+#     user-data - cloud-config: OS user, SSH, installed packages, and
+#                 write_files entries that drop a static netplan file
+#                 owned by netplan from first boot onwards. See
+#                 docs/dev/implementation/40 - static network config.
+#     network-config - the NoCloud "network config v1+" slot. We ship
+#                 the FULL static netplan here so cloud-init's
+#                 init-local stage brings the NIC up on first boot
+#                 (writes /etc/netplan/50-cloud-init.yaml, runs
+#                 netplan apply) BEFORE the config stage runs apt
+#                 for package_update / package install. Disabling
+#                 cloud-init networking entirely on first boot is
+#                 not viable: cc_package_update_upgrade_install
+#                 needs the NIC up and stalls the whole pipeline.
+#                 Subsequent-boot regressions are blocked instead
+#                 by the persistent disable flag landed via
+#                 write_files (see below) and by /etc/netplan/
+#                 99-static.yaml outranking the legacy
+#                 50-cloud-init.yaml. See plan.md step 4 follow-up.
 #
 #   SECURITY - user-data contains Vm.password in plaintext so cloud-init
 #   can hash it internally (plain_text_passwd). The ISO persists on the
@@ -79,6 +92,44 @@ local-hostname: $($Vm.vmName)
     # relies on vault encryption at rest and the short session lifetime.
     $yamlPassword = $Vm.password -replace '\\', '\\' -replace '"', '\"'
 
+    # ------------------------------------------------------------------
+    # Static netplan YAML for the user-data write_files entry - the
+    # on-disk file netplan owns from first boot onwards. cloud-init's
+    # network module is disabled by the companion write_files entry,
+    # so the seed no longer ships a separate network-config file.
+    # ------------------------------------------------------------------
+    $netplanYaml = New-StaticNetplanYaml `
+        -IpAddress  $Vm.ipAddress `
+        -SubnetMask $Vm.subnetMask `
+        -Gateway    $Vm.gateway `
+        -Dns        $Vm.dns
+
+    # ------------------------------------------------------------------
+    # Indent the netplan YAML for embedding as a literal block scalar
+    # (`content: |`) under a write_files entry. Each line gets six
+    # spaces: two for the list item and four for the content key.
+    # ------------------------------------------------------------------
+    $netplanIndented = ($netplanYaml -split "`r?`n" |
+        ForEach-Object { "      $_" }) -join "`n"
+
+    # ------------------------------------------------------------------
+    # user-data (cloud-config)
+    #
+    # write_files lands two files that together close the regression
+    # described in problem.md (seed-ISO loss across re-evaluation):
+    #   1. /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg with
+    #      `network: {config: disabled}` - persistent disable flag
+    #      read by cloud-init on every SUBSEQUENT boot. First boot is
+    #      not its concern; the seed's network-config drives that.
+    #   2. /etc/netplan/99-static.yaml - canonical netplan-owned file.
+    #      Redundant on first boot (50-cloud-init.yaml that init-local
+    #      writes from network-config has the same content) but it
+    #      outranks 50-cloud-init.yaml lexically, so any future leftover
+    #      of the latter never wins, and it gives us a stable,
+    #      documented path for downstream tooling and assertions.
+    # runcmd then applies the new config so the IP is live before
+    # cloud-init finishes first boot.
+    # ------------------------------------------------------------------
     $userData = @"
 #cloud-config
 
@@ -97,32 +148,30 @@ packages:
 
 package_update: true
 package_upgrade: false
+
+write_files:
+  - path: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+    permissions: '0644'
+    content: 'network: {config: disabled}'
+  - path: /etc/netplan/99-static.yaml
+    permissions: '0600'
+    content: |
+$netplanIndented
+
+runcmd:
+  - netplan apply
 "@
 
     # ------------------------------------------------------------------
-    # network-config (cloud-init network configuration v2 / netplan)
-    #
-    # Matching on driver: hv_netvsc rather than a fixed interface name
-    # (eth0, enp0s*, etc.) because the kernel-assigned name varies across
-    # Ubuntu releases and Hyper-V generations. hv_netvsc is the driver for
-    # all Hyper-V synthetic NICs, so this match always hits the right NIC.
+    # network-config (NoCloud v1+ slot)
+    # Ships the full static netplan so cloud-init's init-local stage
+    # brings the NIC up on first boot before the config stage runs
+    # apt. Same template New-StaticNetplanYaml emits for write_files,
+    # so the two sources cannot drift. The disable-network leg of the
+    # design happens via write_files (see above) and applies to
+    # SUBSEQUENT boots only. See the file header for the full reason.
     # ------------------------------------------------------------------
-    $networkConfig = @"
-version: 2
-ethernets:
-  eth0:
-    match:
-      driver: hv_netvsc
-    dhcp4: false
-    addresses:
-      - $($Vm.ipAddress)/$($Vm.subnetMask)
-    routes:
-      - to: default
-        via: $($Vm.gateway)
-    nameservers:
-      addresses:
-        - $($Vm.dns)
-"@
+    $networkConfig = $netplanYaml
 
     $seedIsoPath = Join-Path $Vm.vmConfigPath "$($Vm.vmName)-seed.iso"
     Write-Host "  Writing: $seedIsoPath"

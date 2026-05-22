@@ -441,10 +441,18 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
    cached artefact is cheap. New acquirers plug in as one dispatch line
    in the orchestrator, not a new step here.
 6. **(new VMs only)** Generates a cloud-init seed ISO
-   (`{vmName}-seed.iso`) in `vmConfigPath` containing `meta-data`,
-   `user-data`, and `network-config`. On first boot cloud-init reads the
+   (`{vmName}-seed.iso`) in `vmConfigPath` containing `meta-data` and
+   `user-data`. On first boot cloud-init reads the
    ISO to create the OS user, enable SSH, and apply the static IP - no
-   interactive installer needed.
+   interactive installer needed. The static IP is installed via
+   `user-data` `write_files`: cloud-init drops the netplan document at
+   `/etc/netplan/99-static.yaml` (mode `0600`) and a sibling
+   `/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg` containing
+   `network: {config: disabled}` so cloud-init's network module never
+   rewrites `/etc/netplan/*.yaml` again. A `runcmd: netplan apply`
+   activates the config during first boot. Netplan - not cloud-init -
+   owns the on-disk file for the life of the VM, so reboots and
+   cloud-init re-evaluations cannot revert the static config to DHCP.
 7. **(always)** Creates a Hyper-V Internal switch named `VmLAN` (if
    absent), assigns the `gateway` IP to the host-side virtual NIC, and
    adds a `New-NetNat` rule for the subnet so VMs can reach the internet
@@ -615,6 +623,7 @@ Infrastructure-VM-Provisioner/
 |     |  |  `- setup-network.ps1               # Creates VmLAN switch, host IP, NAT rule
 |     |  |- seed/
 |     |  |  |- generate-seed-iso.ps1           # Builds cloud-init seed ISO
+|     |  |  |- New-StaticNetplanYaml.ps1       # Builds netplan v2 YAML for the VM's static NIC (embedded in user-data write_files)
 |     |  |  `- iso.ps1                         # IMAPI2 ISO creation helper
 |     |  `- vm/
 |     |     `- create-vm.ps1                   # Creates, boots, and polls each VM
