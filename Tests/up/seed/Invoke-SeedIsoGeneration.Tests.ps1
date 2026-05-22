@@ -251,17 +251,29 @@ Describe 'Invoke-SeedIsoGeneration' {
     Context 'ISO file structure' {
     # ------------------------------------------------------------------
 
-        It 'passes exactly meta-data and user-data to New-SeedIso' {
-            # network-config is intentionally absent: cloud-init's network
-            # module is disabled via write_files, so the seed no longer
-            # ships a network-config file. See plan.md step 3.
+        It 'passes meta-data, user-data, and network-config to New-SeedIso' {
+            # network-config carries the disable flag. cloud-init reads it
+            # in the init stage (BEFORE write_files), so it is the only
+            # place the flag can land in time to prevent first-boot DHCP
+            # fallback. See generate-seed-iso.ps1 file header.
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-SeedIsoGeneration -Vm (New-TestVm)
             Should -Invoke New-SeedIso -ParameterFilter {
-                $Files.Keys.Count -eq 2          -and
-                $Files.ContainsKey('meta-data')  -and
-                $Files.ContainsKey('user-data')
+                $Files.Keys.Count -eq 3              -and
+                $Files.ContainsKey('meta-data')      -and
+                $Files.ContainsKey('user-data')      -and
+                $Files.ContainsKey('network-config')
+            }
+        }
+
+        It 'ships network-config with exactly the disable flag content' {
+            # Exact string match - cloud-init parses this verbatim.
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-SeedIsoGeneration -Vm (New-TestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['network-config'] -eq 'network: {config: disabled}'
             }
         }
 

@@ -115,12 +115,25 @@ sequenceDiagram
 
 ## Step 3 - Drop the seed `network-config` file
 
-**Reason.** After step 2, the seed's `network-config` file is dead
-code: cloud-init's network module is disabled on first boot by the
-write_files-delivered flag, so nothing reads `network-config`
-anymore. Keeping it invites future confusion ("which file is
-authoritative?") and keeps the inline-YAML path alive as a second
-source of truth, defeating the point of the fix.
+> **Step 4 correction (2026-05-22).** The premise below is wrong:
+> cloud-init reads `network-config` from the NoCloud datasource in
+> its **init** stage, BEFORE `cc_write_files` runs. With
+> `network-config` absent, cloud-init falls back to default DHCP on
+> first boot, writes `/etc/netplan/50-cloud-init.yaml`, and stalls
+> waiting for a DHCP lease on VmLAN (Internal switch + NAT, no DHCP
+> server). The write_files-delivered disable flag never lands in
+> time. Fix: ship `network-config` again, containing only
+> `network: {config: disabled}`. The /etc/cloud/cloud.cfg.d/ flag
+> from step 2 remains, but now serves SUBSEQUENT boots only.
+> See [generate-seed-iso.ps1](../../../../hyper-v/ubuntu/up/seed/generate-seed-iso.ps1)
+> file header for the runtime ordering rationale.
+
+**Reason (original, superseded).** After step 2, the seed's
+`network-config` file is dead code: cloud-init's network module is
+disabled on first boot by the write_files-delivered flag, so nothing
+reads `network-config` anymore. Keeping it invites future confusion
+("which file is authoritative?") and keeps the inline-YAML path alive
+as a second source of truth, defeating the point of the fix.
 
 **Scope.**
 
