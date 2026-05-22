@@ -26,7 +26,10 @@ BeforeAll {
         # object arrays for sequences. Strict mode is in effect, so the
         # tests use ['key'] access (which returns $null for missing keys)
         # rather than dot access (which throws under strict mode).
-        return (ConvertFrom-Yaml $Yaml)
+        # The function emits a netplan document (top-level `network:`
+        # wrapper); descend into it so per-field assertions read
+        # naturally.
+        return (ConvertFrom-Yaml $Yaml)['network']
     }
 }
 
@@ -43,6 +46,19 @@ Describe 'New-StaticNetplanYaml' {
         It 'parses as valid YAML' {
             { ConvertTo-NetplanModel -Yaml (New-TestYaml) } |
                 Should -Not -Throw
+        }
+
+        It 'wraps the document under a top-level network: key' {
+            # netplan rejects /etc/netplan/*.yaml files that lack the
+            # network: wrapper. An earlier revision emitted the inner
+            # block only and went unnoticed because cloud-init added the
+            # wrapper on its way into 50-cloud-init.yaml; once we
+            # started writing the file directly via write_files the
+            # missing wrapper made netplan apply a no-op and the NIC
+            # never received the static IP.
+            $raw = ConvertFrom-Yaml (New-TestYaml)
+            $raw.Keys | Should -Contain 'network'
+            $raw['network'] | Should -BeOfType ([hashtable])
         }
 
         It 'declares netplan v2 schema' {

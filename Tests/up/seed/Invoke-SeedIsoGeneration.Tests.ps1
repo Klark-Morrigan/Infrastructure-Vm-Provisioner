@@ -267,13 +267,25 @@ Describe 'Invoke-SeedIsoGeneration' {
             }
         }
 
-        It 'ships network-config with exactly the disable flag content' {
-            # Exact string match - cloud-init parses this verbatim.
+        It 'ships network-config equal to New-StaticNetplanYaml output' {
+            # Same template as the write_files entry, so first-boot
+            # (network-config -> 50-cloud-init.yaml) and on-disk
+            # (write_files -> 99-static.yaml) cannot drift. Disabling
+            # cloud-init networking entirely on first boot is not viable
+            # because cc_package_update_upgrade_install needs the NIC
+            # up - so cloud-init owns first-boot bring-up via this slot,
+            # and the write_files disable flag handles subsequent boots.
             Mock Test-Path { $true }
             Mock New-SeedIso {}
-            Invoke-SeedIsoGeneration -Vm (New-TestVm)
+            $vm       = New-TestVm
+            $expected = New-StaticNetplanYaml `
+                -IpAddress  $vm.ipAddress `
+                -SubnetMask $vm.subnetMask `
+                -Gateway    $vm.gateway `
+                -Dns        $vm.dns
+            Invoke-SeedIsoGeneration -Vm $vm
             Should -Invoke New-SeedIso -ParameterFilter {
-                $Files['network-config'] -eq 'network: {config: disabled}'
+                $Files['network-config'] -eq $expected
             }
         }
 

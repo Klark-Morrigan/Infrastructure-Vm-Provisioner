@@ -115,18 +115,38 @@ sequenceDiagram
 
 ## Step 3 - Drop the seed `network-config` file
 
-> **Step 4 correction (2026-05-22).** The premise below is wrong:
-> cloud-init reads `network-config` from the NoCloud datasource in
-> its **init** stage, BEFORE `cc_write_files` runs. With
-> `network-config` absent, cloud-init falls back to default DHCP on
-> first boot, writes `/etc/netplan/50-cloud-init.yaml`, and stalls
-> waiting for a DHCP lease on VmLAN (Internal switch + NAT, no DHCP
-> server). The write_files-delivered disable flag never lands in
-> time. Fix: ship `network-config` again, containing only
-> `network: {config: disabled}`. The /etc/cloud/cloud.cfg.d/ flag
-> from step 2 remains, but now serves SUBSEQUENT boots only.
+> **Step 4 correction (2026-05-22).** The premise below is wrong on
+> two counts:
+>
+> 1. cloud-init reads `network-config` from the NoCloud datasource
+>    in its **init-local** stage, well before `cc_write_files`.
+>    Without it, cloud-init falls back to default DHCP on first
+>    boot. On VmLAN (Internal switch + NAT, no DHCP server) this
+>    stalls. Trying to disable cloud-init networking entirely on
+>    first boot also stalls, because `cc_package_update_upgrade_install`
+>    needs the NIC up.
+> 2. `New-StaticNetplanYaml` was emitting YAML without the top-level
+>    `network:` wrapper that netplan requires. The pre-feature-40
+>    path masked this because cloud-init re-rendered the YAML on its
+>    way into `/etc/netplan/50-cloud-init.yaml` (adding the wrapper).
+>    Dropping the unwrapped YAML straight into `/etc/netplan/99-static.yaml`
+>    via write_files made netplan apply a no-op.
+>
+> Fix:
+> - Add the `network:` wrapper in `New-StaticNetplanYaml` (single
+>   source of truth for both consumers).
+> - Restore `network-config` to ship the full static netplan so
+>   cloud-init's init-local brings the NIC up on first boot and apt
+>   can run.
+> - Keep the write_files entries from step 2: the
+>   `/etc/cloud/cloud.cfg.d/` disable flag handles SUBSEQUENT boots
+>   (closing the regression mode problem.md describes), and
+>   `/etc/netplan/99-static.yaml` gives netplan a canonical
+>   higher-priority file that outranks any cloud-init leftover.
+>
 > See [generate-seed-iso.ps1](../../../../hyper-v/ubuntu/up/seed/generate-seed-iso.ps1)
-> file header for the runtime ordering rationale.
+> and [New-StaticNetplanYaml.ps1](../../../../hyper-v/ubuntu/up/seed/New-StaticNetplanYaml.ps1)
+> headers for the runtime ordering and wrapper rationale.
 
 **Reason (original, superseded).** After step 2, the seed's
 `network-config` file is dead code: cloud-init's network module is

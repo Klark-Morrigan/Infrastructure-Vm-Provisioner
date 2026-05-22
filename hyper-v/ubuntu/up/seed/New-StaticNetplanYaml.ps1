@@ -23,6 +23,13 @@
 #   eth0 / enp0s*) is intentional - the kernel-assigned NIC name varies
 #   across Ubuntu releases and Hyper-V generations, but hv_netvsc is the
 #   driver for every Hyper-V synthetic NIC, so this match always hits.
+#
+#   The top-level `network:` wrapper is required by netplan and accepted
+#   by cloud-init's NoCloud network-config parser. An earlier revision
+#   emitted the inner block only - it parsed fine when cloud-init
+#   re-rendered it into /etc/netplan/50-cloud-init.yaml (cloud-init
+#   added the wrapper), but is rejected when written directly into
+#   /etc/netplan/*.yaml via write_files. See plan.md step 4 follow-up.
 # ---------------------------------------------------------------------------
 function New-StaticNetplanYaml {
     [CmdletBinding()]
@@ -35,19 +42,20 @@ function New-StaticNetplanYaml {
     )
 
     return @"
-version: 2
-ethernets:
-  eth0:
-    match:
-      driver: hv_netvsc
-    dhcp4: false
-    addresses:
-      - $IpAddress/$SubnetMask
-    routes:
-      - to: default
-        via: $Gateway
-    nameservers:
+network:
+  version: 2
+  ethernets:
+    eth0:
+      match:
+        driver: hv_netvsc
+      dhcp4: false
       addresses:
-        - $Dns
+        - $IpAddress/$SubnetMask
+      routes:
+        - to: default
+          via: $Gateway
+      nameservers:
+        addresses:
+          - $Dns
 "@
 }

@@ -18,16 +18,19 @@
 #                 owned by netplan from first boot onwards. See
 #                 docs/dev/implementation/40 - static network config.
 #     network-config - the NoCloud "network config v1+" slot. We ship
-#                 `network: {config: disabled}` here (and ONLY here)
-#                 because cloud-init reads this file in its init stage,
-#                 BEFORE the cc_write_files config module runs. Without
-#                 it on first boot, cloud-init falls back to default
-#                 DHCP on eth0, writes /etc/netplan/50-cloud-init.yaml,
-#                 and stalls waiting for a DHCP lease on VmLAN (an
-#                 Internal switch + NAT, no DHCP server). By the time
-#                 write_files lands the static config and runcmd
-#                 applies it, the NIC is wedged and SSH never reaches
-#                 the static IP. See plan.md step 4 follow-up.
+#                 the FULL static netplan here so cloud-init's
+#                 init-local stage brings the NIC up on first boot
+#                 (writes /etc/netplan/50-cloud-init.yaml, runs
+#                 netplan apply) BEFORE the config stage runs apt
+#                 for package_update / package install. Disabling
+#                 cloud-init networking entirely on first boot is
+#                 not viable: cc_package_update_upgrade_install
+#                 needs the NIC up and stalls the whole pipeline.
+#                 Subsequent-boot regressions are blocked instead
+#                 by the persistent disable flag landed via
+#                 write_files (see below) and by /etc/netplan/
+#                 99-static.yaml outranking the legacy
+#                 50-cloud-init.yaml. See plan.md step 4 follow-up.
 #
 #   SECURITY - user-data contains Vm.password in plaintext so cloud-init
 #   can hash it internally (plain_text_passwd). The ISO persists on the
@@ -112,18 +115,18 @@ local-hostname: $($Vm.vmName)
     # ------------------------------------------------------------------
     # user-data (cloud-config)
     #
-    # write_files lands two files. The disable flag is delivered from
-    # TWO places on purpose:
-    #   - The seed's network-config (read in cloud-init's init stage)
-    #     stops cloud-init managing networking on FIRST boot.
-    #   - This /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
-    #     ensures the same on SUBSEQUENT boots, when the seed ISO is
-    #     gone and cloud-init re-evaluates from on-disk config only.
+    # write_files lands two files that together close the regression
+    # described in problem.md (seed-ISO loss across re-evaluation):
     #   1. /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg with
-    #      `network: {config: disabled}` - persistent disable flag.
-    #   2. /etc/netplan/99-static.yaml - the static config netplan
-    #      owns. The 99- prefix outranks the legacy 50-cloud-init.yaml
-    #      so behaviour stays deterministic during the transition.
+    #      `network: {config: disabled}` - persistent disable flag
+    #      read by cloud-init on every SUBSEQUENT boot. First boot is
+    #      not its concern; the seed's network-config drives that.
+    #   2. /etc/netplan/99-static.yaml - canonical netplan-owned file.
+    #      Redundant on first boot (50-cloud-init.yaml that init-local
+    #      writes from network-config has the same content) but it
+    #      outranks 50-cloud-init.yaml lexically, so any future leftover
+    #      of the latter never wins, and it gives us a stable,
+    #      documented path for downstream tooling and assertions.
     # runcmd then applies the new config so the IP is live before
     # cloud-init finishes first boot.
     # ------------------------------------------------------------------
@@ -161,12 +164,14 @@ runcmd:
 
     # ------------------------------------------------------------------
     # network-config (NoCloud v1+ slot)
-    # Disables cloud-init's network management from first boot. The same
-    # flag is also placed under /etc/cloud/cloud.cfg.d/ via write_files
-    # so subsequent boots (after the seed ISO is gone) stay disabled.
-    # See the file header for the first-boot ordering rationale.
+    # Ships the full static netplan so cloud-init's init-local stage
+    # brings the NIC up on first boot before the config stage runs
+    # apt. Same template New-StaticNetplanYaml emits for write_files,
+    # so the two sources cannot drift. The disable-network leg of the
+    # design happens via write_files (see above) and applies to
+    # SUBSEQUENT boots only. See the file header for the full reason.
     # ------------------------------------------------------------------
-    $networkConfig = 'network: {config: disabled}'
+    $networkConfig = $netplanYaml
 
     $seedIsoPath = Join-Path $Vm.vmConfigPath "$($Vm.vmName)-seed.iso"
     Write-Host "  Writing: $seedIsoPath"
