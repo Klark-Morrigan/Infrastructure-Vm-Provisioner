@@ -68,6 +68,12 @@ function Invoke-VmPostProvisioning {
     $installJdk              = ${function:Install-Jdk}
     $uninstallJdk            = ${function:Uninstall-Jdk}
     $setEnvironmentVariables = ${function:Set-EnvironmentVariables}
+    # Reconciler entry points - same capture pattern as the per-step
+    # functions above for the same reason (closure does not see
+    # provision.ps1's script scope at invocation time).
+    $initManifestStore       = ${function:Initialize-VmManifestStore}
+    $getProviders            = ${function:Get-Providers}
+    $invokeReconciliation    = ${function:Invoke-ToolchainReconciliation}
 
     $postBlock = {
         param($server)
@@ -95,6 +101,14 @@ function Invoke-VmPostProvisioning {
                     "($($waitResult.ExitStatus)) on $vmName. Proceeding " +
                     "with post-provisioning steps.")
             }
+
+            # Manifest store init runs unconditionally near the top of
+            # the per-VM loop: it costs one cheap mkdir + chown + chmod
+            # and is the single place /var/lib/infra-provisioner/ gets
+            # created. Doing it here (not on demand from a provider) keeps
+            # the directory's lifecycle owned by the orchestrator, so any
+            # provider that lands later can assume the store exists.
+            & $initManifestStore -SshClient $sshClient
 
             # Dispatch order: files first as a stylistic choice. Steps must
             # not depend on each other's outputs - if a future install needs
@@ -148,6 +162,18 @@ function Invoke-VmPostProvisioning {
                 }
                 Write-Host "  [files] [OK] all copies complete." -ForegroundColor Green
             }
+            # Reconciler dispatch runs before the legacy JDK install/uninstall
+            # branch below. At step 5 Get-Providers returns @(), so this
+            # call is a no-op - the call site exists so steps 10 and 19
+            # can land their providers without re-touching the orchestrator.
+            # When the JdkProvider lands (step 10), the legacy branch below
+            # is deleted in the same commit.
+            & $invokeReconciliation `
+                -SshClient $sshClient `
+                -Server    $server `
+                -Vm        $vmRef `
+                -Providers @(& $getProviders)
+
             if ($hasJdk) {
                 # Pick install OR uninstall based on the flag; never both.
                 # Installing-then-uninstalling in a single run is nonsense;

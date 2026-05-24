@@ -495,6 +495,29 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
     env-vars step skips the SSH write when the desired block already
     matches what is on disk.
 
+    ### Reconciler
+
+    Post-provisioning also runs a toolchain **reconciler** in parallel
+    with the legacy `files` / `javaDevKit` / `envVars` branches. For each
+    VM the orchestrator:
+
+    1. Calls `Initialize-VmManifestStore` once, creating
+       `/var/lib/infra-provisioner/manifests/` (root:root, 0755) — the
+       single source of truth for "what is installed by the reconciler
+       on this VM".
+    2. Calls `Invoke-ToolchainReconciliation` with the array returned by
+       `Get-Providers`. Each provider declares the JSON sub-field it
+       owns (e.g. `javaDevKit`, `dotnetSdk`) and the four operations
+       — `Get-DesiredVersions`, `Get-InstalledVersions`,
+       `Install-Version`, `Uninstall-Version` — the orchestrator
+       dispatches in JSON-declaration order.
+
+    `Get-Providers` returns an empty array today; the JDK provider lands
+    in feature 42 step 10 (superseding the legacy `Install-Jdk` branch)
+    and the .NET SDK provider in feature 42 step 19. See
+    [docs/dev/implementation/42 - dotnet sdk/](docs/dev/implementation/42%20-%20dotnet%20sdk/)
+    for the full provider contract.
+
 ---
 
 ## start-vms.ps1

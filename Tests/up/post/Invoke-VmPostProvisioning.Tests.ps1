@@ -32,14 +32,17 @@ BeforeAll {
     # Global invocation log + reset helper. Reset is called from BeforeEach
     # in the Describe below.
     $global:_PostProv_Calls = @{
-        'New-VmSshClient'           = @()
-        'Invoke-SshClientCommand'   = @()
-        'Install-Jdk'               = @()
-        'Uninstall-Jdk'             = @()
-        'Copy-VmFiles'              = @()
-        'Copy-VmFilesByPattern'     = @()
-        'Invoke-WithVmFileServer'   = @()
-        'Set-EnvironmentVariables'  = @()
+        'New-VmSshClient'                  = @()
+        'Invoke-SshClientCommand'          = @()
+        'Install-Jdk'                      = @()
+        'Uninstall-Jdk'                    = @()
+        'Copy-VmFiles'                     = @()
+        'Copy-VmFilesByPattern'            = @()
+        'Invoke-WithVmFileServer'          = @()
+        'Set-EnvironmentVariables'         = @()
+        'Initialize-VmManifestStore'       = @()
+        'Get-Providers'                    = @()
+        'Invoke-ToolchainReconciliation'   = @()
     }
     function global:Reset-PostProvCallLog {
         foreach ($k in @($global:_PostProv_Calls.Keys)) {
@@ -120,6 +123,28 @@ BeforeAll {
     function global:Set-EnvironmentVariables {
         param($SshClient, $Vm)
         $global:_PostProv_Calls['Set-EnvironmentVariables'] += @{ Vm = $Vm }
+    }
+
+    function global:Initialize-VmManifestStore {
+        param($SshClient)
+        $global:_PostProv_Calls['Initialize-VmManifestStore'] += @{
+            SshClient = $SshClient
+        }
+    }
+
+    # Default: zero providers (matches step 5's Get-Providers contract).
+    # Tests that need a non-empty list override the function locally.
+    function global:Get-Providers {
+        $global:_PostProv_Calls['Get-Providers'] += @{}
+        return @()
+    }
+
+    function global:Invoke-ToolchainReconciliation {
+        param($SshClient, $Server, $Vm, $Providers)
+        $global:_PostProv_Calls['Invoke-ToolchainReconciliation'] += @{
+            Vm        = $Vm
+            Providers = $Providers
+        }
     }
 
     function global:Copy-VmFilesByPattern {
@@ -243,6 +268,8 @@ AfterAll {
             'Invoke-SshClientCommand', 'Install-Jdk', 'Uninstall-Jdk',
             'Copy-VmFiles', 'Copy-VmFilesByPattern',
             'Set-EnvironmentVariables',
+            'Initialize-VmManifestStore', 'Get-Providers',
+            'Invoke-ToolchainReconciliation',
             'Reset-PostProvCallLog')) {
         Remove-Item -Path "function:global:$name" -ErrorAction SilentlyContinue
     }
@@ -612,6 +639,66 @@ Describe 'Invoke-VmPostProvisioning' {
                 $global:_PostProv_FakeSshClient | Add-Member -MemberType ScriptMethod `
                     -Name 'Dispose' -Force -Value {}
                 Remove-Variable -Name _DisposedClient -Scope Script -ErrorAction SilentlyContinue
+            }
+        }
+
+        It 'initialises the manifest store exactly once per VM' {
+            # Manifest store init runs near the top of the per-VM loop,
+            # unconditionally (the cost is one mkdir + chown + chmod and
+            # owning the directory's lifecycle here keeps future providers
+            # from having to bootstrap it themselves).
+            Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
+            $global:_PostProv_Calls['Initialize-VmManifestStore'].Count | Should -Be 1
+        }
+
+        It 'invokes the reconciler exactly once per VM with the Get-Providers result' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
+
+            $calls = $global:_PostProv_Calls['Invoke-ToolchainReconciliation']
+            $calls.Count                | Should -Be 1
+            @($calls[0].Providers).Count | Should -Be 0
+            $calls[0].Vm.vmName          | Should -Be 'node-01'
+        }
+
+        It 'still invokes Install-Jdk after the reconciler when no providers are registered' {
+            # Step 5 regression guard: the legacy JDK branch must stay in
+            # place until step 10 swaps it for the JdkProvider. The
+            # reconciler call site existing must NOT silently displace it.
+            Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
+            $global:_PostProv_Calls['Install-Jdk'].Count                  | Should -Be 1
+            $global:_PostProv_Calls['Invoke-ToolchainReconciliation'].Count | Should -Be 1
+        }
+
+        It 'runs Initialize-VmManifestStore before the reconciler and the legacy JDK branch' {
+            # Order matters once providers land - the store must exist
+            # before any provider tries to write a manifest into it.
+            $vm = New-VmWithJdk
+
+            $originalInit  = ${function:global:Initialize-VmManifestStore}
+            $originalRec   = ${function:global:Invoke-ToolchainReconciliation}
+            $originalInst  = ${function:global:Install-Jdk}
+            $global:_PostProv_Order = @()
+            ${function:global:Initialize-VmManifestStore} = {
+                param($SshClient)
+                $global:_PostProv_Order += 'init-store'
+            }
+            ${function:global:Invoke-ToolchainReconciliation} = {
+                param($SshClient, $Server, $Vm, $Providers)
+                $global:_PostProv_Order += 'reconcile'
+            }
+            ${function:global:Install-Jdk} = {
+                param($SshClient, $Server, $Vm)
+                $global:_PostProv_Order += 'jdk'
+            }
+            try {
+                Invoke-VmPostProvisioning -Vm $vm
+                $global:_PostProv_Order | Should -Be @('init-store', 'reconcile', 'jdk')
+            }
+            finally {
+                ${function:global:Initialize-VmManifestStore}     = $originalInit
+                ${function:global:Invoke-ToolchainReconciliation} = $originalRec
+                ${function:global:Install-Jdk}                    = $originalInst
+                Remove-Variable -Name _PostProv_Order -Scope Global -ErrorAction SilentlyContinue
             }
         }
 
