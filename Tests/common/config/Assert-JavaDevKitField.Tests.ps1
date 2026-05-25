@@ -38,7 +38,22 @@ Describe 'Assert-JavaDevKitField' {
     }
 
     # ------------------------------------------------------------------
-    Context 'valid javaDevKit' {
+    Context 'ensure-none signals' {
+    # ------------------------------------------------------------------
+
+        It 'returns silently for explicit null (reconciler "ensure none")' {
+            $vm = New-VmWithJdkJson 'null'
+            { Assert-JavaDevKitField -Vm $vm } | Should -Not -Throw
+        }
+
+        It 'returns silently for explicit empty list (reconciler "ensure none")' {
+            $vm = New-VmWithJdkJson '[]'
+            { Assert-JavaDevKitField -Vm $vm } | Should -Not -Throw
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'valid javaDevKit - scalar (legacy single-JDK shape)' {
     # ------------------------------------------------------------------
 
         It 'accepts vendor temurin with major-only version "21"' {
@@ -59,6 +74,33 @@ Describe 'Assert-JavaDevKitField' {
         It 'accepts major.minor.patch+build version "21.0.5+11"' {
             $vm = New-VmWithJdkJson '{ "vendor": "temurin", "version": "21.0.5+11" }'
             { Assert-JavaDevKitField -Vm $vm } | Should -Not -Throw
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'valid javaDevKit - list shape' {
+    # ------------------------------------------------------------------
+
+        It 'accepts a list of one entry' {
+            $vm = New-VmWithJdkJson '[ { "vendor": "temurin", "version": "21" } ]'
+            { Assert-JavaDevKitField -Vm $vm } | Should -Not -Throw
+        }
+
+        It 'throws when the list has more than one entry (v1 cap)' {
+            $vm = New-VmWithJdkJson @'
+[
+  { "vendor": "temurin", "version": "21" },
+  { "vendor": "temurin", "version": "17" }
+]
+'@
+            { Assert-JavaDevKitField -Vm $vm } |
+                Should -Throw -ExpectedMessage "*one JDK per VM*"
+        }
+
+        It 'applies the same vendor/version rules to list entries' {
+            $vm = New-VmWithJdkJson '[ { "vendor": "corretto", "version": "21" } ]'
+            { Assert-JavaDevKitField -Vm $vm } |
+                Should -Throw -ExpectedMessage "*vendor*temurin*"
         }
     }
 
@@ -137,47 +179,21 @@ Describe 'Assert-JavaDevKitField' {
     }
 
     # ------------------------------------------------------------------
-    Context 'uninstall flag' {
+    Context 'removed uninstall sub-field' {
     # ------------------------------------------------------------------
 
-        It 'accepts uninstall = true alongside vendor and version' {
+        It 'throws with a migration hint when uninstall is present' {
+            # The error must name the new mechanism (null / []) so
+            # operators carrying old JSON know how to migrate.
             $vm = New-VmWithJdkJson '{ "vendor": "temurin", "version": "21", "uninstall": true }'
-            { Assert-JavaDevKitField -Vm $vm } | Should -Not -Throw
+            { Assert-JavaDevKitField -Vm $vm } |
+                Should -Throw -ExpectedMessage "*uninstall*null*"
         }
 
-        It 'accepts uninstall = false alongside vendor and version' {
+        It 'rejects uninstall = false (not a valid sub-field)' {
             $vm = New-VmWithJdkJson '{ "vendor": "temurin", "version": "21", "uninstall": false }'
-            { Assert-JavaDevKitField -Vm $vm } | Should -Not -Throw
-        }
-
-        It 'throws when uninstall is a string ("true")' {
-            $vm = New-VmWithJdkJson '{ "vendor": "temurin", "version": "21", "uninstall": "true" }'
             { Assert-JavaDevKitField -Vm $vm } |
-                Should -Throw -ExpectedMessage "*uninstall*boolean*"
-        }
-
-        It 'throws when uninstall is a number (1)' {
-            $vm = New-VmWithJdkJson '{ "vendor": "temurin", "version": "21", "uninstall": 1 }'
-            { Assert-JavaDevKitField -Vm $vm } |
-                Should -Throw -ExpectedMessage "*uninstall*boolean*"
-        }
-
-        It 'throws when uninstall is null' {
-            $vm = New-VmWithJdkJson '{ "vendor": "temurin", "version": "21", "uninstall": null }'
-            { Assert-JavaDevKitField -Vm $vm } |
-                Should -Throw -ExpectedMessage "*uninstall*boolean*"
-        }
-
-        It 'throws when uninstall = true but vendor is missing (uniformity preserved)' {
-            $vm = New-VmWithJdkJson '{ "version": "21", "uninstall": true }'
-            { Assert-JavaDevKitField -Vm $vm } |
-                Should -Throw -ExpectedMessage "*vendor*"
-        }
-
-        It 'throws when uninstall = true but version is missing (uniformity preserved)' {
-            $vm = New-VmWithJdkJson '{ "vendor": "temurin", "uninstall": true }'
-            { Assert-JavaDevKitField -Vm $vm } |
-                Should -Throw -ExpectedMessage "*version*"
+                Should -Throw -ExpectedMessage "*uninstall*"
         }
     }
 
@@ -185,20 +201,8 @@ Describe 'Assert-JavaDevKitField' {
     Context 'shape validation' {
     # ------------------------------------------------------------------
 
-        It 'throws when javaDevKit is a string instead of an object' {
+        It 'throws when javaDevKit is a string instead of an object/array' {
             $vm = New-VmWithJdkJson '"temurin-21"'
-            { Assert-JavaDevKitField -Vm $vm } |
-                Should -Throw -ExpectedMessage "*javaDevKit*object*"
-        }
-
-        It 'throws when javaDevKit is an array instead of an object' {
-            $vm = New-VmWithJdkJson '[ "temurin", "21" ]'
-            { Assert-JavaDevKitField -Vm $vm } |
-                Should -Throw -ExpectedMessage "*javaDevKit*object*"
-        }
-
-        It 'throws when javaDevKit is null' {
-            $vm = New-VmWithJdkJson 'null'
             { Assert-JavaDevKitField -Vm $vm } |
                 Should -Throw -ExpectedMessage "*javaDevKit*object*"
         }

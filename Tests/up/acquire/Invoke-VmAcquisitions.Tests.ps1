@@ -10,32 +10,37 @@ BeforeAll {
         [PSCustomObject]@{ vmName = 'node-01' }
     }
 
-    function New-VmWithJdk {
+    function New-VmWithJdkScalar {
         [PSCustomObject]@{
             vmName     = 'node-01'
             javaDevKit = [PSCustomObject]@{ vendor = 'temurin'; version = '21' }
         }
     }
 
-    function New-VmWithJdkUninstallFalse {
+    function New-VmWithJdkList {
+        # List shape: javaDevKit can be an array of entries (v1 caps at
+        # one).
         [PSCustomObject]@{
             vmName     = 'node-01'
-            javaDevKit = [PSCustomObject]@{
-                vendor    = 'temurin'
-                version   = '21'
-                uninstall = $false
-            }
+            javaDevKit = @(
+                [PSCustomObject]@{ vendor = 'temurin'; version = '21' }
+            )
         }
     }
 
-    function New-VmWithJdkUninstallTrue {
+    function New-VmWithJdkNull {
+        # "Ensure none installed" signal - drives the reconciler's
+        # uninstall path.
         [PSCustomObject]@{
             vmName     = 'node-01'
-            javaDevKit = [PSCustomObject]@{
-                vendor    = 'temurin'
-                version   = '21'
-                uninstall = $true
-            }
+            javaDevKit = $null
+        }
+    }
+
+    function New-VmWithJdkEmptyList {
+        [PSCustomObject]@{
+            vmName     = 'node-01'
+            javaDevKit = @()
         }
     }
 }
@@ -53,23 +58,31 @@ Describe 'Invoke-VmAcquisitions' {
 
     Context 'javaDevKit present' {
 
-        It 'dispatches Invoke-JdkAcquisition exactly once with the VM' {
+        It 'dispatches Invoke-JdkAcquisition for the scalar shape' {
             Mock Invoke-JdkAcquisition {}
-            Invoke-VmAcquisitions -Vm (New-VmWithJdk)
+            Invoke-VmAcquisitions -Vm (New-VmWithJdkScalar)
             Should -Invoke Invoke-JdkAcquisition -Times 1 -Exactly `
                 -ParameterFilter { $Vm.vmName -eq 'node-01' }
         }
 
-        It 'dispatches Invoke-JdkAcquisition when uninstall is explicitly $false' {
+        It 'dispatches Invoke-JdkAcquisition for the list shape' {
             Mock Invoke-JdkAcquisition {}
-            Invoke-VmAcquisitions -Vm (New-VmWithJdkUninstallFalse)
+            Invoke-VmAcquisitions -Vm (New-VmWithJdkList)
             Should -Invoke Invoke-JdkAcquisition -Times 1 -Exactly `
                 -ParameterFilter { $Vm.vmName -eq 'node-01' }
         }
 
-        It 'skips Invoke-JdkAcquisition when uninstall is $true' {
+        It 'skips Invoke-JdkAcquisition when javaDevKit is null (ensure-none)' {
+            # The reconciler's uninstall path has nothing to acquire; an
+            # Adoptium API call here would just burn a cache miss.
             Mock Invoke-JdkAcquisition {}
-            Invoke-VmAcquisitions -Vm (New-VmWithJdkUninstallTrue)
+            Invoke-VmAcquisitions -Vm (New-VmWithJdkNull)
+            Should -Invoke Invoke-JdkAcquisition -Times 0
+        }
+
+        It 'skips Invoke-JdkAcquisition when javaDevKit is an empty list (ensure-none)' {
+            Mock Invoke-JdkAcquisition {}
+            Invoke-VmAcquisitions -Vm (New-VmWithJdkEmptyList)
             Should -Invoke Invoke-JdkAcquisition -Times 0
         }
     }

@@ -33,6 +33,11 @@ function Invoke-VmPostProvisioning {
     # applies, exit silently - no file server, no SSH, no log noise.
     $hasFiles   = $Vm.PSObject.Properties['files'] -and
                   @($Vm.files).Count -gt 0
+    # javaDevKit is reconciler-owned: presence of the field is enough to
+    # warrant opening the transport even when the operator's intent is
+    # "ensure none installed" (javaDevKit: null / []). The reconciler
+    # decides install vs uninstall from the desired/installed diff; this
+    # gate just decides whether to pay the SSH cost at all.
     $hasJdk     = $Vm.PSObject.Properties['javaDevKit']
     # Gate on field presence (not entries.Count): `entries: []` is the
     # operator's explicit "remove the managed block" intent, so it must
@@ -65,9 +70,13 @@ function Invoke-VmPostProvisioning {
     # this approach, so the dispatch is uniform.
     $copyVmFiles             = ${function:Copy-VmFiles}
     $copyVmFilesByPattern    = ${function:Copy-VmFilesByPattern}
-    $installJdk              = ${function:Install-Jdk}
-    $uninstallJdk            = ${function:Uninstall-Jdk}
     $setEnvironmentVariables = ${function:Set-EnvironmentVariables}
+    # Reconciler entry points - same capture pattern as the per-step
+    # functions above for the same reason (closure does not see
+    # provision.ps1's script scope at invocation time).
+    $initManifestStore       = ${function:Initialize-VmManifestStore}
+    $getProviders            = ${function:Get-Providers}
+    $invokeReconciliation    = ${function:Invoke-ToolchainReconciliation}
 
     $postBlock = {
         param($server)
@@ -95,6 +104,14 @@ function Invoke-VmPostProvisioning {
                     "($($waitResult.ExitStatus)) on $vmName. Proceeding " +
                     "with post-provisioning steps.")
             }
+
+            # Manifest store init runs unconditionally near the top of
+            # the per-VM loop: it costs one cheap mkdir + chown + chmod
+            # and is the single place /var/lib/infra-provisioner/ gets
+            # created. Doing it here (not on demand from a provider) keeps
+            # the directory's lifecycle owned by the orchestrator, so any
+            # provider that lands later can assume the store exists.
+            & $initManifestStore -SshClient $sshClient
 
             # Dispatch order: files first as a stylistic choice. Steps must
             # not depend on each other's outputs - if a future install needs
@@ -148,20 +165,16 @@ function Invoke-VmPostProvisioning {
                 }
                 Write-Host "  [files] [OK] all copies complete." -ForegroundColor Green
             }
-            if ($hasJdk) {
-                # Pick install OR uninstall based on the flag; never both.
-                # Installing-then-uninstalling in a single run is nonsense;
-                # uninstalling-then-installing belongs in two explicit
-                # provision runs so the operator's intent stays visible in
-                # the JSON between them.
-                $jdk = $vmRef.javaDevKit
-                $uninstallProp = $jdk.PSObject.Properties['uninstall']
-                if ($null -ne $uninstallProp -and $uninstallProp.Value -eq $true) {
-                    & $uninstallJdk -SshClient $sshClient -Vm $vmRef
-                } else {
-                    & $installJdk -SshClient $sshClient -Server $server -Vm $vmRef
-                }
-            }
+            # Reconciler dispatch. Get-Providers is parameterised by the
+            # VM so each provider can capture VM-scoped state (e.g. the
+            # JDK provider closes over _jdkTarballPath / _jdkResolvedVersion
+            # populated by Invoke-JdkAcquisition).
+            & $invokeReconciliation `
+                -SshClient $sshClient `
+                -Server    $server `
+                -Vm        $vmRef `
+                -Providers @(& $getProviders -Vm $vmRef)
+
             if ($hasEnvVars) {
                 # Stylistically last: env-var values may legitimately
                 # reference paths the `files` step placed or the JDK

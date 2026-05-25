@@ -10,6 +10,7 @@
 - [setup-secrets.ps1](#setup-secretsps1)
   - [Optional: install a JDK](#optional-install-a-jdk)
   - [Removing a JDK](#removing-a-jdk)
+  - [JDK list shape (multiple entries)](#jdk-list-shape-multiple-entries)
   - [Optional: copy files to the VM](#optional-copy-files-to-the-vm)
     - [Bulk entries](#bulk-entries)
   - [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables)
@@ -147,7 +148,12 @@ unaffected.
 |-------------|-----------|----------|---------|---------------------------------------------------------------|
 | `vendor`    | string    | yes      | —       | `temurin` (Adoptium Temurin — currently the only supported vendor). |
 | `version`   | string    | yes      | —       | A **string** in one of four granularities (see below).         |
-| `uninstall` | boolean?  | no       | `false` | Set to `true` on a previously provisioned VM to remove the JDK on the next run. See [Removing a JDK](#removing-a-jdk). |
+
+`javaDevKit` is also accepted as `null` or `[]` to **uninstall** any JDK
+the reconciler previously installed — see [Removing a JDK](#removing-a-jdk) —
+and as a single-element list `[{ vendor, version }]` for forward
+compatibility with the multi-version shape; see
+[JDK list shape](#jdk-list-shape-multiple-entries).
 
 Version-string granularities — pick the level of pinning that suits you:
 
@@ -199,9 +205,11 @@ trust model as the cached Ubuntu VHDX.
 post-provisioning orchestrator pushes the cached tarball over its
 already-open SSH session via the host file server (the same mechanism
 `Infrastructure-GitHubRunners` uses to ship the actions-runner binary).
-The `Install-Jdk` step then streams the tarball through `tar` directly
-into the install directory (no intermediate file on the VM disk) and
-writes a system-wide environment script:
+The reconciler's JDK provider then extracts the tarball into the
+install directory via `Infrastructure.HyperV`'s `Expand-VmTarball`
+primitive (atomic dir-swap, no intermediate file on the VM disk),
+wires up `/usr/local/bin` symlinks for every JDK binary, and writes a
+system-wide environment script:
 
 | Location                              | Purpose                                                                          |
 |---------------------------------------|----------------------------------------------------------------------------------|
@@ -222,49 +230,59 @@ sees `JAVA_HOME` and `java` on `PATH` without any additional configuration
 in that repo. This is the deliberate split of responsibilities: the
 provisioner owns "software the box needs"; Vm-Users owns identities.
 
-The extraction step is idempotent — if the install directory's `release`
-file already exists, re-runs of `provision.ps1` are a no-op for the JDK
-step.
+Re-runs are idempotent through the reconciler's manifest-driven diff:
+if the on-VM `javaDevKit-<resolvedVersion>.json` manifest already
+records the desired version, the reconciler reports it as a no-op and
+nothing on the VM is touched.
 
 ### Removing a JDK
 
 To remove a previously installed JDK from a long-lived VM without
-rebuilding it, set `javaDevKit.uninstall` to `true` on the same VM entry
-and re-run `provision.ps1`:
+rebuilding it, set `javaDevKit` to `null` (or an empty array `[]`) on
+the same VM entry and re-run `provision.ps1`:
 
 ```jsonc
 {
   "vmName": "dev-01",
   "...":    "...",
-  "javaDevKit": {
-    "vendor":    "temurin",
-    "version":   "21",
-    "uninstall": true
-  }
+  "javaDevKit": null
 }
 ```
 
-`vendor` and `version` stay required so the schema is uniform whether the
-operator is installing or uninstalling. The removal step uses only
-`vendor` (as the `/opt/jdk-{vendor}-*` install-dir prefix); `version` is
-ignored.
+The reconciler treats absence of the field as "this VM has no opinion
+about JDKs" (skip) and explicit `null` / `[]` as "ensure none
+installed". On the VM, the manifest written at install time
+(`/var/lib/infra-provisioner/manifests/javaDevKit-*.json`) drives the
+teardown: every install dir, `/usr/local/bin` symlink, and
+`/etc/profile.d/jdk.sh` recorded there is removed, then the manifest
+itself last so a crash mid-uninstall leaves a recovery anchor for the
+next run to replay against.
 
-On the VM, the removal step deletes `/opt/jdk-{vendor}-*` (matched by
-vendor prefix glob — the v1 invariant is one JDK per VM, so the prefix
-uniquely identifies the install), `/etc/profile.d/jdk.sh`, and any
-`/usr/local/bin` symlinks pointing into the removed install dir (the
-non-login-shell `PATH` wiring written by `Install-Jdk`). An empty glob
-match is a clean no-op.
-
-The provisioner does **not** rewrite the input JSON after a successful
-removal — the flag stays. Re-running with the flag still set is a clean
-no-op (everything is already gone), so it is safe to leave. When the
-operator is truly done with the JDK on that VM, delete the whole
-`javaDevKit` block in one explicit edit.
+Once the JDK is gone, the cleanest follow-up is to **delete the field
+entirely**. The reconciler then sees nothing to do for `javaDevKit` and
+stays a clean no-op.
 
 The host-side tarball cache under `vhdPath` is **not** touched — it is
 keyed by `{vendor, requestedVersion}` and may be shared with other VMs
 that still want the install.
+
+### JDK list shape (multiple entries)
+
+For forward compatibility with the multi-version contract the reconciler
+plans to support, `javaDevKit` also accepts a list:
+
+```jsonc
+{
+  "javaDevKit": [
+    { "vendor": "temurin", "version": "21" }
+  ]
+}
+```
+
+v1 supports one JDK per VM, so the list is capped at one entry. A
+longer list fails schema with the observed count. Use the list shape
+only when the multi-version surface lands; the scalar form remains the
+recommended way to declare a single JDK.
 
 ### Optional: copy files to the VM
 
@@ -433,8 +451,8 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
    dispatches one acquirer:
    - **`javaDevKit`** acquires the requested Temurin tarball into
      `vhdPath` (see [Optional: install a JDK](#optional-install-a-jdk)).
-     Skipped when `javaDevKit.uninstall` is `true` - no tarball is needed
-     for the removal path.
+     Skipped when `javaDevKit` is `null` or `[]` — the reconciler's
+     "ensure none installed" signal needs no tarball.
 
    Skipped silently for VMs that have no opt-in fields. Each acquirer is
    idempotent via its on-host lockfile, so a re-run against an already-
@@ -470,14 +488,14 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
       dispatched in JSON order: single entries via `Copy-VmFiles`, bulk
       entries via `Copy-VmFilesByPattern`; see
       [Optional: copy files to the VM](#optional-copy-files-to-the-vm)).
-    - **`javaDevKit`** extracts the prefetched Temurin tarball into
-      `/opt/jdk-{vendor}-{resolvedVersion}/` and writes
-      `/etc/profile.d/jdk.sh`
-      (see [Optional: install a JDK](#optional-install-a-jdk)).
-      When `javaDevKit.uninstall` is `true`, the orchestrator dispatches
-      the removal step instead (deletes `/opt/jdk-{vendor}-*`,
-      `/etc/profile.d/jdk.sh`, and stale `/usr/local/bin` symlinks) —
-      see [Removing a JDK](#removing-a-jdk).
+    - **`javaDevKit`** is now reconciler-owned (see the Reconciler
+      subsection below) — the JDK provider extracts the prefetched
+      Temurin tarball into `/opt/jdk-{vendor}-{resolvedVersion}/`,
+      writes `/etc/profile.d/jdk.sh`, wires `/usr/local/bin` symlinks
+      for every JDK binary, and records all owned paths in a sidecar
+      manifest (see [Optional: install a JDK](#optional-install-a-jdk)).
+      Setting the field to `null` or `[]` drives the manifest-based
+      removal — see [Removing a JDK](#removing-a-jdk).
     - **`envVars`** writes a sentinel-delimited managed block of
       `NAME="VALUE"` lines into `/etc/environment` via
       `Set-VmEnvironmentVariables` (see
@@ -494,6 +512,33 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
     copies overwrite with the current host source bytes, and the
     env-vars step skips the SSH write when the desired block already
     matches what is on disk.
+
+    ### Reconciler
+
+    Post-provisioning also runs a toolchain **reconciler** in parallel
+    with the legacy `files` / `javaDevKit` / `envVars` branches. For each
+    VM the orchestrator:
+
+    1. Calls `Initialize-VmManifestStore` once, creating
+       `/var/lib/infra-provisioner/manifests/` (root:root, 0755) — the
+       single source of truth for "what is installed by the reconciler
+       on this VM".
+    2. Calls `Invoke-ToolchainReconciliation` with the array returned by
+       `Get-Providers`. Each provider declares the JSON sub-field it
+       owns (e.g. `javaDevKit`, `dotnetSdk`) and the four operations
+       — `Get-DesiredVersions`, `Get-InstalledVersions`,
+       `Install-Version`, `Uninstall-Version` — the orchestrator
+       dispatches in JSON-declaration order.
+
+    Registered providers (in dispatch order):
+
+    | Provider      | JSON field   | Notes                                                                |
+    |---------------|--------------|----------------------------------------------------------------------|
+    | `JdkProvider` | `javaDevKit` | Manifest-driven install/uninstall of one Temurin JDK per VM.         |
+
+    See
+    [docs/dev/implementation/42 - dotnet sdk/](docs/dev/implementation/42%20-%20dotnet%20sdk/)
+    for the full provider contract and the in-progress .NET SDK provider.
 
 ---
 
@@ -610,14 +655,18 @@ Infrastructure-VM-Provisioner/
 |     |  |  |- Invoke-DiskImageAcquisition.ps1  # Downloads, converts, caches base VHDX
 |     |  |  `- Invoke-BaseImagePatch.ps1        # Patches cloud-init datasource via WSL2
 |     |  |- jdk/
-|     |  |  |- Resolve-AdoptiumRelease.ps1      # Resolves version granularity via Adoptium v3 API
-|     |  |  `- Invoke-JdkAcquisition.ps1        # Downloads + verifies tarball, writes lockfile pin
+|     |  |  |- Resolve-AdoptiumRelease.ps1            # Resolves version granularity via Adoptium v3 API
+|     |  |  |- Invoke-JdkAcquisition.ps1              # Downloads + verifies tarball, writes lockfile pin
+|     |  |  |- Get-JdkBinariesForSymlinking.ps1       # Enumerates the JDK bin/ dir on the VM for /usr/local/bin symlink wiring
+|     |  |  |- JdkProvider.Get-DesiredVersions.ps1    # Reconciler op: parses javaDevKit into typed Spec records
+|     |  |  |- JdkProvider.Get-InstalledVersions.ps1  # Reconciler op: reads JDK manifests from the on-VM store
+|     |  |  |- JdkProvider.Install-Version.ps1        # Reconciler op: extracts tarball, writes profile.d + symlinks, records manifest
+|     |  |  |- JdkProvider.Uninstall-Version.ps1      # Reconciler op: manifest-driven teardown of one JDK install
+|     |  |  `- Get-JdkProvider.ps1                    # Composes the four ops into an IToolchainProvider object
 |     |  |- acquire/
 |     |  |  `- Invoke-VmAcquisitions.ps1        # Per-VM host-side acquisition orchestrator; dispatches each per-software acquirer guarded by its opt-in field
 |     |  |- post/
 |     |  |  |- Invoke-VmPostProvisioning.ps1    # Per-VM transport orchestrator (file server + SSH + cloud-init wait), dispatches steps; calls Infrastructure.HyperV's Copy-VmFiles for the 'files' step
-|     |  |  |- Install-Jdk.ps1                  # Step: extracts the prefetched JDK tarball and writes /etc/profile.d/jdk.sh
-|     |  |  |- Uninstall-Jdk.ps1                # Step: removes /opt/jdk-{vendor}-*, /etc/profile.d/jdk.sh, and stale /usr/local/bin symlinks
 |     |  |  `- Set-EnvironmentVariables.ps1     # Step: writes a managed block of NAME="VALUE" lines into /etc/environment via Infrastructure.HyperV's Set-VmEnvironmentVariables
 |     |  |- network/
 |     |  |  `- setup-network.ps1               # Creates VmLAN switch, host IP, NAT rule

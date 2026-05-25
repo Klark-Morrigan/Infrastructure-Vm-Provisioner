@@ -204,17 +204,27 @@ Describe 'provision.ps1 - post-provisioning wiring (Step 5)' {
         $text | Should -Match 'Invoke-VmPostProvisioning\.ps1'
     }
 
-    It 'dot-sources Install-Jdk before the orchestrator' {
-        # Orchestrator references step functions at call time; loading
-        # them after the orchestrator would still work, but loading them
-        # before is the convention this repo follows.
-        # Copy-VmFiles is NOT dot-sourced - it lives in Infrastructure.HyperV
-        # and is imported by Install-ModuleDependencies.ps1.
+    It 'dot-sources Get-JdkProvider before the orchestrator' {
+        # Get-JdkProvider composes the four JdkProvider.* operations into
+        # the IToolchainProvider object Get-Providers hands the
+        # reconciler. Orchestrator references step functions at call
+        # time; loading them after the orchestrator would still work,
+        # but loading them before is the convention this repo follows.
+        # Copy-VmFiles is NOT dot-sourced - it lives in
+        # Infrastructure.HyperV and is imported by Install-ModuleDependencies.ps1.
         $text   = Get-Content -Path $script:provisionPath -Raw
         $orchAt = $text.IndexOf('Invoke-VmPostProvisioning.ps1')
-        $stepAt = $text.IndexOf('Install-Jdk.ps1')
+        $stepAt = $text.IndexOf('Get-JdkProvider.ps1')
         $stepAt | Should -BeGreaterThan -1
         $stepAt | Should -BeLessThan $orchAt
+    }
+
+    It 'does not dot-source Install-Jdk or Uninstall-Jdk scripts' {
+        # Regression guard: the reconciler owns the JDK lifecycle; a
+        # dot-source of these names would shadow the manifest-driven path.
+        $text = Get-Content -Path $script:provisionPath -Raw
+        $text | Should -Not -Match 'Install-Jdk\.ps1'
+        $text | Should -Not -Match 'Uninstall-Jdk\.ps1'
     }
 
     It 'invokes Invoke-VmPostProvisioning exactly once' {
