@@ -82,6 +82,63 @@ Describe 'Get-JdkBinariesForSymlinking' {
                 Should -Throw -ExpectedMessage "*/opt/jdk-temurin-21.0.6+7/bin*"
         }
 
+        It 'augments the throw with the install-dir mode + owner' {
+            # The function issues two SSH calls on the failure path:
+            # the ls (returns non-zero) and a stat probe whose output
+            # is folded into the error message. Two-call mock returns
+            # the ls failure first, the stat success second.
+            $script:callIdx = 0
+            Mock Invoke-SshClientCommand {
+                $script:callIdx++
+                if ($script:callIdx -eq 1) {
+                    [PSCustomObject]@{
+                        ExitStatus = 2; Output = ''
+                        Error = 'ls: Permission denied'
+                    }
+                } else {
+                    [PSCustomObject]@{
+                        ExitStatus = 0
+                        Output = 'mode=700 owner=root:root'
+                        Error = ''
+                    }
+                }
+            }
+
+            { Get-JdkBinariesForSymlinking `
+                -SshClient  $script:FakeSshClient `
+                -InstallDir '/opt/jdk-temurin-21' } |
+                Should -Throw -ExpectedMessage '*install dir: mode=700 owner=root:root*'
+
+            # And the stat probe was actually issued (regression guard
+            # against a future refactor that drops the second call).
+            Should -Invoke Invoke-SshClientCommand `
+                -ParameterFilter { $Command -match 'stat -c .*--\s.*jdk-temurin-21' } `
+                -Times 1 -Exactly
+        }
+
+        It 'falls back to a stat-probe-failed note when the stat itself fails' {
+            $script:callIdx = 0
+            Mock Invoke-SshClientCommand {
+                $script:callIdx++
+                if ($script:callIdx -eq 1) {
+                    [PSCustomObject]@{
+                        ExitStatus = 2; Output = ''
+                        Error = 'ls: Permission denied'
+                    }
+                } else {
+                    [PSCustomObject]@{
+                        ExitStatus = 1; Output = ''
+                        Error = 'sudo: no tty'
+                    }
+                }
+            }
+
+            { Get-JdkBinariesForSymlinking `
+                -SshClient  $script:FakeSshClient `
+                -InstallDir '/opt/jdk-temurin-21' } |
+                Should -Throw -ExpectedMessage '*stat probe failed (exit 1)*sudo: no tty*'
+        }
+
         It 'throws when the listing is empty (corrupt extract)' {
             Mock Invoke-SshClientCommand {
                 [PSCustomObject]@{ ExitStatus = 0; Output = "`n"; Error = '' }
