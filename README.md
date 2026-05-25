@@ -492,12 +492,18 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
 4. **(new VMs only)** Copies the base image to a per-VM disk
    (`{vmName}.vhdx`) and resizes it to `diskGB`.
 5. **(new AND existing VMs)** Runs host-side acquisitions for each VM
-   via a small per-VM orchestrator (`Invoke-VmAcquisitions`). Today it
-   dispatches one acquirer:
+   via a small per-VM orchestrator (`Invoke-VmAcquisitions`). It
+   dispatches one acquirer per opt-in field:
    - **`javaDevKit`** acquires the requested Temurin tarball into
      `vhdPath` (see [Optional: install a JDK](#optional-install-a-jdk)).
      Skipped when `javaDevKit` is `null` or `[]` — the reconciler's
      "ensure none installed" signal needs no tarball.
+   - **`dotnetSdk`** acquires the requested .NET SDK tarball into the
+     same `vhdPath` cache as JDK tarballs, using the same
+     `{software}-{requestedVersion}-linux-x64.tar.gz` + sidecar
+     `.lock.json` naming convention (see
+     [Optional: install a .NET SDK](#optional-install-a-net-sdk)).
+     Skipped when `dotnetSdk` is `null` or `[]` for the same reason.
 
    Skipped silently for VMs that have no opt-in fields. Each acquirer is
    idempotent via its on-host lockfile, so a re-run against an already-

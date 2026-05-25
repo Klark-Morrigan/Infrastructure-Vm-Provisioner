@@ -38,4 +38,14 @@ function Invoke-VmAcquisitions {
         @($Vm.javaDevKit).Count -gt 0) {
         Invoke-JdkAcquisition -Vm $Vm
     }
+
+    # Same ensure-none guard as JDK: skip the Microsoft release-metadata
+    # call and the SDK tarball download when dotnetSdk is absent / null
+    # / []. The reconciler's uninstall path reads the on-VM manifest, not
+    # the host cache, so there is nothing to prefetch in that case.
+    if ($Vm.PSObject.Properties['dotnetSdk'] -and
+        $null -ne $Vm.dotnetSdk -and
+        @($Vm.dotnetSdk).Count -gt 0) {
+        Invoke-DotnetSdkAcquisition -Vm $Vm
+    }
 }
