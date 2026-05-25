@@ -37,24 +37,32 @@ function Get-JdkProvider {
         [object] $Vm
     )
 
-    # GetNewClosure() snapshots $Vm into each scriptblock so the closure
-    # still sees it after Get-JdkProvider returns and its locals fall
-    # out of scope. The orchestrator's call site invokes these
-    # scriptblocks from another module's session state, where bare
-    # variable lookup would not find $Vm.
+    # Capture helper functions as scriptblock-local variables BEFORE
+    # creating each closure. The orchestrator invokes these scriptblocks
+    # from inside Invoke-WithVmFileServer (Infrastructure.HyperV's
+    # session state), where bare name lookup of provision.ps1's
+    # dot-sourced helpers fails. GetNewClosure() preserves $Vm AND
+    # these function variables; the closure body invokes them via the
+    # call operator so resolution does not need the originating scope.
+    # Same pattern as Invoke-VmPostProvisioning.ps1's $copyVmFiles etc.
+    $getDesiredFn       = ${function:Get-JdkDesiredVersions}
+    $getInstalledFn     = ${function:Get-JdkInstalledVersions}
+    $installVersionFn   = ${function:Install-JdkVersion}
+    $uninstallVersionFn = ${function:Uninstall-JdkVersion}
+
     $getDesired = {
         param($VmConfig)
-        Get-JdkDesiredVersions -VmConfig $VmConfig
+        & $getDesiredFn -VmConfig $VmConfig
     }.GetNewClosure()
 
     $getInstalled = {
         param($SshClient)
-        Get-JdkInstalledVersions -SshClient $SshClient
+        & $getInstalledFn -SshClient $SshClient
     }.GetNewClosure()
 
     $installVersion = {
         param($SshClient, $Server, $Spec)
-        Install-JdkVersion `
+        & $installVersionFn `
             -SshClient       $SshClient `
             -Server          $Server `
             -Spec            $Spec `
@@ -64,7 +72,7 @@ function Get-JdkProvider {
 
     $uninstallVersion = {
         param($SshClient, $Installed)
-        Uninstall-JdkVersion -SshClient $SshClient -Installed $Installed
+        & $uninstallVersionFn -SshClient $SshClient -Installed $Installed
     }.GetNewClosure()
 
     [PSCustomObject]@{
