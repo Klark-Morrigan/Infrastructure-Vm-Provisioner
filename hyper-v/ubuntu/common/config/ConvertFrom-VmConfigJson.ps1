@@ -10,6 +10,7 @@
 # by Infrastructure.HyperV (already imported by Install-ModuleDependencies)
 # so the shared shape checks are not duplicated across consumers.
 . "$PSScriptRoot\Assert-JavaDevKitField.ps1"
+. "$PSScriptRoot\Assert-DotnetSdkField.ps1"
 
 # ---------------------------------------------------------------------------
 # ConvertFrom-VmConfigJson
@@ -73,6 +74,7 @@ function ConvertFrom-VmConfigJson {
         # Copy-VmFilesByPattern. Assert-VmEnvVarsField owns every rule for
         # the envVars shape - the provisioner adds no per-entry policy.
         Assert-JavaDevKitField -Vm $vm
+        Assert-DotnetSdkField -Vm $vm
         Assert-VmFilesField `
             -Vm                $vm `
             -AllowBulkEntries `

@@ -11,6 +11,7 @@
   - [Optional: install a JDK](#optional-install-a-jdk)
   - [Removing a JDK](#removing-a-jdk)
   - [JDK list shape (multiple entries)](#jdk-list-shape-multiple-entries)
+  - [Optional: install a .NET SDK](#optional-install-a-net-sdk)
   - [Optional: copy files to the VM](#optional-copy-files-to-the-vm)
     - [Bulk entries](#bulk-entries)
   - [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables)
@@ -124,6 +125,7 @@ All fields are required. After first boot, connect via `ssh username@ipAddress`.
 | `switchName`    | string | Hyper-V Internal switch name. Default: `VmLAN`     |
 | `natName`       | string | Windows NAT rule name. Default: `VmLAN-NAT`        |
 | `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. See [Optional: install a JDK](#optional-install-a-jdk). |
+| `dotnetSdk`     | object? | Optional. Installs a .NET SDK system-wide on first boot. See [Optional: install a .NET SDK](#optional-install-a-net-sdk). |
 | `files`         | array?  | Optional. Copies arbitrary host files onto the VM. See [Optional: copy files to the VM](#optional-copy-files-to-the-vm). |
 | `envVars`       | object? | Optional. Writes a managed block of system-wide environment variables into `/etc/environment`. See [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables). |
 
@@ -283,6 +285,49 @@ v1 supports one JDK per VM, so the list is capped at one entry. A
 longer list fails schema with the observed count. Use the list shape
 only when the multi-version surface lands; the scalar form remains the
 recommended way to declare a single JDK.
+
+### Optional: install a .NET SDK
+
+Add a `dotnetSdk` object to any VM entry to install a .NET SDK system-wide
+on first boot. When absent, no .NET SDK is installed and the rest of
+provisioning is unaffected. The provider is registered alongside
+`javaDevKit` and shares the same reconciler lifecycle (install on first
+provision, no-op on re-runs, removal via `null` / `[]`).
+
+```jsonc
+{
+  "vmName": "dev-01",
+  "...":    "...",
+  "dotnetSdk": {
+    "channel": "10.0",
+    "version": "10.0.100"
+  }
+}
+```
+
+| Sub-field   | Type   | Required | Default | Allowed values                                          |
+|-------------|--------|----------|---------|---------------------------------------------------------|
+| `channel`   | string | yes      | —       | `<major>.<minor>` (e.g. `"10.0"`). Selects the release-metadata channel. |
+| `version`   | string | yes      | —       | A **string** in one of three granularities (see below). |
+
+`dotnetSdk` is also accepted as `null` or `[]` to **uninstall** any .NET
+SDK the reconciler previously installed (same `null` / `[]` semantics as
+`javaDevKit`) and as a single-element list `[{ channel, version }]` for
+forward compatibility with the multi-version shape. v1 supports one
+SDK per VM, so a longer list fails schema with the observed count.
+
+Version-string granularities — pick the level of pinning that suits you:
+
+| Example       | Meaning                                                    |
+|---------------|------------------------------------------------------------|
+| `"10"`        | Latest SDK on the channel (major-only)                     |
+| `"10.0"`      | Latest SDK on the channel (major.minor)                    |
+| `"10.0.100"`  | Exact SDK feature-band build                               |
+
+Both `channel` and `version` must be JSON strings. Numeric values like
+`10.0` are rejected so `"10.0"` cannot silently degrade to `10` through
+trailing-zero loss — the same rule the `javaDevKit.version` field
+enforces.
 
 ### Optional: copy files to the VM
 
