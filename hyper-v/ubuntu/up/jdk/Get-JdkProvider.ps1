@@ -62,12 +62,17 @@ function Get-JdkProvider {
 
     $installVersion = {
         param($SshClient, $Server, $Spec)
+        # ResolvedVersion now comes from the Spec itself
+        # (Get-JdkDesiredVersions populates Spec.Version from
+        # $Vm._jdkResolvedVersion). The TarballPath still has to come
+        # from the closure-captured $Vm because it is a host-side
+        # path the reconciler contract does not surface on the Spec.
         & $installVersionFn `
             -SshClient       $SshClient `
             -Server          $Server `
             -Spec            $Spec `
             -TarballPath     $Vm._jdkTarballPath `
-            -ResolvedVersion $Vm._jdkResolvedVersion
+            -ResolvedVersion $Spec.Version
     }.GetNewClosure()
 
     $uninstallVersion = {

@@ -9,7 +9,28 @@
 # Get-JdkDesiredVersions
 #   Parses the optional 'javaDevKit' field on a VM definition into the typed
 #   spec shape consumed by the reconciler (see Provider-Contract.ps1):
-#       [PSCustomObject]@{ Provider='javaDevKit'; Vendor; Version }
+#       [PSCustomObject]@{ Provider='javaDevKit'; Vendor; Version;
+#                          RequestedVersion }
+#
+#   Spec.Version is the *resolved* version (e.g. '21.0.11+10-LTS') so
+#   the reconciler's diff (which matches desired vs installed by
+#   Version) compares the same shape on both sides - Get-InstalledVersions
+#   reads the resolved version from the on-VM manifest, and the
+#   manifest was written with the resolved version too. Without this
+#   alignment, every no-op run would falsely schedule a reinstall
+#   because the operator-literal '21' never equals the resolver's
+#   '21.0.11+10-LTS'.
+#
+#   RequestedVersion preserves the operator's literal pin for log
+#   output and downstream tooling that wants to show what the operator
+#   asked for vs what the resolver picked. It does NOT participate in
+#   the diff.
+#
+#   The resolved version is sourced from $Vm._jdkResolvedVersion, which
+#   Invoke-JdkAcquisition stamps onto the VM object earlier in the
+#   provisioning pipeline (host-side acquisitions run before
+#   post-provisioning reconciliation). Missing field => acquisition did
+#   not run for this VM => loud throw rather than silent reinstall.
 #
 #   Two input shapes are accepted so the reconciler can serve both the
 #   single-JDK scalar shape and the list shape:
@@ -90,15 +111,30 @@ function Get-JdkDesiredVersions {
 
     $entry = $entries[0]
 
+    # Resolved version must already be on the VM object (Invoke-JdkAcquisition
+    # stamps it in the host-side acquisitions phase). Absence here means
+    # the pipeline ran out of order or the acquisition silently skipped -
+    # either way, proceeding would compare a literal '21' against a
+    # manifest's '21.0.11+10-LTS' and force a reinstall every run.
+    if (-not $VmConfig.PSObject.Properties['_jdkResolvedVersion'] -or
+        [string]::IsNullOrWhiteSpace($VmConfig._jdkResolvedVersion)) {
+        throw (
+            "Get-JdkDesiredVersions: VmConfig is missing " +
+            "_jdkResolvedVersion. Invoke-JdkAcquisition must run for " +
+            "this VM before the reconciler's desired-versions query."
+        )
+    }
+
     # Comma-operator return prevents PowerShell from unwrapping the
     # one-element array on the way back out - the contract specifies
     # "array of typed spec objects" and downstream code calls .Count on
     # it.
     return ,@(
         [PSCustomObject]@{
-            Provider = 'javaDevKit'
-            Vendor   = $entry.vendor
-            Version  = $entry.version
+            Provider         = 'javaDevKit'
+            Vendor           = $entry.vendor
+            Version          = $VmConfig._jdkResolvedVersion
+            RequestedVersion = $entry.version
         }
     )
 }
