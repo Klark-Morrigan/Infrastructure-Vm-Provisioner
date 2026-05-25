@@ -66,6 +66,9 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\seed\generate-seed-iso.ps1"
 . "$PSScriptRoot\up\network\setup-network.ps1"
 . "$PSScriptRoot\up\vm\create-vm.ps1"
+. "$PSScriptRoot\up\timing\Initialize-PhaseTimings.ps1"
+. "$PSScriptRoot\up\timing\Invoke-WithPhaseTimer.ps1"
+. "$PSScriptRoot\up\timing\Write-PhaseTimingReport.ps1"
 
 # ---------------------------------------------------------------------------
 # 1. Install / import every required module via the centralised helper.
@@ -111,103 +114,142 @@ $existingVms = ConvertTo-Array ($vmsToProcess | Where-Object { $_._state -eq 'ex
 Write-Host ("Queued: $($newVms.Count) new VM(s), " +
             "$($existingVms.Count) existing VM(s) for reconcile.") `
     -ForegroundColor Cyan
-
 # ---------------------------------------------------------------------------
-# 4. Disk image acquisition (new VMs only)
-#    Downloads, converts, patches, and copies the per-VM VHDX.
-#    Sets $vm._vhdxPath on each object for use in step 8. Skipped for
-#    existing VMs - their disks already exist and re-copying would lose
-#    data.
-#
-#    Invoke-BaseImagePatch (called internally) throws a 'Wsl2NotReady:'
-#    error if WSL2 is not yet installed or initialised. We catch it here
-#    so we can print the reboot prompt and exit cleanly rather than
-#    letting the error propagate as an unhandled exception.
+# Phase-timing setup
+#   Declare every top-level phase in dispatch order so the report can
+#   list each (including any that never ran because an earlier phase
+#   failed). Steps 4-9 below run inside Invoke-WithPhaseTimer wrappers
+#   that record wall-clock time per phase; Write-PhaseTimingReport in
+#   the outer try/finally emits the summary on success OR failure.
 # ---------------------------------------------------------------------------
 
-foreach ($vm in $newVms) {
-    try {
-        Invoke-DiskImageAcquisition -Vm $vm
-    }
-    catch {
-        if ($_.Exception.Message -match '^Wsl2NotReady: ') {
-            Write-Host ($_.Exception.Message -replace '^Wsl2NotReady: ', '') `
-                -ForegroundColor Yellow
-            exit 0
+Initialize-PhaseTimings -Phases @(
+    'Disk image acquisition',
+    'Host-side acquisitions',
+    'Cloud-init seed ISO',
+    'Virtual switch + NAT',
+    'VM creation',
+    'Post-provisioning'
+)
+
+try {
+
+    # -----------------------------------------------------------------------
+    # 4. Disk image acquisition (new VMs only)
+    #    Downloads, converts, patches, and copies the per-VM VHDX.
+    #    Sets $vm._vhdxPath on each object for use in step 8. Skipped for
+    #    existing VMs - their disks already exist and re-copying would lose
+    #    data.
+    #
+    #    Invoke-BaseImagePatch (called internally) throws a 'Wsl2NotReady:'
+    #    error if WSL2 is not yet installed or initialised. We catch it here
+    #    so we can print the reboot prompt and exit cleanly rather than
+    #    letting the error propagate as an unhandled exception.
+    # -----------------------------------------------------------------------
+
+    Invoke-WithPhaseTimer -Name 'Disk image acquisition' -Action {
+        foreach ($vm in $newVms) {
+            try {
+                Invoke-DiskImageAcquisition -Vm $vm
+            }
+            catch {
+                if ($_.Exception.Message -match '^Wsl2NotReady: ') {
+                    Write-Host ($_.Exception.Message -replace '^Wsl2NotReady: ', '') `
+                        -ForegroundColor Yellow
+                    # Print the report before exiting so the operator
+                    # still sees how far we got. exit bypasses the
+                    # outer finally, so call it explicitly here.
+                    Write-PhaseTimingReport
+                    exit 0
+                }
+                throw
+            }
         }
-        throw
     }
+
+    # -----------------------------------------------------------------------
+    # 5. Host-side acquisitions (per VM - new AND existing)
+    #    Per-VM orchestrator that dispatches each per-software acquirer whose
+    #    opt-in field is set on the VM definition. Self-skips for VMs with no
+    #    opt-in fields. Adding a new acquirer is one dispatch line in
+    #    Invoke-VmAcquisitions, not a new block here.
+    #
+    #    Runs for existing VMs too: the operator may have added an opt-in
+    #    field (javaDevKit, ...) after the VM was originally provisioned, and
+    #    each acquirer is idempotent via its on-host lockfile so re-running
+    #    against an already-cached artefact is cheap.
+    # -----------------------------------------------------------------------
+
+    Invoke-WithPhaseTimer -Name 'Host-side acquisitions' -Action {
+        foreach ($vm in $vmsToProcess) {
+            Invoke-VmAcquisitions -Vm $vm
+        }
+    }
+
+    # -----------------------------------------------------------------------
+    # 6. Cloud-init seed ISO generation (new VMs only)
+    #    Builds meta-data, user-data, and network-config; writes the ISO.
+    #    Sets $vm._seedIsoPath on each object for use in the VM-creation step.
+    #    Skipped for existing VMs - cloud-init already ran on their first boot.
+    # -----------------------------------------------------------------------
+
+    Invoke-WithPhaseTimer -Name 'Cloud-init seed ISO' -Action {
+        foreach ($vm in $newVms) {
+            Invoke-SeedIsoGeneration -Vm $vm
+        }
+    }
+
+    # -----------------------------------------------------------------------
+    # 7. Virtual switch and NAT setup
+    #    Switch and NAT names come from the config (default: VmLAN / VmLAN-NAT).
+    #    Idempotent - safe to re-run. Always runs so a rebuilt host gets the
+    #    network re-applied around already-existing VMs.
+    # -----------------------------------------------------------------------
+
+    $switchName = $vmsToProcess[0].switchName
+    $natName    = $vmsToProcess[0].natName
+
+    Invoke-WithPhaseTimer -Name 'Virtual switch + NAT' -Action {
+        Invoke-NetworkSetup -VmsToProvision $vmsToProcess `
+                            -SwitchName     $switchName `
+                            -NatName        $natName
+    }
+
+    # -----------------------------------------------------------------------
+    # 8. VM creation (new VMs only)
+    #    Creates, configures, boots each VM, and waits for SSH readiness.
+    #    Skipped for existing VMs.
+    # -----------------------------------------------------------------------
+
+    Invoke-WithPhaseTimer -Name 'VM creation' -Action {
+        foreach ($vm in $newVms) {
+            Invoke-VmCreation -Vm $vm -SwitchName $switchName
+        }
+    }
+
+    # -----------------------------------------------------------------------
+    # 9. Post-provisioning (per VM - new AND existing)
+    #     Opens one host file server + SSH session per VM, waits for cloud-init
+    #     to finish, then dispatches each enabled step. Each step is
+    #     self-contained - no cross-step file dependencies - so order between
+    #     dispatched steps is not load-bearing. Skipped silently for VMs that
+    #     have no opt-in fields set.
+    #
+    #     Runs for existing VMs too: this is what lets an operator add a
+    #     'javaDevKit' or 'files' entry to a VM definition and re-run
+    #     provision.ps1 to push the change. Each step is idempotent on the VM
+    #     side (release-file guard, file-overwrite semantics).
+    # -----------------------------------------------------------------------
+
+    Invoke-WithPhaseTimer -Name 'Post-provisioning' -Action {
+        foreach ($vm in $vmsToProcess) {
+            Invoke-VmPostProvisioning -Vm $vm
+        }
+    }
+
+    Write-Host ""
+    Write-Host "Provisioning complete." -ForegroundColor Green
 }
-
-# ---------------------------------------------------------------------------
-# 5. Host-side acquisitions (per VM - new AND existing)
-#    Per-VM orchestrator that dispatches each per-software acquirer whose
-#    opt-in field is set on the VM definition. Self-skips for VMs with no
-#    opt-in fields. Adding a new acquirer is one dispatch line in
-#    Invoke-VmAcquisitions, not a new block here.
-#
-#    Runs for existing VMs too: the operator may have added an opt-in
-#    field (javaDevKit, ...) after the VM was originally provisioned, and
-#    each acquirer is idempotent via its on-host lockfile so re-running
-#    against an already-cached artefact is cheap.
-# ---------------------------------------------------------------------------
-
-foreach ($vm in $vmsToProcess) {
-    Invoke-VmAcquisitions -Vm $vm
+finally {
+    Write-PhaseTimingReport
 }
-
-# ---------------------------------------------------------------------------
-# 6. Cloud-init seed ISO generation (new VMs only)
-#    Builds meta-data, user-data, and network-config; writes the ISO.
-#    Sets $vm._seedIsoPath on each object for use in the VM-creation step.
-#    Skipped for existing VMs - cloud-init already ran on their first boot.
-# ---------------------------------------------------------------------------
-
-foreach ($vm in $newVms) {
-    Invoke-SeedIsoGeneration -Vm $vm
-}
-
-# ---------------------------------------------------------------------------
-# 7. Virtual switch and NAT setup
-#    Switch and NAT names come from the config (default: VmLAN / VmLAN-NAT).
-#    Idempotent - safe to re-run. Always runs so a rebuilt host gets the
-#    network re-applied around already-existing VMs.
-# ---------------------------------------------------------------------------
-
-$switchName = $vmsToProcess[0].switchName
-$natName    = $vmsToProcess[0].natName
-
-Invoke-NetworkSetup -VmsToProvision $vmsToProcess `
-                    -SwitchName     $switchName `
-                    -NatName        $natName
-
-# ---------------------------------------------------------------------------
-# 8. VM creation (new VMs only)
-#    Creates, configures, boots each VM, and waits for SSH readiness.
-#    Skipped for existing VMs.
-# ---------------------------------------------------------------------------
-
-foreach ($vm in $newVms) {
-    Invoke-VmCreation -Vm $vm -SwitchName $switchName
-}
-
-# ---------------------------------------------------------------------------
-# 9. Post-provisioning (per VM - new AND existing)
-#     Opens one host file server + SSH session per VM, waits for cloud-init
-#     to finish, then dispatches each enabled step. Each step is
-#     self-contained - no cross-step file dependencies - so order between
-#     dispatched steps is not load-bearing. Skipped silently for VMs that
-#     have no opt-in fields set.
-#
-#     Runs for existing VMs too: this is what lets an operator add a
-#     'javaDevKit' or 'files' entry to a VM definition and re-run
-#     provision.ps1 to push the change. Each step is idempotent on the VM
-#     side (release-file guard, file-overwrite semantics).
-# ---------------------------------------------------------------------------
-
-foreach ($vm in $vmsToProcess) {
-    Invoke-VmPostProvisioning -Vm $vm
-}
-
-Write-Host ""
-Write-Host "Provisioning complete." -ForegroundColor Green
