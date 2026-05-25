@@ -52,6 +52,24 @@ Describe 'Get-JdkDesiredVersions' {
             @($result).Count   | Should -Be 0
         }
 
+        It 'survives the call-operator invocation path without unrolling to $null' {
+            # The reconciler invokes provider operations through closures
+            # (see Get-JdkProvider.ps1's scriptblock wrappers). In that
+            # path, a bare `return @()` collapses to $null on the way
+            # back out, which the reconciler then misreads as "skip
+            # this provider" instead of "ensure none installed".
+            # The fix uses `,@()` to preserve array shape across the
+            # function boundary. This test reproduces the exact call
+            # shape (& on a scriptblock wrapping the function) so a
+            # future regression to `return @()` fails here.
+            $vm = New-VmConfigFromJson '{ "javaDevKit": null }'
+            $wrapper = { param($v) Get-JdkDesiredVersions -VmConfig $v }
+            $result  = & $wrapper $vm
+            ($null -eq $result) | Should -BeFalse -Because 'closure return must not unroll to $null'
+            ($result -is [array]) | Should -BeTrue
+            @($result).Count    | Should -Be 0
+        }
+
         It 'returns @() for explicit empty list' {
             $vm = New-VmConfigFromJson '{ "javaDevKit": [] }'
             $result = Get-JdkDesiredVersions -VmConfig $vm

@@ -72,7 +72,13 @@ function Get-JdkDesiredVersions {
 
     # Explicit null in the JSON (javaDevKit: null) -> ensure-none.
     if ($null -eq $jdk) {
-        return @()
+        # Comma-operator wrap: a bare `return @()` unrolls the empty
+        # array on the output stream, which the caller sees as $null -
+        # the reconciler would then misread the operator's explicit
+        # ensure-none intent as "skip this provider". `,@()` preserves
+        # the array shape across the function boundary (same trick
+        # Get-JdkInstalledVersions uses for the same reason).
+        return ,@()
     }
 
     # Normalise scalar (JSON object -> PSCustomObject) vs list (JSON array
@@ -97,7 +103,13 @@ function Get-JdkDesiredVersions {
     # check fires for both an empty array literal and the (degenerate)
     # case of an array that flattened to zero entries.
     if ($entries.Count -eq 0) {
-        return @()
+        # Comma-operator wrap: a bare `return @()` unrolls the empty
+        # array on the output stream, which the caller sees as $null -
+        # the reconciler would then misread the operator's explicit
+        # ensure-none intent as "skip this provider". `,@()` preserves
+        # the array shape across the function boundary (same trick
+        # Get-JdkInstalledVersions uses for the same reason).
+        return ,@()
     }
 
     # v1 hard-cap. The message names the observed count so an operator
