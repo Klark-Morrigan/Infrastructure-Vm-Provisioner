@@ -47,13 +47,21 @@ function Get-VmManifestsByProvider {
     $storePath = '/var/lib/infra-provisioner/manifests'
     $glob      = "$storePath/$Provider-*.json"
 
-    # `ls -1` to force one path per line. `2>&1 || true` is NOT used
-    # here: we want to distinguish "no matches" (treated as @()) from
-    # "real I/O error" (rethrown). Invoke-SshClientCommand keeps stdout
-    # and stderr separate, so the check is straightforward.
+    # `ls -1` to force one path per line. The glob is intentionally
+    # NOT single-quoted: we want bash to expand `*` against the
+    # filesystem. Single-quoting would treat the literal asterisk as
+    # part of the filename and `ls` would always report "no such file".
+    # Safe to leave unquoted because (a) $storePath is a hardcoded
+    # constant and (b) $Provider is validated above against a tight
+    # character class - no shell metacharacters can slip in.
+    #
+    # `2>&1 || true` is NOT used here: we want to distinguish "no
+    # matches" (treated as @()) from "real I/O error" (rethrown).
+    # Invoke-SshClientCommand keeps stdout and stderr separate, so the
+    # check is straightforward.
     $listResult = Invoke-SshClientCommand `
         -SshClient $SshClient `
-        -Command "ls -1 -- '$glob'"
+        -Command "ls -1 -- $glob"
 
     if ($listResult.ExitStatus -ne 0) {
         # The "no such file or directory" exit covers both

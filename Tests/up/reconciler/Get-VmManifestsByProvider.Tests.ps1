@@ -60,8 +60,15 @@ Describe 'Get-VmManifestsByProvider' {
 
             Get-VmManifestsByProvider -SshClient $script:FakeSshClient -Provider 'dotnetSdk' | Out-Null
 
+            # Unquoted glob - bash MUST expand the * against the on-VM
+            # filesystem. Single-quoting it (the previous shape) made
+            # `ls` look for a literal filename containing '*', so every
+            # call returned "no such file". The regression that bug
+            # introduced (the reconciler always saw zero installed
+            # manifests on re-runs and rebuilt everything from scratch)
+            # is exactly what this assertion guards against.
             Should -Invoke Invoke-SshClientCommand -Times 1 -Exactly -ParameterFilter {
-                $Command -eq "ls -1 -- '$script:StorePath/dotnetSdk-*.json'"
+                $Command -eq "ls -1 -- $script:StorePath/dotnetSdk-*.json"
             }
         }
     }
