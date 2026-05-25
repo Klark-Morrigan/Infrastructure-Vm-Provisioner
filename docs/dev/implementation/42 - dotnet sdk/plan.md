@@ -855,18 +855,27 @@ no-op idempotence, version change, and removal-on-empty / absent.
 
 **Behaviour**
 
-E2E scenarios, sequenced through the existing provisioning harness:
+E2E scenarios, sequenced through the existing provisioning harness
+(mapped onto three phases - the harness keeps the existing
+phase / VM2-witness shape, with each phase running 1 or 2 provisions):
 
-1. Install: `javaDevKit: { vendor: 'temurin', version: '21.0.5' }`
-   -> install dir present, manifest present.
-2. No-op: re-provision with the same JSON -> mtimes unchanged.
-3. Version change: bump to `'21.0.6'` -> old dir gone, new dir
-   present, manifest swapped, symlinks repointed.
-4. Remove via empty: change to `javaDevKit: []` -> install dir gone,
-   profile.d script gone, manifest gone.
-5. Remove via absent: drop the field -> same end state as (4).
-6. Reinstall after removal: re-add the field -> install dir reappears,
-   fresh manifest.
+1. Install: `javaDevKit: { vendor: 'temurin', version: '21' }`
+   -> install dir present, manifest present (phase 1, first provision).
+2. No-op: re-provision with the same JSON -> JDK install dir, profile.d
+   and manifest mtimes unchanged (phase 1, second provision).
+3. Version change: bump to `'17'` (then back to `'21'` in phase 3a)
+   -> old dir gone, new dir present, manifest swapped, /usr/local/bin/java
+   symlink repointed.
+4. Remove via null: `javaDevKit: null` -> install dir, profile.d,
+   manifest all gone (phase 2a). Implementation note: dropping the
+   field entirely means "skip this provider" (see
+   `Get-JdkDesiredVersions`); explicit null / `@()` is the
+   "ensure none" signal, so the E2E uses null in phase 2a and `@()`
+   in phase 3b to exercise both ensure-none shapes.
+5. Remove via empty: `javaDevKit: @()` -> same end state as (4)
+   via the array shape (phase 3b).
+6. Reinstall after removal: re-add `javaDevKit` post-removal ->
+   install dir reappears, fresh manifest (phase 2b).
 
 **Tests (E2E)** As enumerated above. Each scenario is its own
 `Describe` block in the agent.

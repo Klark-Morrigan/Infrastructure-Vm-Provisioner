@@ -1,17 +1,16 @@
 <#
 .NOTES
     Do not run this file directly. It is intended to be dot-sourced by
-    Get-JdkProvider (lands in plan step 10), which composes the four
-    provider operations into a single IToolchainProvider object.
+    Get-JdkProvider, which composes the four provider operations into
+    a single IToolchainProvider object.
 #>
 
 # ---------------------------------------------------------------------------
 # Install-JdkVersion
-#   Performs the composition step that the legacy Install-Jdk did with
-#   one inlined heredoc: extract the prefetched tarball, write
-#   /etc/profile.d/jdk.sh, create /usr/local/bin symlinks for every JDK
-#   binary, and finally write the manifest that records ownership of
-#   all four artefact kinds.
+#   Composition step driven by the reconciler: extract the prefetched
+#   tarball, write /etc/profile.d/jdk.sh, create /usr/local/bin symlinks
+#   for every JDK binary, and finally write the manifest that records
+#   ownership of all four artefact kinds.
 #
 #   Side-effect ordering is load-bearing for crash recovery: the manifest
 #   is written LAST. If the install crashes after the extract but before
@@ -25,10 +24,10 @@
 #   TarballPath and ResolvedVersion are passed as explicit parameters
 #   rather than read off the Spec. They are populated host-side by
 #   Invoke-JdkAcquisition onto $Vm._jdkTarballPath / $Vm._jdkResolvedVersion;
-#   the Get-JdkProvider wrapper (plan step 10) closes over the Vm and
-#   forwards them. This keeps the Spec shape pure (parsed from JSON, no
-#   transient state) and lets the unit test mock the primitives without
-#   reaching for VM state.
+#   the Get-JdkProvider wrapper closes over the Vm and forwards them.
+#   This keeps the Spec shape pure (parsed from JSON, no transient state)
+#   and lets the unit test mock the primitives without reaching for VM
+#   state.
 #
 #   Uses Infrastructure.HyperV 0.9.0 primitives end to end - no inline
 #   bash here, so any future change to the on-VM mechanics (e.g. moving

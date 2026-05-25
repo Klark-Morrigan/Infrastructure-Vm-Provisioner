@@ -28,12 +28,14 @@ function Invoke-VmAcquisitions {
         [object] $Vm
     )
 
-    # Skip JDK acquisition on the uninstall path - no tarball is needed
-    # to remove an install, so we avoid an unnecessary Adoptium API call
-    # on a cache miss. The host cache is shared across VMs and stays
-    # untouched.
+    # Skip JDK acquisition when the operator's intent is "ensure none
+    # installed" (javaDevKit absent / null / []) - no tarball is needed
+    # for the reconciler's uninstall path, and we avoid an unnecessary
+    # Adoptium API call on a cache miss. The host cache is shared across
+    # VMs and stays untouched.
     if ($Vm.PSObject.Properties['javaDevKit'] -and
-        -not ($Vm.javaDevKit.PSObject.Properties['uninstall'] -and $Vm.javaDevKit.uninstall)) {
+        $null -ne $Vm.javaDevKit -and
+        @($Vm.javaDevKit).Count -gt 0) {
         Invoke-JdkAcquisition -Vm $Vm
     }
 }

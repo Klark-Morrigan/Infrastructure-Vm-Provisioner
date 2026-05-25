@@ -1,8 +1,8 @@
 <#
 .NOTES
     Do not run this file directly. It is intended to be dot-sourced by
-    Get-JdkProvider (lands in plan step 10), which composes the four
-    provider operations into a single IToolchainProvider object.
+    Get-JdkProvider, which composes the four provider operations into
+    a single IToolchainProvider object.
 #>
 
 # ---------------------------------------------------------------------------
@@ -13,7 +13,7 @@
 #       [PSCustomObject]@{ Provider; Version; InstallPath; ManifestPath }
 #
 #   Manifests are the truth source for "what is installed" - they are
-#   written by JdkProvider.Install-Version (plan step 8) under
+#   written by JdkProvider.Install-Version under
 #   /var/lib/infra-provisioner/manifests/javaDevKit-<version>.json and
 #   carry the install dir, owned symlinks, and profile.d names so the
 #   uninstall path can mirror the install side without re-deriving any

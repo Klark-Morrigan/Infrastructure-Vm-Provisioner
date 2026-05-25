@@ -10,12 +10,13 @@ BeforeAll {
     # the inner calls.
     #
     # The functions inside the closure (New-VmSshClient,
-    # Invoke-SshClientCommand, Install-Jdk, Copy-VmFiles) are therefore
-    # defined as GLOBAL stubs that record their invocations into a
-    # $global: log. Tests read the log directly. The outer call
-    # (Invoke-WithVmFileServer) runs from the orchestrator function's
-    # own scope, which DOES see global stubs - the stub there forwards
-    # to the captured scriptblock so the closure executes in-process.
+    # Invoke-SshClientCommand, Copy-VmFiles, Set-EnvironmentVariables,
+    # plus the reconciler entry points) are therefore defined as GLOBAL
+    # stubs that record their invocations into a $global: log. Tests
+    # read the log directly. The outer call (Invoke-WithVmFileServer)
+    # runs from the orchestrator function's own scope, which DOES see
+    # global stubs - the stub there forwards to the captured scriptblock
+    # so the closure executes in-process.
     # ----------------------------------------------------------------------
 
     # Auto-loading of the real Infrastructure.HyperV would shadow these
@@ -34,8 +35,6 @@ BeforeAll {
     $global:_PostProv_Calls = @{
         'New-VmSshClient'                  = @()
         'Invoke-SshClientCommand'          = @()
-        'Install-Jdk'                      = @()
-        'Uninstall-Jdk'                    = @()
         'Copy-VmFiles'                     = @()
         'Copy-VmFilesByPattern'            = @()
         'Invoke-WithVmFileServer'          = @()
@@ -105,16 +104,6 @@ BeforeAll {
         }
     }
 
-    function global:Install-Jdk {
-        param($SshClient, $Server, $Vm)
-        $global:_PostProv_Calls['Install-Jdk'] += @{ Vm = $Vm }
-    }
-
-    function global:Uninstall-Jdk {
-        param($SshClient, $Vm)
-        $global:_PostProv_Calls['Uninstall-Jdk'] += @{ Vm = $Vm }
-    }
-
     function global:Copy-VmFiles {
         param($SshClient, $Server, $Entries)
         $global:_PostProv_Calls['Copy-VmFiles'] += @{ Entries = $Entries }
@@ -132,10 +121,13 @@ BeforeAll {
         }
     }
 
-    # Default: zero providers (matches step 5's Get-Providers contract).
-    # Tests that need a non-empty list override the function locally.
+    # Default: returns one no-op provider so the orchestrator can pass
+    # the array through to Invoke-ToolchainReconciliation unchanged.
+    # Tests that need a specific provider list override the function
+    # locally.
     function global:Get-Providers {
-        $global:_PostProv_Calls['Get-Providers'] += @{}
+        param($Vm)
+        $global:_PostProv_Calls['Get-Providers'] += @{ Vm = $Vm }
         return @()
     }
 
@@ -173,28 +165,6 @@ BeforeAll {
         $vm = New-PlainVm
         Add-Member -InputObject $vm -MemberType NoteProperty -Name 'javaDevKit' `
             -Value ([PSCustomObject]@{ vendor = 'temurin'; version = '21' })
-        $vm
-    }
-
-    function New-VmWithJdkUninstallFalse {
-        $vm = New-PlainVm
-        Add-Member -InputObject $vm -MemberType NoteProperty -Name 'javaDevKit' `
-            -Value ([PSCustomObject]@{
-                vendor    = 'temurin'
-                version   = '21'
-                uninstall = $false
-            })
-        $vm
-    }
-
-    function New-VmWithJdkUninstall {
-        $vm = New-PlainVm
-        Add-Member -InputObject $vm -MemberType NoteProperty -Name 'javaDevKit' `
-            -Value ([PSCustomObject]@{
-                vendor    = 'temurin'
-                version   = '21'
-                uninstall = $true
-            })
         $vm
     }
 
@@ -265,7 +235,7 @@ BeforeAll {
 AfterAll {
     foreach ($name in @(
             'Invoke-WithVmFileServer', 'New-VmSshClient',
-            'Invoke-SshClientCommand', 'Install-Jdk', 'Uninstall-Jdk',
+            'Invoke-SshClientCommand',
             'Copy-VmFiles', 'Copy-VmFilesByPattern',
             'Set-EnvironmentVariables',
             'Initialize-VmManifestStore', 'Get-Providers',
@@ -344,61 +314,23 @@ Describe 'Invoke-VmPostProvisioning' {
             $calls[0].Command | Should -Match '^timeout \d+ cloud-init status --wait'
         }
 
-        It 'dispatches Install-Jdk (not Uninstall-Jdk) when javaDevKit has no uninstall flag' {
+        It 'opens the file server when javaDevKit is set even with no other opt-in field' {
+            # The reconciler owns javaDevKit. Field presence (install or
+            # ensure-none) is enough to warrant opening the transport;
+            # the reconciler decides install vs uninstall from the
+            # desired/installed diff.
             Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
-            $global:_PostProv_Calls['Install-Jdk'].Count   | Should -Be 1
-            $global:_PostProv_Calls['Uninstall-Jdk'].Count | Should -Be 0
-        }
-
-        It 'dispatches Install-Jdk (not Uninstall-Jdk) when uninstall = $false' {
-            # Explicit false must behave like absence - removing the flag
-            # is just as valid as flipping it.
-            Invoke-VmPostProvisioning -Vm (New-VmWithJdkUninstallFalse)
-            $global:_PostProv_Calls['Install-Jdk'].Count   | Should -Be 1
-            $global:_PostProv_Calls['Uninstall-Jdk'].Count | Should -Be 0
-        }
-
-        It 'dispatches Uninstall-Jdk (not Install-Jdk) when uninstall = $true' {
-            Invoke-VmPostProvisioning -Vm (New-VmWithJdkUninstall)
-            $global:_PostProv_Calls['Uninstall-Jdk'].Count | Should -Be 1
-            $global:_PostProv_Calls['Install-Jdk'].Count   | Should -Be 0
-        }
-
-        It 'still opens the file server when uninstall = $true (orchestrator owns transport)' {
-            # The file server lifecycle is the orchestrator's; the uninstall
-            # step does not stage anything but the orchestrator still pays
-            # the (cheap) open + close since other steps in the same run
-            # (e.g. files) may need it.
-            Invoke-VmPostProvisioning -Vm (New-VmWithJdkUninstall)
             $global:_PostProv_Calls['Invoke-WithVmFileServer'].Count | Should -Be 1
         }
 
-        It 'does NOT dispatch Install-Jdk or Uninstall-Jdk when javaDevKit is absent' {
-            Invoke-VmPostProvisioning -Vm (New-VmWithFiles)
-            $global:_PostProv_Calls['Install-Jdk'].Count   | Should -Be 0
-            $global:_PostProv_Calls['Uninstall-Jdk'].Count | Should -Be 0
-        }
-
-        It 'runs Copy-VmFiles before Uninstall-Jdk when both are set' {
-            $vm = New-VmWithJdkUninstall
-            Add-Member -InputObject $vm -MemberType NoteProperty -Name 'files' -Value @(
-                [PSCustomObject]@{ source = 'C:\src\a'; target = '/opt/a' }
-            )
-
-            $originalCopy   = ${function:global:Copy-VmFiles}
-            $originalUninst = ${function:global:Uninstall-Jdk}
-            $global:_PostProv_Order = @()
-            ${function:global:Copy-VmFiles}   = { param($SshClient, $Server, $Entries) $global:_PostProv_Order += 'files' }
-            ${function:global:Uninstall-Jdk}  = { param($SshClient, $Vm)               $global:_PostProv_Order += 'jdk-uninstall' }
-            try {
-                Invoke-VmPostProvisioning -Vm $vm
-                $global:_PostProv_Order | Should -Be @('files', 'jdk-uninstall')
-            }
-            finally {
-                ${function:global:Copy-VmFiles}  = $originalCopy
-                ${function:global:Uninstall-Jdk} = $originalUninst
-                Remove-Variable -Name _PostProv_Order -Scope Global -ErrorAction SilentlyContinue
-            }
+        It 'opens the file server when javaDevKit is null (reconciler ensure-none)' {
+            # "Remove the JDK" is now expressed as javaDevKit: null, which
+            # the reconciler turns into uninstall. The orchestrator must
+            # still pay the transport open.
+            $vm = New-PlainVm
+            Add-Member -InputObject $vm -MemberType NoteProperty -Name 'javaDevKit' -Value $null
+            Invoke-VmPostProvisioning -Vm $vm
+            $global:_PostProv_Calls['Invoke-WithVmFileServer'].Count | Should -Be 1
         }
 
         It 'dispatches Copy-VmFiles when files is set, passing -Entries' {
@@ -474,35 +406,6 @@ Describe 'Invoke-VmPostProvisioning' {
             }
         }
 
-        It 'runs files entries before Install-Jdk when both a bulk entry and javaDevKit are set' {
-            $vm = New-VmWithJdk
-            Add-Member -InputObject $vm -MemberType NoteProperty -Name 'files' -Value @(
-                [PSCustomObject]@{ pattern = 'C:\jars\*.jar'; targetDir = '/opt/ci-jars' }
-            )
-
-            $originalBulk = ${function:global:Copy-VmFilesByPattern}
-            $originalInst = ${function:global:Install-Jdk}
-            $global:_PostProv_Order = @()
-            ${function:global:Copy-VmFilesByPattern} = {
-                param($SshClient, $Server, $Pattern, $TargetDir,
-                      [switch]$Recurse, [switch]$PreserveRelativePath)
-                $global:_PostProv_Order += 'files-bulk'
-            }
-            ${function:global:Install-Jdk} = {
-                param($SshClient, $Server, $Vm)
-                $global:_PostProv_Order += 'jdk'
-            }
-            try {
-                Invoke-VmPostProvisioning -Vm $vm
-                $global:_PostProv_Order | Should -Be @('files-bulk', 'jdk')
-            }
-            finally {
-                ${function:global:Copy-VmFilesByPattern} = $originalBulk
-                ${function:global:Install-Jdk}           = $originalInst
-                Remove-Variable -Name _PostProv_Order -Scope Global -ErrorAction SilentlyContinue
-            }
-        }
-
         It 'propagates Copy-VmFilesByPattern failures and still disposes the SSH client' {
             # Simulates the resolver's zero-match / collision errors, which
             # throw before any SSH I/O for the entry. The orchestrator's
@@ -530,7 +433,7 @@ Describe 'Invoke-VmPostProvisioning' {
             }
         }
 
-        It 'dispatches Copy-VmFiles before Install-Jdk when both are set' {
+        It 'dispatches Copy-VmFiles before the reconciler when both are set' {
             # Stylistic ordering only - steps are self-contained, but the
             # orchestrator commits to this order so output is predictable.
             $vm = New-VmWithJdk
@@ -538,22 +441,21 @@ Describe 'Invoke-VmPostProvisioning' {
                 [PSCustomObject]@{ source = 'C:\src\a'; target = '/opt/a' }
             )
 
-            # Replace the two step stubs with order-recording versions for
-            # this test only. ${function:global:Foo} yields the function's
-            # scriptblock directly; assigning a new scriptblock back
-            # replaces the function body in-place.
             $originalCopy = ${function:global:Copy-VmFiles}
-            $originalInst = ${function:global:Install-Jdk}
+            $originalRec  = ${function:global:Invoke-ToolchainReconciliation}
             $global:_PostProv_Order = @()
             ${function:global:Copy-VmFiles} = { param($SshClient, $Server, $Entries) $global:_PostProv_Order += 'files' }
-            ${function:global:Install-Jdk}  = { param($SshClient, $Server, $Vm)      $global:_PostProv_Order += 'jdk' }
+            ${function:global:Invoke-ToolchainReconciliation} = {
+                param($SshClient, $Server, $Vm, $Providers)
+                $global:_PostProv_Order += 'reconcile'
+            }
             try {
                 Invoke-VmPostProvisioning -Vm $vm
-                $global:_PostProv_Order | Should -Be @('files', 'jdk')
+                $global:_PostProv_Order | Should -Be @('files', 'reconcile')
             }
             finally {
-                ${function:global:Copy-VmFiles} = $originalCopy
-                ${function:global:Install-Jdk}  = $originalInst
+                ${function:global:Copy-VmFiles}                   = $originalCopy
+                ${function:global:Invoke-ToolchainReconciliation} = $originalRec
                 Remove-Variable -Name _PostProv_Order -Scope Global -ErrorAction SilentlyContinue
             }
         }
@@ -593,7 +495,7 @@ Describe 'Invoke-VmPostProvisioning' {
             $calls[0].Vm.envVars.blockName          | Should -Be 'ci-01-app'
         }
 
-        It 'dispatches files -> javaDevKit -> envVars when all three are set' {
+        It 'dispatches files -> reconciler -> envVars when all three are set' {
             $vm = New-VmWithEnvVars
             Add-Member -InputObject $vm -MemberType NoteProperty -Name 'javaDevKit' `
                 -Value ([PSCustomObject]@{ vendor = 'temurin'; version = '21' })
@@ -601,21 +503,24 @@ Describe 'Invoke-VmPostProvisioning' {
                 [PSCustomObject]@{ source = 'C:\src\a'; target = '/opt/a' }
             )
 
-            $originalCopy   = ${function:global:Copy-VmFiles}
-            $originalInst   = ${function:global:Install-Jdk}
-            $originalEnv    = ${function:global:Set-EnvironmentVariables}
+            $originalCopy = ${function:global:Copy-VmFiles}
+            $originalRec  = ${function:global:Invoke-ToolchainReconciliation}
+            $originalEnv  = ${function:global:Set-EnvironmentVariables}
             $global:_PostProv_Order = @()
             ${function:global:Copy-VmFiles}             = { param($SshClient, $Server, $Entries) $global:_PostProv_Order += 'files' }
-            ${function:global:Install-Jdk}              = { param($SshClient, $Server, $Vm)      $global:_PostProv_Order += 'jdk' }
+            ${function:global:Invoke-ToolchainReconciliation} = {
+                param($SshClient, $Server, $Vm, $Providers)
+                $global:_PostProv_Order += 'reconcile'
+            }
             ${function:global:Set-EnvironmentVariables} = { param($SshClient, $Vm)               $global:_PostProv_Order += 'envVars' }
             try {
                 Invoke-VmPostProvisioning -Vm $vm
-                $global:_PostProv_Order | Should -Be @('files', 'jdk', 'envVars')
+                $global:_PostProv_Order | Should -Be @('files', 'reconcile', 'envVars')
             }
             finally {
-                ${function:global:Copy-VmFiles}             = $originalCopy
-                ${function:global:Install-Jdk}              = $originalInst
-                ${function:global:Set-EnvironmentVariables} = $originalEnv
+                ${function:global:Copy-VmFiles}                   = $originalCopy
+                ${function:global:Invoke-ToolchainReconciliation} = $originalRec
+                ${function:global:Set-EnvironmentVariables}       = $originalEnv
                 Remove-Variable -Name _PostProv_Order -Scope Global -ErrorAction SilentlyContinue
             }
         }
@@ -651,32 +556,37 @@ Describe 'Invoke-VmPostProvisioning' {
             $global:_PostProv_Calls['Initialize-VmManifestStore'].Count | Should -Be 1
         }
 
-        It 'invokes the reconciler exactly once per VM with the Get-Providers result' {
+        It 'invokes the reconciler exactly once per VM, passing the VM through Get-Providers' {
             Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
 
             $calls = $global:_PostProv_Calls['Invoke-ToolchainReconciliation']
             $calls.Count                | Should -Be 1
-            @($calls[0].Providers).Count | Should -Be 0
             $calls[0].Vm.vmName          | Should -Be 'node-01'
+
+            $providerCalls = $global:_PostProv_Calls['Get-Providers']
+            $providerCalls.Count          | Should -Be 1
+            $providerCalls[0].Vm.vmName   | Should -Be 'node-01'
         }
 
-        It 'still invokes Install-Jdk after the reconciler when no providers are registered' {
-            # Step 5 regression guard: the legacy JDK branch must stay in
-            # place until step 10 swaps it for the JdkProvider. The
-            # reconciler call site existing must NOT silently displace it.
+        It 'does not dispatch any Install-Jdk / Uninstall-Jdk step function' {
+            # The reconciler-owned JdkProvider replaces direct step
+            # dispatch. A regression that re-adds an Install-Jdk /
+            # Uninstall-Jdk function would shadow the reconciler's
+            # manifest-driven path.
             Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
-            $global:_PostProv_Calls['Install-Jdk'].Count                  | Should -Be 1
-            $global:_PostProv_Calls['Invoke-ToolchainReconciliation'].Count | Should -Be 1
+            (Get-Command -Name Install-Jdk -ErrorAction SilentlyContinue) |
+                Should -BeNullOrEmpty
+            (Get-Command -Name Uninstall-Jdk -ErrorAction SilentlyContinue) |
+                Should -BeNullOrEmpty
         }
 
-        It 'runs Initialize-VmManifestStore before the reconciler and the legacy JDK branch' {
-            # Order matters once providers land - the store must exist
-            # before any provider tries to write a manifest into it.
+        It 'runs Initialize-VmManifestStore before the reconciler' {
+            # The store must exist before any provider tries to write a
+            # manifest into it.
             $vm = New-VmWithJdk
 
             $originalInit  = ${function:global:Initialize-VmManifestStore}
             $originalRec   = ${function:global:Invoke-ToolchainReconciliation}
-            $originalInst  = ${function:global:Install-Jdk}
             $global:_PostProv_Order = @()
             ${function:global:Initialize-VmManifestStore} = {
                 param($SshClient)
@@ -686,18 +596,13 @@ Describe 'Invoke-VmPostProvisioning' {
                 param($SshClient, $Server, $Vm, $Providers)
                 $global:_PostProv_Order += 'reconcile'
             }
-            ${function:global:Install-Jdk} = {
-                param($SshClient, $Server, $Vm)
-                $global:_PostProv_Order += 'jdk'
-            }
             try {
                 Invoke-VmPostProvisioning -Vm $vm
-                $global:_PostProv_Order | Should -Be @('init-store', 'reconcile', 'jdk')
+                $global:_PostProv_Order | Should -Be @('init-store', 'reconcile')
             }
             finally {
                 ${function:global:Initialize-VmManifestStore}     = $originalInit
                 ${function:global:Invoke-ToolchainReconciliation} = $originalRec
-                ${function:global:Install-Jdk}                    = $originalInst
                 Remove-Variable -Name _PostProv_Order -Scope Global -ErrorAction SilentlyContinue
             }
         }
@@ -710,7 +615,7 @@ Describe 'Invoke-VmPostProvisioning' {
 
             Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
 
-            $global:_PostProv_Calls['Install-Jdk'].Count | Should -Be 1
+            $global:_PostProv_Calls['Invoke-ToolchainReconciliation'].Count | Should -Be 1
         }
     }
 }

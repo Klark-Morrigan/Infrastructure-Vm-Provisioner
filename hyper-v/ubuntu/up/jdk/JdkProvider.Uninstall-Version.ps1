@@ -1,8 +1,8 @@
 <#
 .NOTES
     Do not run this file directly. It is intended to be dot-sourced by
-    Get-JdkProvider (lands in plan step 10), which composes the four
-    provider operations into a single IToolchainProvider object.
+    Get-JdkProvider, which composes the four provider operations into
+    a single IToolchainProvider object.
 #>
 
 # ---------------------------------------------------------------------------

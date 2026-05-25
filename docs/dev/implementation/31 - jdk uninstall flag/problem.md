@@ -1,5 +1,14 @@
 # Problem: JDK Uninstall Flag
 
+> **SUPERSEDED by [42 - dotnet sdk](../42%20-%20dotnet%20sdk/problem.md).**
+> Feature 42 step 10 replaced the `javaDevKit.uninstall` flag with the
+> reconciler's manifest-driven removal: setting `javaDevKit` to `null`
+> or `[]` (or removing the field entirely) is now the way to uninstall
+> a JDK. The body below is preserved for history; the schema and
+> dispatch decisions it documents no longer hold.
+
+---
+
 ## Index
 
 - [Context](#context)

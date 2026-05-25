@@ -1,8 +1,8 @@
 <#
 .NOTES
     Do not run this file directly. It is intended to be dot-sourced by
-    Get-JdkProvider (lands in plan step 10), which composes the four
-    provider operations into a single IToolchainProvider object.
+    Get-JdkProvider, which composes the four provider operations into
+    a single IToolchainProvider object.
 #>
 
 # ---------------------------------------------------------------------------
@@ -11,8 +11,8 @@
 #   spec shape consumed by the reconciler (see Provider-Contract.ps1):
 #       [PSCustomObject]@{ Provider='javaDevKit'; Vendor; Version }
 #
-#   Two input shapes are accepted so the reconciler can serve both legacy
-#   single-JDK VM JSON and the list-shaped form introduced by feature 42:
+#   Two input shapes are accepted so the reconciler can serve both the
+#   single-JDK scalar shape and the list shape:
 #       javaDevKit: { vendor, version }              (scalar)
 #       javaDevKit: [{ vendor, version }, ...]       (list)
 #   The scalar is normalised to a one-element list at this layer so every
@@ -25,12 +25,12 @@
 #       one entry       -> array of one Spec record
 #
 #   v1 of the JDK provider constrains the list to length 1. Multi-JDK
-#   coexistence on one VM is out of scope per problem.md and would require
-#   per-version JAVA_HOME / PATH wiring beyond the single profile.d script
-#   the installer writes today. A length-greater-than-1 input is therefore
-#   a hard error - failing loud here is preferable to silently installing
-#   only the first entry and leaving operators wondering why the others
-#   were ignored.
+#   coexistence on one VM would require per-version JAVA_HOME / PATH
+#   wiring beyond the single profile.d script the installer writes
+#   today. A length-greater-than-1 input is therefore a hard error -
+#   failing loud here is preferable to silently installing only the
+#   first entry and leaving operators wondering why the others were
+#   ignored.
 # ---------------------------------------------------------------------------
 
 function Get-JdkDesiredVersions {
@@ -84,8 +84,7 @@ function Get-JdkDesiredVersions {
     if ($entries.Count -gt 1) {
         throw (
             "javaDevKit v1 supports one JDK per VM; got $($entries.Count) " +
-            "entries. Multi-version coexistence is out of scope for " +
-            "feature 42; see docs/dev/implementation/42 - dotnet sdk/."
+            "entries."
         )
     }
 

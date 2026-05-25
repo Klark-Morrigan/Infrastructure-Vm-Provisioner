@@ -21,7 +21,10 @@
 #   does not silently upgrade between provisionings.
 #
 #   On return, $Vm._jdkTarballPath and $Vm._jdkResolvedVersion are set via
-#   Add-Member for use by Invoke-JdkInstall.
+#   Add-Member. The post-provisioning reconciler's JDK provider
+#   (see Get-JdkProvider.ps1) closes over the VM and forwards these to
+#   Install-JdkVersion at dispatch time, keeping the reconciler's typed
+#   Spec shape free of host-side transient state.
 # ---------------------------------------------------------------------------
 
 function Invoke-JdkAcquisition {
@@ -34,8 +37,19 @@ function Invoke-JdkAcquisition {
     Write-Host ""
     Write-Host "--- JDK acquisition: $($Vm.vmName) ---" -ForegroundColor Cyan
 
-    $vendor           = $Vm.javaDevKit.vendor
-    $requestedVersion = $Vm.javaDevKit.version
+    # Normalise scalar vs list: the validator accepts both shapes, and
+    # the upstream guard in Invoke-VmAcquisitions has already filtered
+    # out the null / [] "ensure none" cases - so $jdk is guaranteed to
+    # be a non-empty scalar or list-of-one here. The list cap to 1 is
+    # enforced by Assert-JavaDevKitField and by the reconciler's
+    # Get-JdkDesiredVersions.
+    $jdk = if ($Vm.javaDevKit -is [array]) {
+        @($Vm.javaDevKit)[0]
+    } else {
+        $Vm.javaDevKit
+    }
+    $vendor           = $jdk.vendor
+    $requestedVersion = $jdk.version
 
     # ------------------------------------------------------------------
     # Cache paths. Vm.vhdPath is guaranteed to exist by the upstream
@@ -146,7 +160,7 @@ function Invoke-JdkAcquisition {
             )
         }
 
-        # Lockfile schema (Step 3 plan): resolvedVersion, sha256,
+        # Lockfile schema (feature 20 step 3): resolvedVersion, sha256,
         # downloadedUtc (ISO 8601 Z), sourceUrl. Kept minimal - extending
         # later is safe because the reader treats unknown fields as
         # opaque.
@@ -165,8 +179,9 @@ function Invoke-JdkAcquisition {
 
     # ------------------------------------------------------------------
     # Publish the cached artifact's location and the resolved version to
-    # the VM object so the seed-ISO generator can stage the tarball and
-    # template the install path without recomputing anything.
+    # the VM object so the post-provisioning JDK provider's
+    # Install-Version scriptblock (composed by Get-JdkProvider) can
+    # forward them to Install-JdkVersion without recomputing anything.
     # ------------------------------------------------------------------
     Add-Member -InputObject $Vm -MemberType NoteProperty `
                -Name '_jdkTarballPath' -Value $tarballPath -Force

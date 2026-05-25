@@ -33,6 +33,11 @@ function Invoke-VmPostProvisioning {
     # applies, exit silently - no file server, no SSH, no log noise.
     $hasFiles   = $Vm.PSObject.Properties['files'] -and
                   @($Vm.files).Count -gt 0
+    # javaDevKit is reconciler-owned: presence of the field is enough to
+    # warrant opening the transport even when the operator's intent is
+    # "ensure none installed" (javaDevKit: null / []). The reconciler
+    # decides install vs uninstall from the desired/installed diff; this
+    # gate just decides whether to pay the SSH cost at all.
     $hasJdk     = $Vm.PSObject.Properties['javaDevKit']
     # Gate on field presence (not entries.Count): `entries: []` is the
     # operator's explicit "remove the managed block" intent, so it must
@@ -65,8 +70,6 @@ function Invoke-VmPostProvisioning {
     # this approach, so the dispatch is uniform.
     $copyVmFiles             = ${function:Copy-VmFiles}
     $copyVmFilesByPattern    = ${function:Copy-VmFilesByPattern}
-    $installJdk              = ${function:Install-Jdk}
-    $uninstallJdk            = ${function:Uninstall-Jdk}
     $setEnvironmentVariables = ${function:Set-EnvironmentVariables}
     # Reconciler entry points - same capture pattern as the per-step
     # functions above for the same reason (closure does not see
@@ -162,32 +165,16 @@ function Invoke-VmPostProvisioning {
                 }
                 Write-Host "  [files] [OK] all copies complete." -ForegroundColor Green
             }
-            # Reconciler dispatch runs before the legacy JDK install/uninstall
-            # branch below. At step 5 Get-Providers returns @(), so this
-            # call is a no-op - the call site exists so steps 10 and 19
-            # can land their providers without re-touching the orchestrator.
-            # When the JdkProvider lands (step 10), the legacy branch below
-            # is deleted in the same commit.
+            # Reconciler dispatch. Get-Providers is parameterised by the
+            # VM so each provider can capture VM-scoped state (e.g. the
+            # JDK provider closes over _jdkTarballPath / _jdkResolvedVersion
+            # populated by Invoke-JdkAcquisition).
             & $invokeReconciliation `
                 -SshClient $sshClient `
                 -Server    $server `
                 -Vm        $vmRef `
-                -Providers @(& $getProviders)
+                -Providers @(& $getProviders -Vm $vmRef)
 
-            if ($hasJdk) {
-                # Pick install OR uninstall based on the flag; never both.
-                # Installing-then-uninstalling in a single run is nonsense;
-                # uninstalling-then-installing belongs in two explicit
-                # provision runs so the operator's intent stays visible in
-                # the JSON between them.
-                $jdk = $vmRef.javaDevKit
-                $uninstallProp = $jdk.PSObject.Properties['uninstall']
-                if ($null -ne $uninstallProp -and $uninstallProp.Value -eq $true) {
-                    & $uninstallJdk -SshClient $sshClient -Vm $vmRef
-                } else {
-                    & $installJdk -SshClient $sshClient -Server $server -Vm $vmRef
-                }
-            }
             if ($hasEnvVars) {
                 # Stylistically last: env-var values may legitimately
                 # reference paths the `files` step placed or the JDK

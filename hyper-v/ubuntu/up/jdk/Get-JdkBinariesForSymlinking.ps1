@@ -13,12 +13,11 @@
 #   /usr/local/bin via New-VmSymlink and also record them under
 #   `ownedSymlinks` in the manifest.
 #
-#   The legacy Install-Jdk uses an on-VM glob loop and never records
-#   the resulting links anywhere. The reconciler's uninstall path
-#   needs the explicit list - a glob at uninstall time would race
-#   against anything the operator might have added or removed by
-#   hand, and the manifest is meant to be the truth source for what
-#   the provider owns.
+#   The reconciler's uninstall path needs the explicit list of binaries
+#   that were symlinked at install time - a glob at uninstall time
+#   would race against anything the operator might have added or
+#   removed by hand, and the manifest is meant to be the truth source
+#   for what the provider owns.
 #
 #   The remote command runs under the SSH user (no sudo): /opt/jdk-*
 #   is world-readable after Expand-VmTarball extracts it under
@@ -29,7 +28,7 @@
 #   silent skip would lead to an empty ownedSymlinks manifest and the
 #   /etc/profile.d/jdk.sh PATH wiring would be the only way to reach
 #   the JDK, breaking non-login shells (sshd command exec, systemd,
-#   cron). See Install-Jdk.ps1's existing comment for the rationale.
+#   cron).
 # ---------------------------------------------------------------------------
 
 function Get-JdkBinariesForSymlinking {
