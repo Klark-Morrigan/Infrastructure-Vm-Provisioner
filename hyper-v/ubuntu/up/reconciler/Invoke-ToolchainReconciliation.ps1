@@ -114,11 +114,22 @@ function Invoke-ToolchainReconciliation {
             $toUninstall = @($plan.ToUninstall)
             $toInstall   = @($plan.ToInstall)
 
+            # Render version arrays in single quotes per entry so a
+            # whitespace-only difference (trailing CR, leading space)
+            # is obvious in the log - a bare comma-join would hide it.
+            $desiredVersionsStr = (
+                @($desired | ForEach-Object { "'" + [string]$_.Version + "'" }) -join ', '
+            )
+            $installedVersionsStr = (
+                @($installed | ForEach-Object { "'" + [string]$_.Version + "'" }) -join ', '
+            )
             Write-Host (
                 "  [reconciler] $providerName : " +
                 "uninstall=$($toUninstall.Count) " +
                 "install=$($toInstall.Count) " +
-                "noop=$(@($plan.NoOp).Count)"
+                "noop=$(@($plan.NoOp).Count)  " +
+                "desired=[$desiredVersionsStr] " +
+                "installed=[$installedVersionsStr]"
             )
 
             # Uninstall-then-install: see header docstring for the
