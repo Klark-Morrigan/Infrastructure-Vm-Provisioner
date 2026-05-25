@@ -37,7 +37,7 @@ Describe 'Read-VmManifest' {
             $m.ownedSymlinks[0].path | Should -Be '/usr/local/bin/java'
         }
 
-        It "issues 'sudo cat -- <path>' on the wire" {
+        It "issues 'sudo cat -- {path}' on the wire" {
             Mock Invoke-SshClientCommand {
                 [PSCustomObject]@{ ExitStatus = 0; Output = $script:ValidManifestJson; Error = '' }
             }

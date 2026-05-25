@@ -17,7 +17,7 @@ Describe 'Remove-VmManifest' {
         }
     }
 
-    It "issues 'sudo rm -f -- <path>' on the wire" {
+    It "issues 'sudo rm -f -- {path}' on the wire" {
         Remove-VmManifest -SshClient $script:FakeSshClient `
                           -Path '/var/lib/infra-provisioner/manifests/javaDevKit-21.0.5.json'
 
