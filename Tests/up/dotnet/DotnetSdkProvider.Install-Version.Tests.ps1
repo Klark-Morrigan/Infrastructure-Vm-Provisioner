@@ -52,7 +52,12 @@ Describe 'Install-DotnetSdkVersion' {
             }
         }
 
-        It 'writes /etc/profile.d/dotnet.sh with DOTNET_ROOT, PATH and telemetry opt-out' {
+        It 'writes /etc/profile.d/dotnet.sh with DOTNET_ROOT, tools PATH and telemetry opt-out' {
+            # The PATH line prepends BOTH DOTNET_ROOT and the tools dir
+            # so a login shell sees `dotnet` and any globally-installed
+            # `dotnet tool` commands without each tool needing its own
+            # profile.d entry. DOTNET_TOOLS_ROOT is exported alongside
+            # so operators have a stable name to reference.
             Install-DotnetSdkVersion `
                 -SshClient $script:FakeSshClient `
                 -Server    $script:FakeServer `
@@ -61,7 +66,8 @@ Describe 'Install-DotnetSdkVersion' {
             Should -Invoke Set-VmProfileDScript -Times 1 -Exactly -ParameterFilter {
                 $Name -eq 'dotnet' -and
                 $Content -match 'export DOTNET_ROOT=/opt/dotnet-10\.0\.100' -and
-                $Content -match 'export PATH="\$DOTNET_ROOT:\$PATH"' -and
+                $Content -match 'export DOTNET_TOOLS_ROOT=/usr/local/share/dotnet/tools' -and
+                $Content -match 'export PATH="\$DOTNET_ROOT:\$DOTNET_TOOLS_ROOT:\$PATH"' -and
                 $Content -match 'export DOTNET_CLI_TELEMETRY_OPTOUT=1'
             }
         }
@@ -92,6 +98,36 @@ Describe 'Install-DotnetSdkVersion' {
                 @($Manifest.ownedProfileScripts)[0] -eq 'dotnet'        -and
                 @($Manifest.ownedSymlinks).Count    -eq 1               -and
                 @($Manifest.children).Count         -eq 0
+            }
+        }
+
+        It 'populates the manifest children array from supplied -ChildEntries in declaration order' {
+            # The SDK provider is responsible for the parent's `children`
+            # field; the reconciler's children walker reads it at
+            # parent-uninstall time. Get-DotnetSdkProvider derives the
+            # entries from $Vm.dotnetTools via Get-VmDotnetToolChildren
+            # and forwards them here, so the contract this test guards
+            # is "whatever the caller passes in -ChildEntries lands in
+            # manifest.children in the same order, untouched". Two
+            # entries are enough to prove ordering preservation.
+            $childEntries = @(
+                [PSCustomObject]@{ provider = 'dotnetTools'; manifestPath = '/var/lib/infra-provisioner/manifests/dotnetTools-tool-a-1.0.0.json' }
+                [PSCustomObject]@{ provider = 'dotnetTools'; manifestPath = '/var/lib/infra-provisioner/manifests/dotnetTools-tool-b-2.5.4.json' }
+            )
+
+            Install-DotnetSdkVersion `
+                -SshClient    $script:FakeSshClient `
+                -Server       $script:FakeServer `
+                -Spec         (New-DotnetSpec) `
+                -ChildEntries $childEntries
+
+            Should -Invoke Write-VmManifest -Times 1 -Exactly -ParameterFilter {
+                $childs = @($Manifest.children)
+                $childs.Count       -eq 2 -and
+                $childs[0].provider -eq 'dotnetTools' -and
+                $childs[0].manifestPath -eq '/var/lib/infra-provisioner/manifests/dotnetTools-tool-a-1.0.0.json' -and
+                $childs[1].provider -eq 'dotnetTools' -and
+                $childs[1].manifestPath -eq '/var/lib/infra-provisioner/manifests/dotnetTools-tool-b-2.5.4.json'
             }
         }
 

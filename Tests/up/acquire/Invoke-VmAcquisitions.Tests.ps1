@@ -4,6 +4,7 @@ BeforeAll {
     # in its own Tests/up/<software>/ file.
     function Invoke-JdkAcquisition { param($Vm) }
     function Invoke-DotnetSdkAcquisition { param($Vm, $CacheDir) }
+    function Invoke-DotnetToolAcquisition { param($Vm, $CacheDir) }
     # Stub the sub-step timer too so the dispatch tests stay focused on
     # which acquirer ran, not on whether the timing scaffolding is wired
     # up. The stub invokes the action directly so the underlying mocks
@@ -82,6 +83,39 @@ BeforeAll {
         [PSCustomObject]@{
             vmName    = 'node-01'
             dotnetSdk = @()
+        }
+    }
+
+    function New-VmWithDotnetTools {
+        # Validator (Assert-DotnetToolsField) requires dotnetSdk too,
+        # but the orchestrator does not re-check the cross-field rule;
+        # fixture mirrors a realistic post-validation shape.
+        [PSCustomObject]@{
+            vmName      = 'node-01'
+            vhdPath     = 'C:\cache'
+            dotnetSdk   = [PSCustomObject]@{ channel = '10.0'; version = '10.0.100' }
+            dotnetTools = @(
+                [PSCustomObject]@{
+                    id      = 'dotnet-reportgenerator-globaltool'
+                    version = '5.4.4'
+                }
+            )
+        }
+    }
+
+    function New-VmWithDotnetToolsNull {
+        [PSCustomObject]@{
+            vmName      = 'node-01'
+            vhdPath     = 'C:\cache'
+            dotnetTools = $null
+        }
+    }
+
+    function New-VmWithDotnetToolsEmpty {
+        [PSCustomObject]@{
+            vmName      = 'node-01'
+            vhdPath     = 'C:\cache'
+            dotnetTools = @()
         }
     }
 }
@@ -179,6 +213,36 @@ Describe 'Invoke-VmAcquisitions' {
             Mock Invoke-DotnetSdkAcquisition {}
             Invoke-VmAcquisitions -Vm (New-VmWithDotnetScalar)
             Should -Invoke Invoke-JdkAcquisition -Times 0
+        }
+    }
+
+    Context 'dotnetTools present' {
+
+        It 'dispatches Invoke-DotnetToolAcquisition with vhdPath as CacheDir' {
+            # Asserts the orchestrator forwards the per-VM cache root
+            # so the .nupkg + lockfile artefacts land alongside the SDK
+            # tarball - same cache slot, different file prefixes.
+            Mock Invoke-DotnetToolAcquisition {}
+            Invoke-VmAcquisitions -Vm (New-VmWithDotnetTools)
+            Should -Invoke Invoke-DotnetToolAcquisition -Times 1 -Exactly `
+                -ParameterFilter {
+                    $Vm.vmName -eq 'node-01' -and $CacheDir -eq 'C:\cache'
+                }
+        }
+
+        It 'skips Invoke-DotnetToolAcquisition when dotnetTools is null (ensure-none)' {
+            # Same rationale as the SDK skip: no nuget.org round-trip
+            # is needed when the reconciler will just walk an empty
+            # desired set.
+            Mock Invoke-DotnetToolAcquisition {}
+            Invoke-VmAcquisitions -Vm (New-VmWithDotnetToolsNull)
+            Should -Invoke Invoke-DotnetToolAcquisition -Times 0
+        }
+
+        It 'skips Invoke-DotnetToolAcquisition when dotnetTools is an empty array (ensure-none)' {
+            Mock Invoke-DotnetToolAcquisition {}
+            Invoke-VmAcquisitions -Vm (New-VmWithDotnetToolsEmpty)
+            Should -Invoke Invoke-DotnetToolAcquisition -Times 0
         }
     }
 }

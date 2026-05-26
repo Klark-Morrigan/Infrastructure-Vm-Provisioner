@@ -52,7 +52,18 @@ function Install-DotnetSdkVersion {
         [object] $Server,
 
         [Parameter(Mandatory)]
-        [object] $Spec
+        [object] $Spec,
+
+        # Optional - present when the SDK install is followed by the
+        # nested dotnetTools provider in the same provision run. The
+        # SDK provider is the only place the parent depends on the
+        # child (dependency direction: parent-knows-children), so the
+        # caller (Get-DotnetSdkProvider) is responsible for resolving
+        # the per-Vm child entry list via Get-VmDotnetToolChildren and
+        # forwarding it here. Default empty so existing call sites
+        # (and SDK-only fixtures) stay unaffected.
+        [AllowEmptyCollection()]
+        [object[]] $ChildEntries = @()
     )
 
     $resolvedVersion = $Spec.Version
@@ -74,9 +85,20 @@ function Install-DotnetSdkVersion {
     # /etc/profile.d. Single-quoted right-hand sides so the values stay
     # literal in the written .sh and the user's shell expands them at
     # login, not host-side at construction time.
+    #
+    # The tools dir (/usr/local/share/dotnet/tools) is prepended too so a
+    # login shell sees globally-installed `dotnet tool` commands on PATH
+    # without each tool needing its own profile.d entry. The dir is
+    # owned by the nested dotnetTools provider; writing the PATH here
+    # (rather than in a sibling tools.sh) keeps one source of truth for
+    # the dotnet PATH and avoids drift between SDK and tools install
+    # state. The dir exists even when no tools are installed - the
+    # first `dotnet tool install --tool-path` creates it - so prepending
+    # it unconditionally is safe.
     $dotnetSh = @(
         "export DOTNET_ROOT=$installDir"
-        'export PATH="$DOTNET_ROOT:$PATH"'
+        'export DOTNET_TOOLS_ROOT=/usr/local/share/dotnet/tools'
+        'export PATH="$DOTNET_ROOT:$DOTNET_TOOLS_ROOT:$PATH"'
         'export DOTNET_CLI_TELEMETRY_OPTOUT=1'
         ''
     ) -join "`n"
@@ -114,7 +136,15 @@ function Install-DotnetSdkVersion {
             }
         )
         ownedProfileScripts = @('dotnet')
-        children            = @()
+        # Children walker (reconciler Phase A) reads this array at
+        # parent-uninstall time to dispatch each registered nested
+        # provider's Uninstall-Version BEFORE the SDK is removed. Each
+        # entry is { provider, manifestPath } - see Provider-Contract.ps1
+        # and Invoke-ToolchainChildrenUninstall. Populated from the
+        # operator's `dotnetTools` config at install time (see header
+        # for the dependency direction rationale); explicit empty array
+        # when the operator declared no tools or omitted the field.
+        children            = @($ChildEntries)
     }
 
     Write-VmManifest -SshClient $SshClient -Manifest $manifest

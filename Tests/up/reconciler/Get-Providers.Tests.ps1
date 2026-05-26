@@ -13,6 +13,7 @@ BeforeAll {
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\DotnetSdkProvider.Get-InstalledVersions.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\DotnetSdkProvider.Install-Version.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\DotnetSdkProvider.Uninstall-Version.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\Get-VmDotnetToolChildren.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\Get-DotnetSdkProvider.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\DotnetToolsProvider.Get-DesiredVersions.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\DotnetToolsProvider.Get-InstalledVersions.ps1"
