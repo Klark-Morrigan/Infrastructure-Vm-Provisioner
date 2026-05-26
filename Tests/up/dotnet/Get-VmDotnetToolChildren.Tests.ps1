@@ -1,9 +1,5 @@
 BeforeAll {
-    # Get-VmDotnetToolChildren is defined alongside Install-DotnetSdkVersion
-    # because the parent provider owns the parent->child mapping (see the
-    # helper's header for the dependency-direction rationale). Loading the
-    # SDK Install-Version file is enough to make the helper visible.
-    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\DotnetSdkProvider.Install-Version.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\Get-VmDotnetToolChildren.ps1"
 }
 
 # Helper uses `return ,@()` so a direct call yields a single emitted
