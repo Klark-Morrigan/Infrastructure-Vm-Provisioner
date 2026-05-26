@@ -12,6 +12,7 @@
   - [Removing a JDK](#removing-a-jdk)
   - [JDK list shape (multiple entries)](#jdk-list-shape-multiple-entries)
   - [Optional: install a .NET SDK](#optional-install-a-net-sdk)
+  - [Optional: install .NET global tools](#optional-install-net-global-tools)
   - [Optional: copy files to the VM](#optional-copy-files-to-the-vm)
     - [Bulk entries](#bulk-entries)
   - [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables)
@@ -126,6 +127,7 @@ All fields are required. After first boot, connect via `ssh username@ipAddress`.
 | `natName`       | string | Windows NAT rule name. Default: `VmLAN-NAT`        |
 | `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. See [Optional: install a JDK](#optional-install-a-jdk). |
 | `dotnetSdk`     | object? | Optional. Installs a .NET SDK system-wide on first boot. See [Optional: install a .NET SDK](#optional-install-a-net-sdk). |
+| `dotnetTools`   | array?  | Optional. Installs .NET global tools system-wide on first boot. Requires `dotnetSdk` on the same VM. See [Optional: install .NET global tools](#optional-install-net-global-tools). |
 | `files`         | array?  | Optional. Copies arbitrary host files onto the VM. See [Optional: copy files to the VM](#optional-copy-files-to-the-vm). |
 | `envVars`       | object? | Optional. Writes a managed block of system-wide environment variables into `/etc/environment`. See [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables). |
 
@@ -335,6 +337,41 @@ Both `channel` and `version` must be JSON strings. Numeric values like
 `10.0` are rejected so `"10.0"` cannot silently degrade to `10` through
 trailing-zero loss — the same rule the `javaDevKit.version` field
 enforces.
+
+### Optional: install .NET global tools
+
+Add a `dotnetTools` array to any VM entry to install one or more
+[.NET global tools](https://learn.microsoft.com/dotnet/core/tools/global-tools)
+system-wide on first boot. The field is opt-in — absent or empty arrays
+leave the VM untouched — and **requires `dotnetSdk` on the same VM** (the
+SDK is needed to run `dotnet tool install`). Entries install in array
+order; a failure on any entry fails the provisioning, same posture as
+the JDK and SDK installs.
+
+```jsonc
+{
+  "vmName": "ci-runner-01",
+  "...":    "...",
+  "dotnetSdk":   { "channel": "10.0", "version": "10.0.100" },
+  "dotnetTools": [
+    { "id": "dotnet-reportgenerator-globaltool", "version": "5.4.4" }
+  ]
+}
+```
+
+| Sub-field | Type   | Required | Allowed values                                                                 |
+|-----------|--------|----------|--------------------------------------------------------------------------------|
+| `id`      | string | yes      | A NuGet package id matching `^[A-Za-z0-9._-]+$`.                               |
+| `version` | string | yes      | An **exact NuGet version pin**. No `"latest"`, no floating ranges (`[1.0,2.0)`), no whitespace. Reproducibility takes priority; if a version needs to move, edit the JSON. |
+
+Unknown sub-fields are rejected at schema time to catch silent typos
+(`versoin` vs `version`), the same strict-by-design posture
+`dotnetSdk` and `javaDevKit` take.
+
+`dotnetTools` is also accepted as `null` or `[]` to **uninstall** any
+.NET global tools the reconciler previously installed. `dotnetTools: []`
+is allowed regardless of whether `dotnetSdk` is set — "no tools" is a
+coherent state on any VM, SDK or not.
 
 ### Optional: copy files to the VM
 
