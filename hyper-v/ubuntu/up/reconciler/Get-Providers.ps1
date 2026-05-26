@@ -32,9 +32,12 @@ function Get-Providers {
 
     # Bare array literal - PowerShell's output stream unrolls it on the
     # way back so the caller's `@(Get-Providers ...)` wrapper sees a
-    # flat array of providers. Later steps (e.g. DotnetSdkProvider at
-    # step 19) just append more entries here.
+    # flat array of providers. Order is the reconciler's dispatch order
+    # (JSON-declaration order between providers); JDK lands first
+    # because it was the first reconciler-owned toolchain and dotnet
+    # SDK appended below.
     return @(
-        Get-JdkProvider -Vm $Vm
+        Get-JdkProvider       -Vm $Vm
+        Get-DotnetSdkProvider -Vm $Vm
     )
 }

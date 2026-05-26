@@ -46,6 +46,11 @@ function Invoke-VmAcquisitions {
     if ($Vm.PSObject.Properties['dotnetSdk'] -and
         $null -ne $Vm.dotnetSdk -and
         @($Vm.dotnetSdk).Count -gt 0) {
-        Invoke-DotnetSdkAcquisition -Vm $Vm
+        # CacheDir is taken from $Vm.vhdPath so dotnet tarballs share the
+        # same on-host cache as JDK tarballs (see the prefetch table in
+        # README.md's provision.ps1 section). Invoke-DotnetSdkAcquisition
+        # declares -CacheDir as Mandatory rather than defaulting it
+        # internally so unit tests can target a scratch directory.
+        Invoke-DotnetSdkAcquisition -Vm $Vm -CacheDir $Vm.vhdPath
     }
 }

@@ -316,6 +316,13 @@ SDK the reconciler previously installed (same `null` / `[]` semantics as
 forward compatibility with the multi-version shape. v1 supports one
 SDK per VM, so a longer list fails schema with the observed count.
 
+The install extracts the tarball into `/opt/dotnet-{resolvedVersion}/`,
+writes `/etc/profile.d/dotnet.sh` exporting `DOTNET_ROOT`, `PATH`, and
+`DOTNET_CLI_TELEMETRY_OPTOUT=1`, and creates `/usr/local/bin/dotnet` as a
+symlink to the driver so non-login shells (cron, systemd, `ssh user@host
+cmd`) also resolve `dotnet`. Telemetry is opted out by default — these
+VMs are unattended CI runners with no operator to consent.
+
 Version-string granularities — pick the level of pinning that suits you:
 
 | Example       | Meaning                                                    |
@@ -583,13 +590,14 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
 
     Registered providers (in dispatch order):
 
-    | Provider      | JSON field   | Notes                                                                |
-    |---------------|--------------|----------------------------------------------------------------------|
-    | `JdkProvider` | `javaDevKit` | Manifest-driven install/uninstall of one Temurin JDK per VM.         |
+    | Provider            | JSON field   | Notes                                                                                                                                                            |
+    |---------------------|--------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+    | `JdkProvider`       | `javaDevKit` | Manifest-driven install/uninstall of one Temurin JDK per VM.                                                                                                     |
+    | `DotnetSdkProvider` | `dotnetSdk`  | Manifest-driven install/uninstall of one .NET SDK per VM. Exports `DOTNET_ROOT` and sets `DOTNET_CLI_TELEMETRY_OPTOUT=1` via `/etc/profile.d/dotnet.sh`.         |
 
     See
     [docs/dev/implementation/42 - dotnet sdk/](docs/dev/implementation/42%20-%20dotnet%20sdk/)
-    for the full provider contract and the in-progress .NET SDK provider.
+    for the full provider contract.
 
 ---
 

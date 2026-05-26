@@ -3,7 +3,7 @@ BeforeAll {
     # be asserted in isolation. Behaviour for each acquirer itself lives
     # in its own Tests/up/<software>/ file.
     function Invoke-JdkAcquisition { param($Vm) }
-    function Invoke-DotnetSdkAcquisition { param($Vm) }
+    function Invoke-DotnetSdkAcquisition { param($Vm, $CacheDir) }
 
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\acquire\Invoke-VmAcquisitions.ps1"
 
@@ -48,6 +48,7 @@ BeforeAll {
     function New-VmWithDotnetScalar {
         [PSCustomObject]@{
             vmName    = 'node-01'
+            vhdPath   = 'C:\cache'
             dotnetSdk = [PSCustomObject]@{ channel = '10.0'; version = '10.0.100' }
         }
     }
@@ -55,6 +56,7 @@ BeforeAll {
     function New-VmWithDotnetList {
         [PSCustomObject]@{
             vmName    = 'node-01'
+            vhdPath   = 'C:\cache'
             dotnetSdk = @(
                 [PSCustomObject]@{ channel = '10.0'; version = '10.0.100' }
             )
@@ -129,18 +131,24 @@ Describe 'Invoke-VmAcquisitions' {
 
     Context 'dotnetSdk present' {
 
-        It 'dispatches Invoke-DotnetSdkAcquisition for the scalar shape' {
+        It 'dispatches Invoke-DotnetSdkAcquisition for the scalar shape with vhdPath as CacheDir' {
+            # Asserts the orchestrator forwards the per-VM cache root
+            # so the dotnet acquirer lands tarballs next to JDK ones.
             Mock Invoke-DotnetSdkAcquisition {}
             Invoke-VmAcquisitions -Vm (New-VmWithDotnetScalar)
             Should -Invoke Invoke-DotnetSdkAcquisition -Times 1 -Exactly `
-                -ParameterFilter { $Vm.vmName -eq 'node-01' }
+                -ParameterFilter {
+                    $Vm.vmName -eq 'node-01' -and $CacheDir -eq 'C:\cache'
+                }
         }
 
-        It 'dispatches Invoke-DotnetSdkAcquisition for the list shape' {
+        It 'dispatches Invoke-DotnetSdkAcquisition for the list shape with vhdPath as CacheDir' {
             Mock Invoke-DotnetSdkAcquisition {}
             Invoke-VmAcquisitions -Vm (New-VmWithDotnetList)
             Should -Invoke Invoke-DotnetSdkAcquisition -Times 1 -Exactly `
-                -ParameterFilter { $Vm.vmName -eq 'node-01' }
+                -ParameterFilter {
+                    $Vm.vmName -eq 'node-01' -and $CacheDir -eq 'C:\cache'
+                }
         }
 
         It 'skips Invoke-DotnetSdkAcquisition when dotnetSdk is null (ensure-none)' {
