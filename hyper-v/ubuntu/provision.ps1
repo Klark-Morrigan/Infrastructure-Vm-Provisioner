@@ -132,15 +132,21 @@ Write-Host ("Queued: $($newVms.Count) new VM(s), " +
 #   the outer try/finally emits the summary on success OR failure.
 # ---------------------------------------------------------------------------
 
+# Derive the reconcile/<provider> sub-step names from the registered
+# provider set so Get-Providers stays the single source of truth for
+# which providers exist. The synthetic placeholder is enough to build
+# the provider objects (their Names are literals in their factories);
+# the closure captures it but never dereferences at this stage.
+$placeholderVm = [PSCustomObject]@{ vmName = '<phase-init>' }
+$reconcileSubSteps = @(
+    @(Get-Providers -Vm $placeholderVm) | ForEach-Object { "reconcile/$($_.Name)" }
+)
+
 Initialize-PhaseTimings -Phases @(
     # Hashtable items pre-declare their sub-steps so the report shows
     # them as SKIPPED on runs where the work did not apply (e.g.
     # base-image cache hit suppresses the 'download base image' row,
     # ensure-none on dotnetSdk suppresses 'dotnet SDK' acquisition).
-    # The 'reconcile/<provider>' sub-steps under Post-provisioning are
-    # NOT pre-declared - they are added lazily by the reconciler's
-    # OnProviderComplete callback, named after each provider's Name,
-    # so the registered provider set stays a single source of truth.
     @{
         Name     = 'Disk image acquisition'
         SubSteps = @(
@@ -161,7 +167,9 @@ Initialize-PhaseTimings -Phases @(
     },
     @{
         Name     = 'Post-provisioning'
-        SubSteps = @('cloud-init wait', 'files', 'envVars')
+        SubSteps = (@('cloud-init wait', 'files') +
+                    $reconcileSubSteps +
+                    @('envVars'))
     }
 )
 
