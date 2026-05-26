@@ -50,6 +50,13 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\jdk\JdkProvider.Install-Version.ps1"
 . "$PSScriptRoot\up\jdk\JdkProvider.Uninstall-Version.ps1"
 . "$PSScriptRoot\up\jdk\Get-JdkProvider.ps1"
+. "$PSScriptRoot\up\dotnet\Resolve-DotnetSdkRelease.ps1"
+. "$PSScriptRoot\up\dotnet\Invoke-DotnetSdkAcquisition.ps1"
+. "$PSScriptRoot\up\dotnet\DotnetSdkProvider.Get-DesiredVersions.ps1"
+. "$PSScriptRoot\up\dotnet\DotnetSdkProvider.Get-InstalledVersions.ps1"
+. "$PSScriptRoot\up\dotnet\DotnetSdkProvider.Install-Version.ps1"
+. "$PSScriptRoot\up\dotnet\DotnetSdkProvider.Uninstall-Version.ps1"
+. "$PSScriptRoot\up\dotnet\Get-DotnetSdkProvider.ps1"
 . "$PSScriptRoot\up\acquire\Invoke-VmAcquisitions.ps1"
 . "$PSScriptRoot\up\reconciler\Provider-Contract.ps1"
 . "$PSScriptRoot\up\reconciler\Initialize-VmManifestStore.ps1"
@@ -68,6 +75,8 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\vm\create-vm.ps1"
 . "$PSScriptRoot\up\timing\Initialize-PhaseTimings.ps1"
 . "$PSScriptRoot\up\timing\Invoke-WithPhaseTimer.ps1"
+. "$PSScriptRoot\up\timing\Add-SubStepDuration.ps1"
+. "$PSScriptRoot\up\timing\Invoke-WithSubStepTimer.ps1"
 . "$PSScriptRoot\up\timing\Write-PhaseTimingReport.ps1"
 
 # ---------------------------------------------------------------------------
@@ -123,13 +132,45 @@ Write-Host ("Queued: $($newVms.Count) new VM(s), " +
 #   the outer try/finally emits the summary on success OR failure.
 # ---------------------------------------------------------------------------
 
+# Derive the reconcile/<provider> sub-step names from the registered
+# provider set so Get-Providers stays the single source of truth for
+# which providers exist. The synthetic placeholder is enough to build
+# the provider objects (their Names are literals in their factories);
+# the closure captures it but never dereferences at this stage.
+$placeholderVm = [PSCustomObject]@{ vmName = '<phase-init>' }
+$reconcileSubSteps = @(
+    @(Get-Providers -Vm $placeholderVm) | ForEach-Object { "reconcile/$($_.Name)" }
+)
+
 Initialize-PhaseTimings -Phases @(
-    'Disk image acquisition',
-    'Host-side acquisitions',
+    # Hashtable items pre-declare their sub-steps so the report shows
+    # them as SKIPPED on runs where the work did not apply (e.g.
+    # base-image cache hit suppresses the 'download base image' row,
+    # ensure-none on dotnetSdk suppresses 'dotnet SDK' acquisition).
+    @{
+        Name     = 'Disk image acquisition'
+        SubSteps = @(
+            'download base image',
+            'WSL2 base-image patch',
+            'per-VM disk copy+resize'
+        )
+    },
+    @{
+        Name     = 'Host-side acquisitions'
+        SubSteps = @('JDK', 'dotnet SDK')
+    },
     'Cloud-init seed ISO',
     'Virtual switch + NAT',
-    'VM creation',
-    'Post-provisioning'
+    @{
+        Name     = 'VM creation'
+        SubSteps = @('create + start', 'wait for SSH')
+    },
+    @{
+        Name     = 'Post-provisioning'
+        SubSteps = (@('cloud-init wait', 'files') +
+                    $reconcileSubSteps +
+                    @('envVars'))
+    }
 )
 
 try {

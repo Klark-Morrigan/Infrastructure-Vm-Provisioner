@@ -11,6 +11,7 @@
   - [Optional: install a JDK](#optional-install-a-jdk)
   - [Removing a JDK](#removing-a-jdk)
   - [JDK list shape (multiple entries)](#jdk-list-shape-multiple-entries)
+  - [Optional: install a .NET SDK](#optional-install-a-net-sdk)
   - [Optional: copy files to the VM](#optional-copy-files-to-the-vm)
     - [Bulk entries](#bulk-entries)
   - [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables)
@@ -124,6 +125,7 @@ All fields are required. After first boot, connect via `ssh username@ipAddress`.
 | `switchName`    | string | Hyper-V Internal switch name. Default: `VmLAN`     |
 | `natName`       | string | Windows NAT rule name. Default: `VmLAN-NAT`        |
 | `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. See [Optional: install a JDK](#optional-install-a-jdk). |
+| `dotnetSdk`     | object? | Optional. Installs a .NET SDK system-wide on first boot. See [Optional: install a .NET SDK](#optional-install-a-net-sdk). |
 | `files`         | array?  | Optional. Copies arbitrary host files onto the VM. See [Optional: copy files to the VM](#optional-copy-files-to-the-vm). |
 | `envVars`       | object? | Optional. Writes a managed block of system-wide environment variables into `/etc/environment`. See [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables). |
 
@@ -283,6 +285,56 @@ v1 supports one JDK per VM, so the list is capped at one entry. A
 longer list fails schema with the observed count. Use the list shape
 only when the multi-version surface lands; the scalar form remains the
 recommended way to declare a single JDK.
+
+### Optional: install a .NET SDK
+
+Add a `dotnetSdk` object to any VM entry to install a .NET SDK system-wide
+on first boot. When absent, no .NET SDK is installed and the rest of
+provisioning is unaffected. The provider is registered alongside
+`javaDevKit` and shares the same reconciler lifecycle (install on first
+provision, no-op on re-runs, removal via `null` / `[]`).
+
+```jsonc
+{
+  "vmName": "dev-01",
+  "...":    "...",
+  "dotnetSdk": {
+    "channel": "10.0",
+    "version": "10.0.100"
+  }
+}
+```
+
+| Sub-field   | Type   | Required | Default | Allowed values                                          |
+|-------------|--------|----------|---------|---------------------------------------------------------|
+| `channel`   | string | yes      | —       | `<major>.<minor>` (e.g. `"10.0"`). Selects the release-metadata channel. |
+| `version`   | string | yes      | —       | A **string** in one of three granularities (see below). |
+
+`dotnetSdk` is also accepted as `null` or `[]` to **uninstall** any .NET
+SDK the reconciler previously installed (same `null` / `[]` semantics as
+`javaDevKit`) and as a single-element list `[{ channel, version }]` for
+forward compatibility with the multi-version shape. v1 supports one
+SDK per VM, so a longer list fails schema with the observed count.
+
+The install extracts the tarball into `/opt/dotnet-{resolvedVersion}/`,
+writes `/etc/profile.d/dotnet.sh` exporting `DOTNET_ROOT`, `PATH`, and
+`DOTNET_CLI_TELEMETRY_OPTOUT=1`, and creates `/usr/local/bin/dotnet` as a
+symlink to the driver so non-login shells (cron, systemd, `ssh user@host
+cmd`) also resolve `dotnet`. Telemetry is opted out by default — these
+VMs are unattended CI runners with no operator to consent.
+
+Version-string granularities — pick the level of pinning that suits you:
+
+| Example       | Meaning                                                    |
+|---------------|------------------------------------------------------------|
+| `"10"`        | Latest SDK on the channel (major-only)                     |
+| `"10.0"`      | Latest SDK on the channel (major.minor)                    |
+| `"10.0.100"`  | Exact SDK feature-band build                               |
+
+Both `channel` and `version` must be JSON strings. Numeric values like
+`10.0` are rejected so `"10.0"` cannot silently degrade to `10` through
+trailing-zero loss — the same rule the `javaDevKit.version` field
+enforces.
 
 ### Optional: copy files to the VM
 
@@ -447,12 +499,18 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
 4. **(new VMs only)** Copies the base image to a per-VM disk
    (`{vmName}.vhdx`) and resizes it to `diskGB`.
 5. **(new AND existing VMs)** Runs host-side acquisitions for each VM
-   via a small per-VM orchestrator (`Invoke-VmAcquisitions`). Today it
-   dispatches one acquirer:
+   via a small per-VM orchestrator (`Invoke-VmAcquisitions`). It
+   dispatches one acquirer per opt-in field:
    - **`javaDevKit`** acquires the requested Temurin tarball into
      `vhdPath` (see [Optional: install a JDK](#optional-install-a-jdk)).
      Skipped when `javaDevKit` is `null` or `[]` — the reconciler's
      "ensure none installed" signal needs no tarball.
+   - **`dotnetSdk`** acquires the requested .NET SDK tarball into the
+     same `vhdPath` cache as JDK tarballs, using the same
+     `{software}-{requestedVersion}-linux-x64.tar.gz` + sidecar
+     `.lock.json` naming convention (see
+     [Optional: install a .NET SDK](#optional-install-a-net-sdk)).
+     Skipped when `dotnetSdk` is `null` or `[]` for the same reason.
 
    Skipped silently for VMs that have no opt-in fields. Each acquirer is
    idempotent via its on-host lockfile, so a re-run against an already-
@@ -532,13 +590,30 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
 
     Registered providers (in dispatch order):
 
-    | Provider      | JSON field   | Notes                                                                |
-    |---------------|--------------|----------------------------------------------------------------------|
-    | `JdkProvider` | `javaDevKit` | Manifest-driven install/uninstall of one Temurin JDK per VM.         |
+    | Provider            | JSON field   | Notes                                                                                                                                                            |
+    |---------------------|--------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+    | `JdkProvider`       | `javaDevKit` | Manifest-driven install/uninstall of one Temurin JDK per VM.                                                                                                     |
+    | `DotnetSdkProvider` | `dotnetSdk`  | Manifest-driven install/uninstall of one .NET SDK per VM. Exports `DOTNET_ROOT` and sets `DOTNET_CLI_TELEMETRY_OPTOUT=1` via `/etc/profile.d/dotnet.sh`.         |
 
     See
     [docs/dev/implementation/42 - dotnet sdk/](docs/dev/implementation/42%20-%20dotnet%20sdk/)
-    for the full provider contract and the in-progress .NET SDK provider.
+    for the full provider contract.
+
+    **Nested providers.** A provider may declare a `ParentProvider`
+    field naming a top-level provider's `Name`. Such providers are
+    NOT dispatched by the orchestrator's main loop; they are invoked
+    only by the children walker built into
+    `Invoke-ToolchainReconciliation`. Before a parent provider's
+    `Uninstall-Version` runs, the walker reads the parent manifest's
+    `children` array (each entry is `{ provider, manifestPath }`)
+    and dispatches the matching nested provider's `Uninstall-Version`
+    first, so a child install that lives under the parent's install
+    dir is torn down before its host directory disappears. A child
+    entry that names an unregistered provider produces a warning and
+    leaves the child in place rather than blocking the parent's
+    removal forever. v1 ships the walker but registers zero nested
+    providers; the first real consumer (global `dotnet` nuget tools
+    under `DotnetSdkProvider`) lands in [feature 43](docs/dev/implementation/43%20-%20dotnet%20nuget/).
 
 ---
 

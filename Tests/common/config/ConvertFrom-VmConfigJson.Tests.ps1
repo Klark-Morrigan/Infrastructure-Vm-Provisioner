@@ -208,6 +208,27 @@ Describe 'ConvertFrom-VmConfigJson' {
     }
 
     # ------------------------------------------------------------------
+    Context 'Assert-DotnetSdkField wiring' {
+    # ------------------------------------------------------------------
+
+        It 'invokes Assert-DotnetSdkField once per VM' {
+            # Wiring-only check. Behaviour cases for the validator itself
+            # live in Assert-DotnetSdkField.Tests.ps1 - duplicating them
+            # here would couple the caller's tests to its callee's rules.
+            Mock Assert-DotnetSdkField {}
+            $json = "[$(New-ValidVmJson 'node-01'), $(New-ValidVmJson 'node-02')]"
+            @(ConvertFrom-VmConfigJson -Json $json)
+            Should -Invoke Assert-DotnetSdkField -Times 2 -Exactly
+        }
+
+        It 'propagates a throw from Assert-DotnetSdkField' {
+            Mock Assert-DotnetSdkField { throw "dotnetSdk.version must be a string" }
+            { ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]" } |
+                Should -Throw -ExpectedMessage "*dotnetSdk*"
+        }
+    }
+
+    # ------------------------------------------------------------------
     Context 'Assert-VmFilesField wiring (Infrastructure.HyperV)' {
     # ------------------------------------------------------------------
 

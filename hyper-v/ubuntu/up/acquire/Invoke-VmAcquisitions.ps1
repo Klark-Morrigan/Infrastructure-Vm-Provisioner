@@ -28,6 +28,13 @@ function Invoke-VmAcquisitions {
         [object] $Vm
     )
 
+    # Per-software sub-step timing. Acquisitions are network-dominated
+    # (Adoptium and Microsoft CDN), so splitting the two buckets makes
+    # an upstream regression attributable to its actual source instead
+    # of being averaged across both. Sub-steps are pre-declared so
+    # they appear as SKIPPED in the report when the corresponding
+    # opt-in is absent.
+
     # Skip JDK acquisition when the operator's intent is "ensure none
     # installed" (javaDevKit absent / null / []) - no tarball is needed
     # for the reconciler's uninstall path, and we avoid an unnecessary
@@ -36,6 +43,27 @@ function Invoke-VmAcquisitions {
     if ($Vm.PSObject.Properties['javaDevKit'] -and
         $null -ne $Vm.javaDevKit -and
         @($Vm.javaDevKit).Count -gt 0) {
-        Invoke-JdkAcquisition -Vm $Vm
+        Invoke-WithSubStepTimer `
+            -Parent 'Host-side acquisitions' `
+            -Name   'JDK' `
+            -Action { Invoke-JdkAcquisition -Vm $Vm }
+    }
+
+    # Same ensure-none guard as JDK: skip the Microsoft release-metadata
+    # call and the SDK tarball download when dotnetSdk is absent / null
+    # / []. The reconciler's uninstall path reads the on-VM manifest, not
+    # the host cache, so there is nothing to prefetch in that case.
+    if ($Vm.PSObject.Properties['dotnetSdk'] -and
+        $null -ne $Vm.dotnetSdk -and
+        @($Vm.dotnetSdk).Count -gt 0) {
+        # CacheDir is taken from $Vm.vhdPath so dotnet tarballs share the
+        # same on-host cache as JDK tarballs (see the prefetch table in
+        # README.md's provision.ps1 section). Invoke-DotnetSdkAcquisition
+        # declares -CacheDir as Mandatory rather than defaulting it
+        # internally so unit tests can target a scratch directory.
+        Invoke-WithSubStepTimer `
+            -Parent 'Host-side acquisitions' `
+            -Name   'dotnet SDK' `
+            -Action { Invoke-DotnetSdkAcquisition -Vm $Vm -CacheDir $Vm.vhdPath }
     }
 }

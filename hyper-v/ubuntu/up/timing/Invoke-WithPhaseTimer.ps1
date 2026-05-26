@@ -30,7 +30,15 @@ function Invoke-WithPhaseTimer {
         throw ("Invoke-WithPhaseTimer: Initialize-PhaseTimings has not " +
             "been called.")
     }
-    $record = $script:PhaseTimings | Where-Object { $_.Name -eq $Name }
+    # Filter to top-level entries (Parent -eq $null) so a sub-step that
+    # happens to share its name with a top-level phase does not shadow
+    # this lookup. Sub-step timing goes through Invoke-WithSubStepTimer
+    # / Add-SubStepDuration, not this helper.
+    # Local name (not $matches, which is a PowerShell automatic).
+    $candidates = @($script:PhaseTimings | Where-Object {
+        $_.Name -eq $Name -and $null -eq $_.Parent
+    })
+    $record = if ($candidates.Count -gt 0) { $candidates[0] } else { $null }
     if ($null -eq $record) {
         throw ("Invoke-WithPhaseTimer: phase '$Name' was not declared " +
             "via Initialize-PhaseTimings.")

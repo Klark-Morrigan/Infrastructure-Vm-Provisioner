@@ -77,6 +77,13 @@ function Invoke-VmPostProvisioning {
     $initManifestStore       = ${function:Initialize-VmManifestStore}
     $getProviders            = ${function:Get-Providers}
     $invokeReconciliation    = ${function:Invoke-ToolchainReconciliation}
+    # Sub-step timing helpers. Same closure-capture reason as above:
+    # the post-block runs inside Invoke-WithVmFileServer's module
+    # scope, where bare-name resolution does not walk back into
+    # provision.ps1's scope. The post-provisioning phase accumulates
+    # each sub-step's wall-clock across every VM in the per-VM loop.
+    $invokeWithSubStepTimer  = ${function:Invoke-WithSubStepTimer}
+    $addSubStepDuration      = ${function:Add-SubStepDuration}
 
     $postBlock = {
         param($server)
@@ -92,18 +99,30 @@ function Invoke-VmPostProvisioning {
             # the dpkg lock, runcmd not yet started). Wait once, here, so no
             # downstream step has to know about it. timeout(1) caps the wait
             # server-side because SSH.NET has no client-side command timeout.
+            #
+            # Sub-step timer wraps just the wait so the report attributes
+            # cloud-init's late-module duration to its own row rather
+            # than blending it with the file/reconcile/env work.
             Write-Host "  Waiting for cloud-init to finish ..."
-            $waitResult = Invoke-SshClientCommand -SshClient $sshClient `
-                -Command 'timeout 600 cloud-init status --wait'
-            if ($waitResult.ExitStatus -ne 0) {
-                # Non-zero here is most often unrelated to our steps
-                # (cloud-init may have logged a warning in some module).
-                # Proceed and let downstream assertions surface a real
-                # problem rather than abort here on a false positive.
-                Write-Warning ("cloud-init reported a non-zero status " +
-                    "($($waitResult.ExitStatus)) on $vmName. Proceeding " +
-                    "with post-provisioning steps.")
-            }
+            & $invokeWithSubStepTimer `
+                -Parent 'Post-provisioning' `
+                -Name   'cloud-init wait' `
+                -Action {
+                    $waitResult = Invoke-SshClientCommand -SshClient $sshClient `
+                        -Command 'timeout 600 cloud-init status --wait'
+                    if ($waitResult.ExitStatus -ne 0) {
+                        # Non-zero here is most often unrelated to our steps
+                        # (cloud-init may have logged a warning in some
+                        # module). Proceed and let downstream assertions
+                        # surface a real problem rather than abort here on
+                        # a false positive. Logged, not thrown, so the
+                        # sub-step's status stays OK - the wait completed,
+                        # cloud-init merely flagged an internal concern.
+                        Write-Warning ("cloud-init reported a non-zero status " +
+                            "($($waitResult.ExitStatus)) on $vmName. Proceeding " +
+                            "with post-provisioning steps.")
+                    }
+                }
 
             # Manifest store init runs unconditionally near the top of
             # the per-VM loop: it costs one cheap mkdir + chown + chmod
@@ -128,52 +147,94 @@ function Invoke-VmPostProvisioning {
                 # the specific files entry that triggered them, so the
                 # operator knows which entry to fix.
                 Write-Host "  [files] processing $(@($vmRef.files).Count) entry(s) ..."
-                foreach ($entry in @($vmRef.files)) {
-                    # Discriminator: presence of 'pattern' => bulk form,
-                    # otherwise the existing single-file form. Step 2's
-                    # schema guarantees the entry is well-formed for
-                    # whichever branch matches.
-                    if ($entry.PSObject.Properties['pattern']) {
-                        $pattern   = $entry.pattern
-                        $targetDir = $entry.targetDir
-                        # Optional booleans default to $false when absent so
-                        # the JSON round-trip in the schema stays a pure
-                        # pass-through (default applied here, not in the
-                        # validator).
-                        $recurseProp = $entry.PSObject.Properties['recurse']
-                        $recurse = if ($null -ne $recurseProp) {
-                            [bool]$recurseProp.Value
-                        } else { $false }
-                        $preserveProp = $entry.PSObject.Properties['preserveRelativePath']
-                        $preserveRelativePath = if ($null -ne $preserveProp) {
-                            [bool]$preserveProp.Value
-                        } else { $false }
-                        Write-Host "  [files] bulk: $pattern -> $targetDir"
-                        & $copyVmFilesByPattern -SshClient $sshClient `
-                                                -Server $server `
-                                                -Pattern $pattern `
-                                                -TargetDir $targetDir `
-                                                -Recurse:$recurse `
-                                                -PreserveRelativePath:$preserveRelativePath
-                    } else {
-                        $singleEntries = @(
-                            [PSCustomObject]@{ Source = $entry.source; Target = $entry.target }
-                        )
-                        Write-Host "  [files] single: $($entry.source) -> $($entry.target)"
-                        & $copyVmFiles -SshClient $sshClient -Server $server -Entries $singleEntries
+                & $invokeWithSubStepTimer `
+                    -Parent 'Post-provisioning' `
+                    -Name   'files' `
+                    -Action {
+                        foreach ($entry in @($vmRef.files)) {
+                            # Discriminator: presence of 'pattern' => bulk form,
+                            # otherwise the existing single-file form. Step 2's
+                            # schema guarantees the entry is well-formed for
+                            # whichever branch matches.
+                            if ($entry.PSObject.Properties['pattern']) {
+                                $pattern   = $entry.pattern
+                                $targetDir = $entry.targetDir
+                                # Optional booleans default to $false when absent so
+                                # the JSON round-trip in the schema stays a pure
+                                # pass-through (default applied here, not in the
+                                # validator).
+                                $recurseProp = $entry.PSObject.Properties['recurse']
+                                $recurse = if ($null -ne $recurseProp) {
+                                    [bool]$recurseProp.Value
+                                } else { $false }
+                                $preserveProp = $entry.PSObject.Properties['preserveRelativePath']
+                                $preserveRelativePath = if ($null -ne $preserveProp) {
+                                    [bool]$preserveProp.Value
+                                } else { $false }
+                                Write-Host "  [files] bulk: $pattern -> $targetDir"
+                                & $copyVmFilesByPattern -SshClient $sshClient `
+                                                        -Server $server `
+                                                        -Pattern $pattern `
+                                                        -TargetDir $targetDir `
+                                                        -Recurse:$recurse `
+                                                        -PreserveRelativePath:$preserveRelativePath
+                            } else {
+                                $singleEntries = @(
+                                    [PSCustomObject]@{ Source = $entry.source; Target = $entry.target }
+                                )
+                                Write-Host "  [files] single: $($entry.source) -> $($entry.target)"
+                                & $copyVmFiles -SshClient $sshClient -Server $server -Entries $singleEntries
+                            }
+                        }
+                        Write-Host "  [files] [OK] all copies complete." -ForegroundColor Green
                     }
-                }
-                Write-Host "  [files] [OK] all copies complete." -ForegroundColor Green
             }
             # Reconciler dispatch. Get-Providers is parameterised by the
             # VM so each provider can capture VM-scoped state (e.g. the
             # JDK provider closes over _jdkTarballPath / _jdkResolvedVersion
             # populated by Invoke-JdkAcquisition).
+            #
+            # OnProviderComplete attributes each provider's wall-clock
+            # to its own sub-step bucket (reconcile/<providerName>) so
+            # the timing report shows where reconciler time went.
+            # Failed providers still contribute their partial duration;
+            # the -Failed switch makes the sub-step's status sticky
+            # Failed even if a later VM's iteration succeeds.
+            #
+            # Re-bind $addSubStepDuration into a fresh local before the
+            # inner GetNewClosure(). PowerShell's GetNewClosure only
+            # snapshots the IMMEDIATE local scope's variable table -
+            # lexically visible captures from a parent closure (here
+            # the outer post-block, which captured $addSubStepDuration
+            # from Invoke-VmPostProvisioning's scope) do NOT propagate
+            # into the new closure. Without this rebind, the inner
+            # closure's $addSubStepDuration is $null at invocation time
+            # and the callback fails with "expression after '&' produced
+            # an object that was not valid", silently leaving the
+            # reconcile/<provider> sub-step rows un-updated.
+            $addSubStepDurationLocal = $addSubStepDuration
+            $onProviderComplete = {
+                param($providerName, $elapsedMs, $hadError)
+                if ($hadError) {
+                    & $addSubStepDurationLocal `
+                        -Parent    'Post-provisioning' `
+                        -Name      "reconcile/$providerName" `
+                        -ElapsedMs $elapsedMs `
+                        -Failed
+                } else {
+                    & $addSubStepDurationLocal `
+                        -Parent    'Post-provisioning' `
+                        -Name      "reconcile/$providerName" `
+                        -ElapsedMs $elapsedMs
+                }
+            }.GetNewClosure()
+
             & $invokeReconciliation `
-                -SshClient $sshClient `
-                -Server    $server `
-                -Vm        $vmRef `
-                -Providers @(& $getProviders -Vm $vmRef)
+                -SshClient          $sshClient `
+                -Server             $server `
+                -Vm                 $vmRef `
+                -Providers          @(& $getProviders -Vm $vmRef) `
+                -OnProviderComplete $onProviderComplete
 
             if ($hasEnvVars) {
                 # Stylistically last: env-var values may legitimately
@@ -182,7 +243,12 @@ function Invoke-VmPostProvisioning {
                 # keeps log-reading less surprising. The transport itself
                 # does not read the target paths it writes, so this
                 # ordering is convention, not correctness.
-                & $setEnvironmentVariables -SshClient $sshClient -Vm $vmRef
+                & $invokeWithSubStepTimer `
+                    -Parent 'Post-provisioning' `
+                    -Name   'envVars' `
+                    -Action {
+                        & $setEnvironmentVariables -SshClient $sshClient -Vm $vmRef
+                    }
             }
         }
         finally {

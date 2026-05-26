@@ -27,6 +27,14 @@ BeforeAll {
     function wsl { $global:LASTEXITCODE = 0 }
     function tar { $global:LASTEXITCODE = 0 }
 
+    # Stub the sub-step timer so disk acquisition tests stay focused on
+    # filesystem / Hyper-V interactions, not on the timing scaffolding.
+    # The stub invokes the action directly so mocks inside still record.
+    function Invoke-WithSubStepTimer {
+        param($Parent, $Name, [scriptblock] $Action)
+        & $Action
+    }
+
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\disk\Invoke-DiskImageAcquisition.ps1"
 
     # Invoke-BaseImagePatch is defined in Invoke-BaseImagePatch.ps1 and is tested

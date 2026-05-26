@@ -21,6 +21,16 @@
     per-VM state, so deferring construction to call time keeps load
     order independent of registration order and lets each call snapshot
     a different VM.
+
+    Nested providers (feature 42 Phase D) live in the same returned
+    array but carry a non-empty ParentProvider member naming their
+    parent. The reconciler partitions on that field: top-level
+    providers run in the main loop in array order, nested providers
+    are dispatched only by the children walker when a parent manifest's
+    `children` array refers to them by Name. v1 of feature 42 ships
+    the walker but registers zero nested providers; the first real
+    consumer (a global nuget tools provider under DotnetSdkProvider)
+    lands in feature 43.
 #>
 function Get-Providers {
     [CmdletBinding()]
@@ -32,9 +42,12 @@ function Get-Providers {
 
     # Bare array literal - PowerShell's output stream unrolls it on the
     # way back so the caller's `@(Get-Providers ...)` wrapper sees a
-    # flat array of providers. Later steps (e.g. DotnetSdkProvider at
-    # step 19) just append more entries here.
+    # flat array of providers. Order is the reconciler's dispatch order
+    # (JSON-declaration order between providers); JDK lands first
+    # because it was the first reconciler-owned toolchain and dotnet
+    # SDK appended below.
     return @(
-        Get-JdkProvider -Vm $Vm
+        Get-JdkProvider       -Vm $Vm
+        Get-DotnetSdkProvider -Vm $Vm
     )
 }

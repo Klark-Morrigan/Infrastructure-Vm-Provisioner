@@ -34,4 +34,46 @@ Describe 'Initialize-PhaseTimings' {
         $state.Count   | Should -Be 1
         $state[0].Name | Should -Be 'X'
     }
+
+    It 'accepts hashtable entries with SubSteps and links each by Parent' {
+        # The hashtable form is how provision.ps1 pre-declares known
+        # sub-steps so the report can show them as SKIPPED on runs
+        # where the work did not apply.
+        Initialize-PhaseTimings -Phases @(
+            'A',
+            @{ Name = 'B'; SubSteps = @('b1', 'b2') },
+            'C'
+        )
+
+        $state = Get-Variable -Scope Script -Name PhaseTimings -ValueOnly
+        $state.Count | Should -Be 5
+
+        # Order field tracks declaration sequence across top-level
+        # AND sub-step rows so the renderer can sort once and emit
+        # the report in operator-written order.
+        $byName = @{}
+        foreach ($r in $state) { $byName[$r.Name] = $r }
+
+        $byName['A'].Parent | Should -BeNullOrEmpty
+        $byName['B'].Parent | Should -BeNullOrEmpty
+        $byName['C'].Parent | Should -BeNullOrEmpty
+
+        $byName['b1'].Parent | Should -Be 'B'
+        $byName['b2'].Parent | Should -Be 'B'
+
+        $byName['A'].Order  | Should -BeLessThan $byName['B'].Order
+        $byName['B'].Order  | Should -BeLessThan $byName['b1'].Order
+        $byName['b1'].Order | Should -BeLessThan $byName['b2'].Order
+        $byName['b2'].Order | Should -BeLessThan $byName['C'].Order
+
+        # Every record starts NotStarted regardless of nesting depth.
+        ($state | ForEach-Object Status) -join ',' |
+            Should -Be 'NotStarted,NotStarted,NotStarted,NotStarted,NotStarted'
+    }
+
+    It 'rejects an empty sub-step name with a message naming the parent' {
+        { Initialize-PhaseTimings -Phases @(
+            @{ Name = 'B'; SubSteps = @('') }
+        ) } | Should -Throw "*'B'*empty sub-step*"
+    }
 }

@@ -51,6 +51,20 @@
 #         $installed.ManifestPath as the truth source for owned paths,
 #         symlinks, and profile.d scripts. Throws on failure.
 #
+#   Optional members:
+#
+#     ParentProvider        [string]
+#         When set, marks this provider as a NESTED provider whose
+#         lifecycle is gated by another (parent) provider's. The
+#         orchestrator does NOT dispatch nested providers in its
+#         top-level loop; they are invoked only through the children
+#         walker (see Invoke-ToolchainReconciliation), which fires their
+#         Uninstall-Version when a parent manifest's `children` array
+#         points at them. Value must equal a registered top-level
+#         provider's Name. First real consumer is feature 43
+#         (dotnet nuget global tools); v1 of this feature ships the
+#         walker but registers zero nested providers.
+#
 #   Assert-ToolchainProvider is a small "shape check" the orchestrator
 #   runs on every provider before dispatching to it, so a malformed
 #   provider object fails loud with a member-by-member message rather

@@ -13,6 +13,14 @@ BeforeAll {
     function Remove-Item              { param($Path, [switch]$Force) }
     function Test-Path                { param($Path) }
 
+    # Stub the sub-step timer so creation tests stay focused on the
+    # Hyper-V cmdlets. The stub invokes the action directly so mocks
+    # inside still record their calls.
+    function Invoke-WithSubStepTimer {
+        param($Parent, $Name, [scriptblock] $Action)
+        & $Action
+    }
+
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\vm\create-vm.ps1"
 
     # Standard VM object satisfying all Invoke-VmCreation requirements.

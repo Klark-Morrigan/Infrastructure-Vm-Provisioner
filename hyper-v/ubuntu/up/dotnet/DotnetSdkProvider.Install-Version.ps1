@@ -1,0 +1,123 @@
+<#
+.NOTES
+    Do not run this file directly. It is intended to be dot-sourced by
+    Get-DotnetSdkProvider, which composes the four provider operations
+    into a single IToolchainProvider object.
+#>
+
+# ---------------------------------------------------------------------------
+# Install-DotnetSdkVersion
+#   Composition step driven by the reconciler: extract the prefetched
+#   tarball, write /etc/profile.d/dotnet.sh, create the /usr/local/bin
+#   symlink for the dotnet driver, and finally write the manifest that
+#   records ownership of all four artefact kinds.
+#
+#   Side-effect ordering is load-bearing for crash recovery: the manifest
+#   is written LAST. If the install crashes after the extract but before
+#   the manifest write, the next reconciler run sees no manifest, treats
+#   the install dir as orphaned, and re-runs Install-DotnetSdkVersion
+#   which Expand-VmTarball's atomic dir-swap re-extracts cleanly. A
+#   manifest written first would instead claim ownership of paths that
+#   may not exist yet, and the uninstall path would happily try to drain
+#   processes from a directory the install never finished creating.
+#
+#   TarballPath and resolved Version travel on the Spec itself (unlike
+#   JDK, where TarballPath has to be closure-captured from $Vm). The
+#   dotnet desired-versions step stamps both onto the Spec from
+#   $Vm._dotnetSdk* so this function takes no extra parameters beyond
+#   the contract triple ($SshClient, $Server, $Spec).
+#
+#   Differences from JdkProvider.Install-Version:
+#     - StripComponents = 0: Microsoft's SDK tarball lays its files at
+#       the archive root (no wrapper directory), unlike Adoptium's JDK
+#       tarballs which wrap everything under jdk-<version>/.
+#     - Single /usr/local/bin symlink for `dotnet`: every other SDK tool
+#       (`dotnet build`, `dotnet test`, ...) is dispatched by the driver,
+#       so there is no per-binary enumeration to do.
+#     - profile.d exports DOTNET_ROOT (the SDK uses it to find shared
+#       frameworks when launched outside its install dir) and opts the
+#       VM out of CLI telemetry by default. Unattended CI runners have
+#       no operator to consent to telemetry, and the opt-out is per-shell
+#       so it has to be in the profile.d script rather than a one-shot
+#       env edit during provisioning.
+# ---------------------------------------------------------------------------
+
+function Install-DotnetSdkVersion {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object] $SshClient,
+
+        [Parameter(Mandatory)]
+        [object] $Server,
+
+        [Parameter(Mandatory)]
+        [object] $Spec
+    )
+
+    $resolvedVersion = $Spec.Version
+    $tarballPath     = $Spec.TarballPath
+    $installDir      = "/opt/dotnet-$resolvedVersion"
+
+    Write-Host "  [dotnet] SDK $resolvedVersion -> $installDir"
+
+    # Step 1 - extract. StripComponents=0 because the .NET SDK tarball
+    # lays its files at the archive root (no wrapper dir to discard).
+    Expand-VmTarball `
+        -SshClient       $SshClient `
+        -Server          $Server `
+        -TarballPath     $tarballPath `
+        -Destination     $installDir `
+        -StripComponents 0
+
+    # Step 2 - login-shell PATH + DOTNET_ROOT + telemetry opt-out via
+    # /etc/profile.d. Single-quoted right-hand sides so the values stay
+    # literal in the written .sh and the user's shell expands them at
+    # login, not host-side at construction time.
+    $dotnetSh = @(
+        "export DOTNET_ROOT=$installDir"
+        'export PATH="$DOTNET_ROOT:$PATH"'
+        'export DOTNET_CLI_TELEMETRY_OPTOUT=1'
+        ''
+    ) -join "`n"
+
+    Set-VmProfileDScript `
+        -SshClient $SshClient `
+        -Name      'dotnet' `
+        -Content   $dotnetSh
+
+    # Step 3 - non-login-shell PATH via /usr/local/bin (sshd command
+    # exec, systemd services, cron jobs - none of these read
+    # /etc/profile.d/). One link is enough: every SDK tool runs through
+    # the `dotnet` driver via `dotnet <verb>`.
+    $linkPath   = '/usr/local/bin/dotnet'
+    $linkTarget = "$installDir/dotnet"
+
+    New-VmSymlink `
+        -SshClient $SshClient `
+        -Path      $linkPath `
+        -Target    $linkTarget
+
+    # Step 4 - manifest, written LAST. See the function header for why
+    # the ordering matters. ownedPaths[0] is the install dir; the
+    # Get-DotnetSdkInstalledVersions reader assumes this invariant when
+    # projecting the manifest into an Installed record.
+    $manifest = [PSCustomObject]@{
+        schemaVersion       = 1
+        provider            = 'dotnetSdk'
+        version             = $resolvedVersion
+        ownedPaths          = @($installDir)
+        ownedSymlinks       = @(
+            [PSCustomObject]@{
+                path   = $linkPath
+                target = $linkTarget
+            }
+        )
+        ownedProfileScripts = @('dotnet')
+        children            = @()
+    }
+
+    Write-VmManifest -SshClient $SshClient -Manifest $manifest
+
+    Write-Host "  [dotnet] [OK] installed under $installDir." -ForegroundColor Green
+}

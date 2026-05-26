@@ -12,6 +12,10 @@
 #   the outer try/finally in provision.ps1 so the report appears on
 #   both success and failure paths.
 #
+#   Sub-steps render indented two spaces under their parent. The total
+#   line sums TOP-LEVEL phases only so sub-step accumulation does not
+#   double-count against the parent's own elapsed time.
+#
 #   Single color (DarkGreen) so the block reads as one summary unit
 #   rather than competing with the per-phase [OK] / [FAIL] text markers.
 # ---------------------------------------------------------------------------
@@ -34,11 +38,14 @@ function Write-PhaseTimingReport {
         'Failed'     = '[FAILED] '
     }
 
-    # Pad the name column to the longest declared phase name so the tag
-    # column lines up.
-    $nameWidth = ($script:PhaseTimings |
-        ForEach-Object { $_.Name.Length } |
-        Measure-Object -Maximum).Maximum
+    # Column widths: account for the sub-step indent so the tag column
+    # still lines up across mixed top-level and sub-step rows.
+    $subStepIndent = '  '
+    $effectiveWidths = $script:PhaseTimings | ForEach-Object {
+        if ($null -eq $_.Parent) { $_.Name.Length }
+        else                     { $_.Name.Length + $subStepIndent.Length }
+    }
+    $nameWidth = ($effectiveWidths | Measure-Object -Maximum).Maximum
 
     $color   = 'DarkGreen'
     $banner  = '=== Provisioning timing report ==='
@@ -47,6 +54,9 @@ function Write-PhaseTimingReport {
     Write-Host ''
     Write-Host $banner -ForegroundColor $color
 
+    # Total observed wall-clock counts top-level rows only. Sub-step
+    # durations are time *inside* a parent phase; adding them to the
+    # parent's own elapsed would double-count.
     $totalMs = 0
     foreach ($record in ($script:PhaseTimings | Sort-Object Order)) {
         $tag = $statusTags[$record.Status]
@@ -60,10 +70,19 @@ function Write-PhaseTimingReport {
                 [cultureinfo]::InvariantCulture,
                 '{0,8:F2} s',
                 ($record.ElapsedMs / 1000.0)))
-            $totalMs += $record.ElapsedMs
+            if ($null -eq $record.Parent) {
+                $totalMs += $record.ElapsedMs
+            }
         }
+
+        $displayName = if ($null -eq $record.Parent) {
+            $record.Name
+        } else {
+            $subStepIndent + $record.Name
+        }
+
         $line = '  {0}  {1}  {2}' -f
-            $record.Name.PadRight($nameWidth), $tag, $duration
+            $displayName.PadRight($nameWidth), $tag, $duration
         Write-Host $line -ForegroundColor $color
     }
 
