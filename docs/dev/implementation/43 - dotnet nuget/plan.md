@@ -16,7 +16,6 @@ committable steps that each carry their own tests.
   - [Step 5 - `DotnetToolsProvider.*` operations (guest-side install / uninstall)](#step-5---dotnettoolsproviderx-operations-guest-side-install--uninstall)
   - [Step 6 - Provider composition, nested registration, and dispatcher wiring](#step-6---provider-composition-nested-registration-and-dispatcher-wiring)
   - [Step 7 - E2E: happy-path nested-provider scenario for `reportgenerator`](#step-7---e2e-happy-path-nested-provider-scenario-for-reportgenerator)
-  - [Step 8 - README pass and cross-doc updates](#step-8---readme-pass-and-cross-doc-updates)
 
 ## Shape of the change
 
@@ -235,8 +234,9 @@ install), nuget.org repo-countersignature verification, system-wide
 exact-version pins only.
 
 Each step is independently committable. Steps 3-6 form the install
-spine; Step 7 is the live coverage that proves the spine; Step 8
-is the docs sweep.
+spine; Step 7 is the live coverage that proves the spine. README
+updates land alongside each step's code change, so there is no
+separate documentation step at the end.
 
 ---
 
@@ -659,43 +659,7 @@ sequenceDiagram
 
 **README** One-line pointer in the Reconciler subsection that the
 happy-path nested-provider lifecycle is covered by
-`Invoke-DotnetToolsAssertions`.
-
----
-
-## Step 8 - README pass and cross-doc updates
-
-**Reason.** Each preceding step kept its own README edits scoped
-narrowly. This step is the consolidation pass: re-read top-level
-`README.md`, verify the structured index is complete and links
-resolve, and update sibling feature docs that referenced this
-feature as TBD.
-
-**Files**
-
-- `README.md` - sweep:
-  - Confirm the `dotnetTools` field is listed alongside `dotnetSdk`
-    in the VM-definition section with the example block from
-    problem.md.
-  - Confirm the Providers subsection shows `dotnetTools` with its
-    `ParentProvider = dotnetSdk` annotation.
-  - Confirm the host-side cache layout subsection lists the
-    `dotnet-tool-*.nupkg` / `*.lock.json` artefacts.
-  - Confirm the guest layout subsection covers
-    `/usr/local/share/dotnet/tools/` and the `/usr/local/bin/`
-    symlink convention.
-  - Re-verify the structured index links resolve.
-- `docs/dev/implementation/42 - dotnet sdk/plan.md` - update the
-  "Done in this feature but scoped for feature 43" subsection's
-  forward link so it points at feature 43's merged commits, not its
-  open plan.
-- `docs/dev/implementation/43 - dotnet nuget/problem.md` - if any
-  decision needed to shift during implementation, fold the shift
-  into the [Decisions Locked In](problem.md#decisions-locked-in)
-  section. Default expectation: no changes needed.
-
-**Behaviour** Documentation only; no code or tests.
-
-**Tests** None (docs).
-
-**README** This step *is* the README pass.
+`Invoke-DotnetToolsAssertions`. Also update
+`docs/dev/implementation/42 - dotnet sdk/plan.md`'s "Done in this
+feature but scoped for feature 43" forward link so it points at
+feature 43's merged commits rather than the open plan.
