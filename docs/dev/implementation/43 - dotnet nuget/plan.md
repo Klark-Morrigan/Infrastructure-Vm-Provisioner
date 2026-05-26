@@ -523,18 +523,28 @@ where they become reachable through the reconciler. Mirrors
   provider.
 - `hyper-v/ubuntu/up/dotnet/DotnetSdkProvider.Install-Version.ps1` -
   when writing the SDK manifest, populate the `children` array with
-  the relative manifest paths for any `dotnetTool-*.json` the
-  reconciler will also be writing this run. The SDK provider learns
-  about its children via a small helper (`Get-VmDotnetToolChildren`)
-  that reads `$Vm.dotnetTools` - this is the only place the parent
-  provider depends on the child, and it lives in the SDK provider's
-  file so the dependency direction stays parent-knows-children.
-- `hyper-v/ubuntu/up/post/Invoke-VmPostProvisioning.ps1` - call
+  the absolute manifest paths for any `dotnetTool-*.json` the
+  reconciler will also be writing this run. Accepts a new
+  `-ChildEntries` parameter so the helper that derives them stays
+  out of this file.
+- `hyper-v/ubuntu/up/dotnet/Get-VmDotnetToolChildren.ps1` (new) -
+  small helper that reads `$Vm.dotnetTools` and returns the
+  `{ provider, manifestPath }` records the walker expects. Lives
+  in the SDK provider's directory (not the tools provider's) so
+  the parent-knows-children dependency direction is visible from
+  the layout; one function per file matches the convention used
+  by every other provider operation.
+- `hyper-v/ubuntu/up/acquire/Invoke-VmAcquisitions.ps1` - call
   `Invoke-DotnetToolAcquisition -Vm $Vm -CacheDir $Vm.vhdPath`
-  immediately after `Invoke-DotnetSdkAcquisition`. Acquisition
-  order does not matter to the reconciler (it dispatches by manifest
-  order), but the SDK must be cached before tools because the
-  walker reads SDK manifest children to know what to expect.
+  immediately after `Invoke-DotnetSdkAcquisition`, guarded by the
+  same absent / null / [] opt-in pattern the SDK branch uses.
+  `Invoke-VmAcquisitions` is the host-side prefetch orchestrator
+  (no SSH, no VM transport), which matches the tool acquirer's
+  pure-host nature; pairing it with its SDK sibling here keeps the
+  two acquirers in one place. Acquisition order does not matter to
+  the reconciler (it dispatches by manifest order), but the SDK
+  must be cached before tools because the walker reads SDK
+  manifest children to know what to expect.
 - `hyper-v/ubuntu/up/dotnet/Update-DotnetProfileD.ps1` (new helper,
   or extend the existing SDK profile.d writer) - extend
   `/etc/profile.d/dotnet.sh` to also prepend
