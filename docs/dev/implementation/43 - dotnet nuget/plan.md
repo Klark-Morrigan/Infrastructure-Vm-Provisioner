@@ -425,7 +425,10 @@ test surface small.
   returns one record per parsed manifest. Each record carries `Id`,
   `Version`, `ManifestPath`, and the list of `/usr/local/bin/`
   symlinks recorded in the manifest (used by Uninstall-Version to
-  know what to remove).
+  know what to remove). **Manifest is the sole source of truth** -
+  the operation never reads `dotnet tool list`, `.store/`, or
+  `/usr/local/bin/` to enumerate; see problem.md's
+  [Ownership boundary](../../implementation/43%20-%20dotnet%20nuget/problem.md#ownership-boundary---what-the-provider-does-and-does-not-touch).
 - `hyper-v/ubuntu/up/dotnet/DotnetToolsProvider.Install-Version.ps1`
   (new) - given Spec + SshClient + Server:
   1. Stream the cached `.nupkg` via the existing host file server +
@@ -454,9 +457,13 @@ test surface small.
   6. Wipe the staging dir.
 - `hyper-v/ubuntu/up/dotnet/DotnetToolsProvider.Uninstall-Version.ps1`
   (new) - given Installed record + SshClient:
-  1. Remove each recorded `/usr/local/bin/{cmd}` symlink (if it
-     still points at our tools dir; otherwise log and skip - never
-     delete an unrelated file).
+  1. Remove each recorded `/usr/local/bin/{cmd}` symlink **only if**
+     the existing entry is a symlink AND its target resolves into
+     `/usr/local/share/dotnet/tools/`. Any other state (regular
+     file, symlink to elsewhere, missing entry) is logged and
+     skipped - never delete a file whose provenance the manifest
+     does not vouch for. See problem.md's
+     [Ownership boundary](../../implementation/43%20-%20dotnet%20nuget/problem.md#ownership-boundary---what-the-provider-does-and-does-not-touch).
   2. `dotnet tool uninstall {id} --tool-path
      /usr/local/share/dotnet/tools`. Non-zero exit logs but does not
      throw if the tool was already absent (the symlink and manifest

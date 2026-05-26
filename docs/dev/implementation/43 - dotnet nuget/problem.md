@@ -9,6 +9,7 @@
   - [Two delivery options under consideration](#two-delivery-options-under-consideration)
   - [Recommendation](#recommendation)
   - [Guest-side system-wide install](#guest-side-system-wide-install)
+  - [Ownership boundary - what the provider does and does not touch](#ownership-boundary---what-the-provider-does-and-does-not-touch)
 - [Why Now](#why-now)
 - [Affected Components](#affected-components)
 - [Out of Scope](#out-of-scope)
@@ -165,6 +166,42 @@ re-architecting.
 | Idempotency | Skips `dotnet tool install` per entry if `/usr/local/share/dotnet/tools/.store/{id}/{version}/` already exists. Re-running `provision.ps1` is a no-op for the tools step in steady state. |
 | Multi-tool ordering | Tools install in array order. Failure on one tool fails the step and the VM provisioning, same posture as the JDK install. |
 
+### Ownership boundary - what the provider does and does not touch
+
+The .NET tools ecosystem allows tools to be placed on a box from
+several sources: `dotnet tool install -g` run by an interactive user
+(lands in `~/.dotnet/tools/`), `dotnet tool install --tool-path
+<dir>` run ad-hoc by an operator into an arbitrary directory, tools
+shipped by the base image, tools manually unpacked, etc. The
+reconciled provider in this feature manages **only** the tools it
+itself installed, and identifies them by the manifest sidecar - not
+by inspecting `.store/`, the tools dir, or `dotnet tool list`
+output. This is the same posture the JDK and SDK providers take.
+
+| Surface | In scope (provider-managed) | Out of scope (left alone) |
+|---------|-----------------------------|---------------------------|
+| Install location | `/usr/local/share/dotnet/tools/` populated **by this provider**, recorded in `/var/lib/infra-provisioner/manifests/dotnetTool-{id}-{version}.json` | Tools installed by users into `~/.dotnet/tools/`. Tools installed by an operator into any other `--tool-path` directory. Tools baked into the base image. Tools installed via OS package manager. |
+| Truth source for "what is installed" | The set of `dotnetTool-*.json` manifests under `/var/lib/infra-provisioner/manifests/` | `dotnet tool list` output, `.store/` directory listings, `/usr/local/bin/` enumeration. The provider does **not** treat these as authoritative - they can contain entries from outside sources. |
+| Symlinks under `/usr/local/bin/` | Created and removed by the provider **only** for command names recorded in a manifest the provider itself wrote, and **only** when the existing symlink target points into `/usr/local/share/dotnet/tools/`. | Any other file at `/usr/local/bin/<name>` - regular file, symlink to anywhere else, symlink pointing into a directory we don't own. Left untouched in all cases, even on uninstall. |
+| `dotnet tool uninstall` invocation | Issued only against tools whose manifest the provider is about to delete. | Never invoked against tools the provider has no manifest for, even if `dotnet tool list` shows them under the same `--tool-path`. |
+| Profile.d `PATH` entry | The single `/usr/local/share/dotnet/tools/` entry, written by feature 42's profile.d writer extended by this feature. | Anything else on `$PATH`. |
+
+Rationale: the runner pool and the developer VMs are general-purpose
+hosts. A user may legitimately `dotnet tool install -g foo` into
+their own home directory; a future feature may add a separate
+provider for a different `--tool-path`. The reconciler's "remove
+what is no longer desired" loop must not interpret state it did not
+write as state it is allowed to delete. The manifest sidecar is the
+provider's owned-by-us bit; absence of a sidecar means hands-off.
+
+A corollary: if an operator runs `dotnet tool install --tool-path
+/usr/local/share/dotnet/tools/ ...` by hand on a long-lived VM, the
+reconciler will not see it, will not remove it on the next
+provisioning, and will refuse to manage it. That is intentional. A
+collision (operator and provider both targeting the same `{id}`)
+fails install loudly rather than silently adopting state of unknown
+provenance.
+
 ---
 
 ## Why Now
@@ -254,9 +291,19 @@ sequenceDiagram
   if ever needed.
 - Custom NuGet sources / authenticated feeds. v1 fetches from
   `nuget.org` only.
-- Uninstall path. Mirrors the JDK precedent - removal lands as a
-  separate follow-up if and when a long-lived VM needs to shed a
-  tool without rebuild.
+- Managing tools the provider did not install. See
+  [Ownership boundary](#ownership-boundary---what-the-provider-does-and-does-not-touch).
+  The provider's `Uninstall-Version` operation (required by the
+  reconciler contract; invoked on version-change and on field
+  removal) only ever touches manifests this provider wrote. Tools
+  placed on the VM by users, operators, the base image, or any
+  other channel are out of scope - the reconciler will neither
+  enumerate them nor remove them.
+- Operator-facing tool-shedding workflow on long-lived VMs. The
+  reconciler-driven uninstall (re-provision with the field changed
+  or removed) is the only supported path; there is no separate
+  command or UX for "remove this one tool now without touching the
+  rest of the config".
 - ARM / non-`linux-x64` builds.
 
 ---
