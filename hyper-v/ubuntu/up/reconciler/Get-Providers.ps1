@@ -27,10 +27,8 @@
     parent. The reconciler partitions on that field: top-level
     providers run in the main loop in array order, nested providers
     are dispatched only by the children walker when a parent manifest's
-    `children` array refers to them by Name. v1 of feature 42 ships
-    the walker but registers zero nested providers; the first real
-    consumer (a global nuget tools provider under DotnetSdkProvider)
-    lands in feature 43.
+    `children` array refers to them by Name. The first real consumer
+    is `dotnetTools` (feature 43, nested under `dotnetSdk`).
 #>
 function Get-Providers {
     [CmdletBinding()]
@@ -47,7 +45,12 @@ function Get-Providers {
     # because it was the first reconciler-owned toolchain and dotnet
     # SDK appended below.
     return @(
-        Get-JdkProvider       -Vm $Vm
-        Get-DotnetSdkProvider -Vm $Vm
+        Get-JdkProvider         -Vm $Vm
+        Get-DotnetSdkProvider   -Vm $Vm
+        # Nested under dotnetSdk - not dispatched by the top-level loop,
+        # only via the children walker when an SDK manifest's `children`
+        # array names it. Registration order alongside its parent keeps
+        # the by-Name lookup populated in the same Get-Providers pass.
+        Get-DotnetToolsProvider -Vm $Vm
     )
 }
