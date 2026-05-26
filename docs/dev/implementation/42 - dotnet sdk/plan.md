@@ -29,8 +29,11 @@ committable steps that each carry their own tests.
   - [Step 17 - DotnetSdkProvider: Install-Version](#step-17---dotnetsdkprovider-install-version)
   - [Step 18 - DotnetSdkProvider: Uninstall-Version](#step-18---dotnetsdkprovider-uninstall-version)
   - [Step 19 - Register DotnetSdkProvider + E2E coverage](#step-19---register-dotnetsdkprovider--e2e-coverage)
-- [Phase D - Nested providers contract (no implementation)](#phase-d---nested-providers-contract-no-implementation)
-  - [Step 20 - Manifest `children` walker + nested-provider contract docs](#step-20---manifest-children-walker--nested-provider-contract-docs)
+
+The nested-provider walker and its E2E coverage moved to
+[43 - dotnet nuget](../43%20-%20dotnet%20nuget/plan.md) (Steps 1-2 there),
+where the first real nested provider also lands. This feature ships
+the manifest schema with a `children` field that always stays empty.
 
 Per the project's one-version-bump-per-feature rule, the only
 manifest edit in this plan is the `Infrastructure.HyperV`
@@ -66,7 +69,6 @@ flowchart TD
     subgraph Providers ["Providers"]
         JDKP["JdkProvider (steps 6-9)"]
         DOTP["DotnetSdkProvider (steps 16-18)"]
-        NESTED["Children walker\n(step 20, no impl)"]
     end
 
     subgraph HyperV ["Infrastructure.HyperV 0.9.0 (existing)"]
@@ -80,7 +82,6 @@ flowchart TD
     ORCH --> MAN
     JDKP --> PRIM
     DOTP --> PRIM
-    DOTP -.->|future| NESTED
 ```
 
 ---
@@ -1317,66 +1318,10 @@ flowchart LR
 
 **README** As above.
 
----
-
-## Phase D - Nested providers contract (no implementation)
-
-## Step 20 - Manifest `children` walker + nested-provider contract docs
-
-**Reason.** The manifest schema already has `children`, but the
-walker is a no-op until a nested provider exists. This step adds
-the walker logic and documents the contract so feature 43
-(`dotnet nuget` / coverage tooling) can drop in without re-touching
-the reconciler.
-
-**Files**
-
-- `hyper-v/ubuntu/up/reconciler/Invoke-ToolchainReconciliation.ps1` -
-  when uninstalling a record whose manifest's `children` array is
-  non-empty, walk each child manifest and remove it via the
-  registered child provider's `Uninstall-Version` before removing
-  the parent.
-- `hyper-v/ubuntu/up/reconciler/Get-Providers.ps1` - extend to
-  support an optional `ParentProvider` field on a provider object,
-  so a nested provider can declare which parent's lifecycle gates
-  its own.
-- `Tests/up/reconciler/Invoke-ToolchainReconciliation.Tests.ps1` -
-  new cases:
-  - Manifest with empty `children`: walker is a no-op.
-  - Manifest with one child whose provider is registered: child's
-    `Uninstall-Version` runs before parent's.
-  - Manifest with one child whose provider is NOT registered:
-    walker logs a warning and proceeds (the alternative - throwing -
-    would leave the parent installed forever once its child
-    provider is removed; the warning is the lesser evil).
-- `docs/dev/implementation/42 - dotnet sdk/problem.md` - update the
-  "Nested providers" section to reference the implementation
-  landing point.
-- `README.md` - add the nested-provider contract to the Reconciler
-  subsection as a short paragraph with a forward link to feature 43.
-
-**Behaviour** As above; no behaviour-bearing public surface beyond
-the walker.
-
-**Tests (unit)** As enumerated.
-
-**Mermaid**
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Orch as Reconciler
-    participant ParentP as Parent provider
-    participant ChildP as Child provider (if registered)
-
-    Orch->>ParentP: Uninstall-Version (Installed record)
-    ParentP->>ParentP: Read-VmManifest
-    alt manifest.children non-empty
-        loop each child manifest
-            ParentP->>ChildP: Uninstall-Version (child installed)
-        end
-    end
-    ParentP->>ParentP: process kill, remove symlinks, profile.d, dirs, manifest
-```
-
-**README** As above.
+The nested-provider walker that allows future toolchains (e.g.
+`dotnetTools` from feature 43) to slot under `dotnetSdk` is not built
+in this feature - it lands as Steps 1-2 of
+[43 - dotnet nuget](../43%20-%20dotnet%20nuget/plan.md) where the
+first real consumer exists. The manifest schema's `children` field
+(written in Step 2) stays empty for every install produced by this
+feature.

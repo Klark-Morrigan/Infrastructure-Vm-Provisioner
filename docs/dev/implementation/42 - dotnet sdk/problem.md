@@ -126,8 +126,12 @@ and they live inside that SDK's install dir. The interface supports a
 | Lifecycle | If the parent version is uninstalled, its children are uninstalled first (child manifests walked from the parent's `children` array). |
 | Failure | A child failure does not roll back the parent install; it surfaces as a non-zero exit alongside any other failures. |
 
-v1 of this feature builds the contract and the walker but ships **zero
-nested providers**; the first real consumer lands in [43 - dotnet nuget](../43%20-%20dotnet%20nuget/problem.md).
+This feature ships **neither the nested-provider contract nor the
+walker** - both move forward to [43 - dotnet nuget](../43%20-%20dotnet%20nuget/problem.md),
+where the first real consumer exists to exercise them. What this
+feature does ship is the manifest schema with a `children` field
+(always empty until 43 lands), so that 43's walker has a stable
+on-disk shape to read.
 
 ### Sidecar manifests
 
@@ -335,8 +339,10 @@ behind the `dotnetSdk` opt-in guard.
   reconciliation kills the entire category of "uninstall flag"
   features.
 - Coverage tooling ([43 - dotnet nuget](../43%20-%20dotnet%20nuget/problem.md))
-  needs to drop in as a nested provider; designing the nesting now
-  avoids a second refactor when it ships.
+  will drop in as a nested provider under `dotnetSdk`. The nesting
+  contract and reconciler walker land with 43 itself, not here -
+  what this feature owes 43 is the manifest schema with a `children`
+  field so 43's walker has a stable shape to read.
 
 ---
 
@@ -365,7 +371,7 @@ graph TD
     subgraph Providers ["Providers"]
         JDKP["JdkProvider (migrated from Install-Jdk)"]
         DOTP["DotnetSdkProvider (new)"]
-        FUTURE["dotnetTools (future - feature 43)\nnested under DotnetSdkProvider"]
+        FUTURE["dotnetTools (feature 43)\nnested under DotnetSdkProvider;\nfeature 43 also adds the\nreconciler children-walker"]
     end
 
     subgraph Guest ["Guest (SSH)"]
