@@ -200,16 +200,29 @@ function Invoke-VmPostProvisioning {
             # Failed providers still contribute their partial duration;
             # the -Failed switch makes the sub-step's status sticky
             # Failed even if a later VM's iteration succeeds.
+            #
+            # Re-bind $addSubStepDuration into a fresh local before the
+            # inner GetNewClosure(). PowerShell's GetNewClosure only
+            # snapshots the IMMEDIATE local scope's variable table -
+            # lexically visible captures from a parent closure (here
+            # the outer post-block, which captured $addSubStepDuration
+            # from Invoke-VmPostProvisioning's scope) do NOT propagate
+            # into the new closure. Without this rebind, the inner
+            # closure's $addSubStepDuration is $null at invocation time
+            # and the callback fails with "expression after '&' produced
+            # an object that was not valid", silently leaving the
+            # reconcile/<provider> sub-step rows un-updated.
+            $addSubStepDurationLocal = $addSubStepDuration
             $onProviderComplete = {
                 param($providerName, $elapsedMs, $hadError)
                 if ($hadError) {
-                    & $addSubStepDuration `
+                    & $addSubStepDurationLocal `
                         -Parent    'Post-provisioning' `
                         -Name      "reconcile/$providerName" `
                         -ElapsedMs $elapsedMs `
                         -Failed
                 } else {
-                    & $addSubStepDuration `
+                    & $addSubStepDurationLocal `
                         -Parent    'Post-provisioning' `
                         -Name      "reconcile/$providerName" `
                         -ElapsedMs $elapsedMs
