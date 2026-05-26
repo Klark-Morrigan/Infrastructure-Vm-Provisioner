@@ -29,11 +29,16 @@ committable steps that each carry their own tests.
   - [Step 17 - DotnetSdkProvider: Install-Version](#step-17---dotnetsdkprovider-install-version)
   - [Step 18 - DotnetSdkProvider: Uninstall-Version](#step-18---dotnetsdkprovider-uninstall-version)
   - [Step 19 - Register DotnetSdkProvider + E2E coverage](#step-19---register-dotnetsdkprovider--e2e-coverage)
+- [Done in this feature but scoped for feature 43](#done-in-this-feature-but-scoped-for-feature-43)
 
 The nested-provider walker and its E2E coverage moved to
 [43 - dotnet nuget](../43%20-%20dotnet%20nuget/plan.md) (Steps 1-2 there),
-where the first real nested provider also lands. This feature ships
-the manifest schema with a `children` field that always stays empty.
+where the first real nested provider also lands. The walker landed
+opportunistically alongside this feature's commits - see the
+[Done in this feature but scoped for feature 43](#done-in-this-feature-but-scoped-for-feature-43)
+section for the inventory. This feature ships the manifest schema
+with a `children` field that the dotnet SDK provider always writes
+as empty (nested registration is feature 43's Phase B).
 
 Per the project's one-version-bump-per-feature rule, the only
 manifest edit in this plan is the `Infrastructure.HyperV`
@@ -1325,3 +1330,40 @@ in this feature - it lands as Steps 1-2 of
 first real consumer exists. The manifest schema's `children` field
 (written in Step 2) stays empty for every install produced by this
 feature.
+
+---
+
+## Done in this feature but scoped for feature 43
+
+The items below were landed alongside feature 42's commits even though
+their official scope is [feature 43](../43%20-%20dotnet%20nuget/plan.md).
+The motivation for landing early was opportunistic: the surrounding
+files were already open for editing in this feature, and shipping the
+two steps together kept the reconciler refactor and the children
+walker in one reviewable surface rather than splitting them across two
+PRs. Feature 43 will consume these landings rather than re-implement
+them.
+
+- [43 - dotnet nuget, Step 1](../43%20-%20dotnet%20nuget/plan.md#step-1---manifest-children-walker--nested-provider-contract-docs)
+  - Manifest `children` walker in
+    `hyper-v/ubuntu/up/reconciler/Invoke-ToolchainReconciliation.ps1`
+    (the `Invoke-ToolchainChildrenUninstall` helper and its dispatch
+    site before each parent's `Uninstall-Version`).
+  - Optional `ParentProvider` member in
+    `hyper-v/ubuntu/up/reconciler/Provider-Contract.ps1` for nested
+    providers to declare which parent's lifecycle gates their own.
+  - Unit coverage in
+    `Tests/up/reconciler/Invoke-ToolchainReconciliation.Tests.ps1`
+    (empty `children`, registered child, unregistered child warn-and-
+    proceed).
+- [43 - dotnet nuget, Step 2](../43%20-%20dotnet%20nuget/plan.md#step-2---e2e-for-unregistered-child-fallback)
+  - E2E harness for the unregistered-child fallback (parent install,
+    seed synthetic child manifest, re-provision with parent removal,
+    assert warn-and-proceed + parent gone + child manifest left in
+    place). Lives under
+    `Infrastructure-E2E/agent/e2e/vm-provisioning/` alongside the
+    other reconciler E2Es.
+
+Feature 43's Phase B (`DotnetToolsProvider`) remains TBD and is the
+first registration that exercises the walker via a real nested
+provider.

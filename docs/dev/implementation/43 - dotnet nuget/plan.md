@@ -46,12 +46,25 @@ flowchart TD
 
 ## Phase A - Nested-provider plumbing in the reconciler
 
+> **Status: landed in [feature 42](../42%20-%20dotnet%20sdk/plan.md#done-in-this-feature-but-scoped-for-feature-43).**
+> Both steps below shipped alongside feature 42's commits. Phase B is
+> the only remaining work on this feature.
+
 Phase A makes the reconciler aware of nested children and ships E2E
 for the one branch the happy-path nested-provider tests in Phase B
 will not exercise. After Phase A the walker is wired but does nothing
 visible until Phase B registers `DotnetToolsProvider`.
 
 ## Step 1 - Manifest `children` walker + nested-provider contract docs
+
+> **Status: landed early in
+> [feature 42](../42%20-%20dotnet%20sdk/plan.md#done-in-this-feature-but-scoped-for-feature-43).**
+> The walker, the `ParentProvider` contract field, and the unit tests
+> all shipped alongside feature 42's commits because the reconciler
+> files were already open for editing there. The contract and
+> rationale below remain the source of truth - Phase B should read
+> them when registering its first nested provider, and reviewers can
+> compare the implementation in feature 42 against this spec.
 
 **Reason.** The manifest schema (from feature 42 Step 2) already has
 `children`, but the walker is a no-op until a nested provider
@@ -115,6 +128,13 @@ sequenceDiagram
 ---
 
 ## Step 2 - E2E for unregistered-child fallback
+
+> **Status: landed early in
+> [feature 42](../42%20-%20dotnet%20sdk/plan.md#done-in-this-feature-but-scoped-for-feature-43).**
+> The unregistered-child E2E harness shipped with Step 1's walker so
+> the branch had live coverage from day one. The scenario below
+> remains the contract documentation; the implementation lives in
+> `Infrastructure-E2E/agent/e2e/vm-provisioning/`.
 
 **Reason.** Step 1's walker has a "child provider not registered ->
 warn and proceed" branch that the happy-path nested-provider E2E in

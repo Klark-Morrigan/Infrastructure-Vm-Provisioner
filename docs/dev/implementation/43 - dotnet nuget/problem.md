@@ -35,8 +35,13 @@ This feature also lights up the reconciler's nested-provider walker
 (originally scoped to feature 42, moved here so the walker lands
 alongside its first real consumer rather than as dead plumbing).
 The walker reads the `children` array that feature 42 already writes
-to every manifest. See [plan.md](plan.md) Phase A for the walker
-itself and Phase B for the `DotnetToolsProvider` that consumes it.
+to every manifest. Phase A (the walker + unregistered-child E2E)
+has since shipped alongside feature 42's commits - see
+[feature 42's plan](../42%20-%20dotnet%20sdk/plan.md#done-in-this-feature-but-scoped-for-feature-43)
+for the inventory. The contract documentation for the walker still
+lives in [plan.md](plan.md) Phase A. Phase B (the
+`DotnetToolsProvider` that consumes the walker) remains the
+outstanding work on this feature.
 
 `dotnet tool install -g <pkgId>` is the official way to install a
 .NET global tool. The tool itself is a NuGet package; `dotnet`
