@@ -652,7 +652,7 @@ sequenceDiagram
     E2E->>Prov: re-provision @5.4.5
     Prov->>VM: uninstall 5.4.4, install 5.4.5, retarget symlink
     E2E->>Prov: re-provision dotnetTools: []
-    Prov->>VM: uninstall tool; SDK retained
+    Prov->>VM: uninstall tool, SDK retained
     E2E->>Prov: re-provision dotnetSdk: null
     Prov->>VM: uninstall SDK
 ```
