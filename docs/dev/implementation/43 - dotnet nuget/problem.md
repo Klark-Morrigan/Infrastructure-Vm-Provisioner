@@ -12,7 +12,7 @@
 - [Why Now](#why-now)
 - [Affected Components](#affected-components)
 - [Out of Scope](#out-of-scope)
-- [Open Questions](#open-questions)
+- [Decisions Locked In](#decisions-locked-in)
 
 ---
 
@@ -129,9 +129,12 @@ flowchart LR
 1. Host-side acquirer `up/dotnet/Invoke-DotnetToolAcquisition.ps1`
    downloads `https://www.nuget.org/api/v2/package/{id}/{version}`,
    verifies the package's SHA-512 against `nuget.org`'s registration
-   metadata, and writes it to
+   metadata, then verifies the **nuget.org repo countersignature** via
+   `dotnet nuget verify` against a pinned trusted-signer entry for the
+   nuget.org repo certificate, and writes it to
    `vhdPath/dotnet-tool-{id}-{version}.nupkg` plus a sidecar
-   `dotnet-tool-{id}-{version}.lock.json`.
+   `dotnet-tool-{id}-{version}.lock.json`. Author-signature
+   verification is deferred (see [Decisions Locked In](#decisions-locked-in)).
 2. The cached `.nupkg`(s) are streamed to a VM-side staging dir via
    the existing host file server + SSH path used by `Install-Jdk` and
    the new `Install-DotnetSdk`.
@@ -157,7 +160,7 @@ re-architecting.
 |-------|-----------|
 | `--tool-path` | `/usr/local/share/dotnet/tools/` - a system-wide location outside any single user's `$HOME`, mirroring the `/opt/dotnet-{ver}/` posture of feature 42. |
 | `PATH` for login shells | `/etc/profile.d/dotnet.sh` (introduced by feature 42) is extended to also prepend `/usr/local/share/dotnet/tools/` to `PATH`. One profile file, one source of truth. |
-| `PATH` for non-login shells | Symlinks under `/usr/local/bin/` for each installed tool's shim, same trick `Install-Jdk` uses for `java`. Required so the runner service (a non-login systemd unit) sees `reportgenerator` on `PATH`. |
+| `PATH` for non-login shells | Symlinks under `/usr/local/bin/` for each installed tool's shim, same trick `Install-Jdk` uses for `java`. Required so the runner service (a non-login systemd unit) sees `reportgenerator` on `PATH`. Command names are derived from `dotnet tool list --tool-path /usr/local/share/dotnet/tools/` after install, so the JSON schema does not need a manual `command` field. |
 | Trigger | `Install-DotnetTools.ps1` step dispatched by `Invoke-VmPostProvisioning`, after `Install-DotnetSdk` (hard dependency) and before `Set-EnvironmentVariables`. |
 | Idempotency | Skips `dotnet tool install` per entry if `/usr/local/share/dotnet/tools/.store/{id}/{version}/` already exists. Re-running `provision.ps1` is a no-op for the tools step in steady state. |
 | Multi-tool ordering | Tools install in array order. Failure on one tool fails the step and the VM provisioning, same posture as the JDK install. |
@@ -258,21 +261,23 @@ sequenceDiagram
 
 ---
 
-## Open Questions
+## Decisions Locked In
 
-1. Should `dotnetTools` be validated as a strict array (every entry
-   must have `id` and `version`) or also accept a shorthand string
-   form (`"dotnet-reportgenerator-globaltool@5.4.4"`)? Current
-   proposal: strict object form only - matches the verbosity bar
-   `javaDevKit` set, and avoids two parser paths.
-2. Should the install step verify the `.nupkg`'s embedded signature
-   (Microsoft repo-sign / author-sign) in addition to the SHA-512
-   from `nuget.org` registration metadata? Current proposal: SHA-512
-   only in v1; signature verification is a follow-up once we have a
-   policy on which authors are trusted.
-3. Should the `/usr/local/bin/<tool>` symlink naming be derived from
-   the tool's shim (the way `dotnet tool list` enumerates command
-   names) or from a manually-supplied `command` field on the JSON
-   entry? Current proposal: enumerate via `dotnet tool list
-   --tool-path ...` after install so no manual mapping is needed,
-   keeping the schema minimal.
+1. **Schema shape - strict object form only.** Every `dotnetTools`
+   entry must be an object with both `id` and `version`. No
+   shorthand `"id@version"` string form. Matches the verbosity bar
+   `javaDevKit` already set, keeps the parser single-path.
+2. **Signature verification - repo countersignature in v1, author
+   signature deferred.** Every package on `nuget.org` is
+   repo-countersigned with a single well-known Microsoft cert, so
+   `dotnet nuget verify` against one pinned trusted-signer entry
+   gives uniform "served by nuget.org, untampered" coverage for free
+   - strictly stronger than the SHA-512-from-registration check
+   alone (which is also fetched from nuget.org and so trusts the
+   same endpoint). Author-signature verification needs a per-author
+   trust policy and is out of scope for v1.
+3. **`/usr/local/bin/<tool>` names - derived, not declared.** After
+   install, enumerate command names via `dotnet tool list
+   --tool-path /usr/local/share/dotnet/tools/` and create one
+   symlink per enumerated command. No `command` field on the JSON
+   entry; the schema stays minimal.
