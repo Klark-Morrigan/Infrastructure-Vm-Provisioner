@@ -48,6 +48,38 @@
     declaration order from the JSON, preserved by the caller. An empty
     array is allowed and is a no-op (useful in step 5 before any
     provider is registered).
+
+    Providers carrying a non-empty ParentProvider member are NESTED
+    providers: the orchestrator does not dispatch them in the top-level
+    loop. They are invoked only by the children walker (see below) when
+    a parent manifest's `children` array refers to them. The lookup is
+    by Name, so a nested provider's Name must equal the value used in
+    its parents' manifest `children[].provider` field.
+
+.PARAMETER OnProviderComplete
+    Optional scriptblock invoked once per top-level provider after its
+    diff/install/uninstall block finishes (regardless of success or
+    failure). Receives ($providerName, $elapsedMs, $hadError) so a
+    caller can feed per-provider durations into a timing report
+    without the orchestrator having to know about that subsystem.
+    A throwing callback is swallowed and surfaced as a warning - it
+    must not mask a real provider failure or interfere with dispatch
+    of the remaining providers.
+
+.NOTES
+    Children walker (Phase D of feature 42). Before invoking a parent
+    provider's Uninstall-Version on an installed record, the
+    orchestrator reads that record's manifest and, for every entry in
+    its `children` array, dispatches the matching nested provider's
+    Uninstall-Version first. This ordering matters: a child install
+    typically lives UNDER its parent's install dir (e.g. a dotnet
+    global tool inside the SDK install root), so removing the parent
+    first would orphan the child manifest and leave nothing for the
+    next reconcile to clean up. When no nested provider is registered
+    for a child entry the walker logs a warning and proceeds - the
+    alternative (throw) would leave the parent forever installed once
+    the child provider is unregistered, which is the worse failure
+    mode for an operator who just wants their VM clean.
 #>
 function Invoke-ToolchainReconciliation {
     [CmdletBinding()]
@@ -64,7 +96,14 @@ function Invoke-ToolchainReconciliation {
 
         [Parameter(Mandatory)]
         [AllowEmptyCollection()]
-        [object[]] $Providers
+        [object[]] $Providers,
+
+        # Optional per-provider completion callback. See the
+        # parameter docstring above for the contract. Default $null
+        # means "no callback" and the orchestrator behaves exactly as
+        # before this parameter was added.
+        [Parameter()]
+        [scriptblock] $OnProviderComplete = $null
     )
 
     # Per-provider failure log. We capture { ProviderName, Message } and
@@ -73,7 +112,27 @@ function Invoke-ToolchainReconciliation {
     # one provision-run at a time.
     $failures = New-Object System.Collections.Generic.List[object]
 
-    foreach ($provider in $Providers) {
+    # Partition providers into top-level (no ParentProvider) and nested
+    # (ParentProvider set). Nested providers are NOT visited by the main
+    # loop; the children walker dispatches them via the by-Name index
+    # below. Hashtable lookup is O(1) and lets the walker stay agnostic
+    # to provider count.
+    $topLevelProviders     = @()
+    $nestedProvidersByName = @{}
+    foreach ($candidate in $Providers) {
+        $parentName = Get-ToolchainProviderParentName -Provider $candidate
+        if ([string]::IsNullOrWhiteSpace($parentName)) {
+            $topLevelProviders += $candidate
+        } else {
+            # Last-write-wins on duplicate Names is acceptable: provider
+            # registration is operator-controlled and a duplicate Name
+            # would also trip the parent's manifest schema sooner or
+            # later. Keep this loop minimal.
+            $nestedProvidersByName[[string]$candidate.Name] = $candidate
+        }
+    }
+
+    foreach ($provider in $topLevelProviders) {
 
         # Resolve the provider Name up-front for log lines. If the
         # provider object is so malformed that even Name is missing,
@@ -84,6 +143,15 @@ function Invoke-ToolchainReconciliation {
         } else {
             '<unknown>'
         }
+
+        # Per-provider stopwatch. Brackets the WHOLE per-provider
+        # block (shape check, diff, install/uninstall, children
+        # walker) so a callback consumer can attribute every cost
+        # back to the provider that incurred it - including the
+        # shape-check time of a malformed provider, which would
+        # otherwise look like phantom orchestrator overhead.
+        $providerSw = [System.Diagnostics.Stopwatch]::StartNew()
+        $providerHadError = $false
 
         try {
             # Shape check first so a typo in a provider object fails with
@@ -135,6 +203,16 @@ function Invoke-ToolchainReconciliation {
             # Uninstall-then-install: see header docstring for the
             # symlink / profile.d ownership reasoning.
             foreach ($record in $toUninstall) {
+                # Children walker runs FIRST so a child install (which
+                # may live under the parent's install dir) is torn down
+                # by its own provider before the parent's
+                # Uninstall-Version removes the directory underneath it.
+                Invoke-ToolchainChildrenUninstall `
+                    -SshClient             $SshClient `
+                    -ParentInstalled       $record `
+                    -ParentProviderName    $providerName `
+                    -NestedProvidersByName $nestedProvidersByName
+
                 & $provider.'Uninstall-Version' $SshClient $record
             }
 
@@ -146,12 +224,34 @@ function Invoke-ToolchainReconciliation {
             # Per-provider boundary. Log here so the operator sees the
             # failure in real time, then record the message so the
             # aggregate at the end carries the same detail.
+            $providerHadError = $true
             $message = $_.Exception.Message
             Write-Warning "  [reconciler] $providerName : failed - $message"
             $failures.Add([PSCustomObject]@{
                 ProviderName = $providerName
                 Message      = $message
             })
+        }
+        finally {
+            $providerSw.Stop()
+            if ($null -ne $OnProviderComplete) {
+                # Callback failures must not bring down the orchestrator
+                # - they would mask the per-provider boundary contract.
+                # Surface them as a warning so a buggy callback is still
+                # visible, but keep dispatching the remaining providers.
+                try {
+                    & $OnProviderComplete `
+                        $providerName `
+                        $providerSw.ElapsedMilliseconds `
+                        $providerHadError
+                }
+                catch {
+                    Write-Warning (
+                        "  [reconciler] OnProviderComplete callback " +
+                        "threw for '$providerName': $($_.Exception.Message)"
+                    )
+                }
+            }
         }
     }
 
@@ -166,5 +266,144 @@ function Invoke-ToolchainReconciliation {
             "Invoke-ToolchainReconciliation: $($failures.Count) provider(s) " +
             "failed:`n" + ($lines -join "`n")
         )
+    }
+}
+
+# Inspects a provider object for its optional ParentProvider member
+# without leaning on PSObject.Properties (which misses hashtable keys
+# under strict mode - see user's hashtable_psobject_properties memo).
+# Returns $null when the member is absent or empty.
+function Get-ToolchainProviderParentName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [AllowNull()] [object] $Provider
+    )
+    if ($null -eq $Provider) { return $null }
+
+    if ($Provider -is [hashtable]) {
+        if ($Provider.ContainsKey('ParentProvider')) {
+            return [string]$Provider['ParentProvider']
+        }
+        return $null
+    }
+
+    $prop = $Provider.PSObject.Properties['ParentProvider']
+    if ($null -eq $prop) { return $null }
+    return [string]$prop.Value
+}
+
+<#
+.SYNOPSIS
+    Reads a parent's manifest and dispatches Uninstall-Version on every
+    registered nested provider that owns one of its children.
+
+.DESCRIPTION
+    The children contract is intentionally narrow: each entry in the
+    parent manifest's `children` array is { provider, manifestPath },
+    where `provider` matches a registered nested provider's Name and
+    `manifestPath` is the absolute path to the child's own manifest on
+    the VM. The walker reads that child manifest, synthesises the same
+    Installed record shape that Get-InstalledVersions would produce
+    (Provider, Version, InstallPath, ManifestPath), and hands it to
+    the child provider's Uninstall-Version.
+
+    Failure semantics:
+      - Parent manifest has no `children` member, or it is empty:
+        no-op.
+      - Child entry refers to a provider that is NOT registered as a
+        nested provider: log a warning and proceed. Throwing would
+        leave the parent forever installed once the operator removes
+        the child's provider registration, which is the worse failure
+        mode.
+      - Child provider's Uninstall-Version throws: the exception
+        propagates so the parent provider's per-provider boundary in
+        the orchestrator catches it. The parent's Uninstall-Version
+        therefore does NOT run, which keeps the parent's manifest in
+        place as the recovery anchor for the next reconciler run.
+
+.PARAMETER SshClient
+    Forwarded to Read-VmManifest and to the child provider's
+    Uninstall-Version.
+
+.PARAMETER ParentInstalled
+    Installed record for the parent (carrying ManifestPath). The
+    record itself is opaque to the walker - only ManifestPath is read.
+
+.PARAMETER ParentProviderName
+    Used only for log lines so the operator can correlate the warning
+    back to a parent toolchain.
+
+.PARAMETER NestedProvidersByName
+    Lookup of nested providers, keyed by Name. Populated by the
+    orchestrator from the providers carrying a ParentProvider member.
+#>
+function Invoke-ToolchainChildrenUninstall {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [object]    $SshClient,
+        [Parameter(Mandatory)] [object]    $ParentInstalled,
+        [Parameter(Mandatory)] [string]    $ParentProviderName,
+        [Parameter(Mandatory)] [hashtable] $NestedProvidersByName
+    )
+
+    $parentManifestPath = [string]$ParentInstalled.ManifestPath
+    if ([string]::IsNullOrEmpty($parentManifestPath)) {
+        # Defensive: an Installed record without ManifestPath cannot
+        # have children. Silently no-op rather than throw because the
+        # contract for Installed records is enforced at provider level
+        # (Get-InstalledVersions), not here.
+        return
+    }
+
+    $parentManifest = Read-VmManifest -SshClient $SshClient -Path $parentManifestPath
+
+    $childrenProp = $parentManifest.PSObject.Properties['children']
+    if ($null -eq $childrenProp) { return }
+
+    # Pipeline can unroll a single-element array back to a scalar under
+    # strict mode; wrap in @(...) so .Count is meaningful even for one
+    # child.
+    $children = @($childrenProp.Value)
+    if ($children.Count -eq 0) { return }
+
+    foreach ($child in $children) {
+        $childProviderName = [string]$child.provider
+        $childManifestPath = [string]$child.manifestPath
+
+        if (-not $NestedProvidersByName.ContainsKey($childProviderName)) {
+            Write-Warning (
+                "  [reconciler] $ParentProviderName : children walker - " +
+                "no nested provider registered for '$childProviderName' " +
+                "(child manifest '$childManifestPath'); leaving in place."
+            )
+            continue
+        }
+
+        $childProvider = $NestedProvidersByName[$childProviderName]
+        $childManifest = Read-VmManifest -SshClient $SshClient -Path $childManifestPath
+
+        # Synthesise the Installed record shape so the nested provider
+        # sees the same contract its own Get-InstalledVersions would
+        # emit. InstallPath comes from ownedPaths[0] by the same
+        # convention JdkProvider.Get-InstalledVersions uses.
+        $childOwnedPaths = @($childManifest.ownedPaths)
+        $childInstallPath = if ($childOwnedPaths.Count -gt 0) {
+            [string]$childOwnedPaths[0]
+        } else {
+            ''
+        }
+
+        $childInstalled = [PSCustomObject]@{
+            Provider     = $childProviderName
+            Version      = [string]$childManifest.version
+            InstallPath  = $childInstallPath
+            ManifestPath = $childManifestPath
+        }
+
+        Write-Host (
+            "  [reconciler] $ParentProviderName : uninstalling child " +
+            "'$childProviderName' v$($childInstalled.Version) first"
+        )
+        & $childProvider.'Uninstall-Version' $SshClient $childInstalled
     }
 }

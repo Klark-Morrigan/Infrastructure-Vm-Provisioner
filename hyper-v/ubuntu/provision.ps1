@@ -75,6 +75,8 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\vm\create-vm.ps1"
 . "$PSScriptRoot\up\timing\Initialize-PhaseTimings.ps1"
 . "$PSScriptRoot\up\timing\Invoke-WithPhaseTimer.ps1"
+. "$PSScriptRoot\up\timing\Add-SubStepDuration.ps1"
+. "$PSScriptRoot\up\timing\Invoke-WithSubStepTimer.ps1"
 . "$PSScriptRoot\up\timing\Write-PhaseTimingReport.ps1"
 
 # ---------------------------------------------------------------------------
@@ -131,12 +133,36 @@ Write-Host ("Queued: $($newVms.Count) new VM(s), " +
 # ---------------------------------------------------------------------------
 
 Initialize-PhaseTimings -Phases @(
-    'Disk image acquisition',
-    'Host-side acquisitions',
+    # Hashtable items pre-declare their sub-steps so the report shows
+    # them as SKIPPED on runs where the work did not apply (e.g.
+    # base-image cache hit suppresses the 'download base image' row,
+    # ensure-none on dotnetSdk suppresses 'dotnet SDK' acquisition).
+    # The 'reconcile/<provider>' sub-steps under Post-provisioning are
+    # NOT pre-declared - they are added lazily by the reconciler's
+    # OnProviderComplete callback, named after each provider's Name,
+    # so the registered provider set stays a single source of truth.
+    @{
+        Name     = 'Disk image acquisition'
+        SubSteps = @(
+            'download base image',
+            'WSL2 base-image patch',
+            'per-VM disk copy+resize'
+        )
+    },
+    @{
+        Name     = 'Host-side acquisitions'
+        SubSteps = @('JDK', 'dotnet SDK')
+    },
     'Cloud-init seed ISO',
     'Virtual switch + NAT',
-    'VM creation',
-    'Post-provisioning'
+    @{
+        Name     = 'VM creation'
+        SubSteps = @('create + start', 'wait for SSH')
+    },
+    @{
+        Name     = 'Post-provisioning'
+        SubSteps = @('cloud-init wait', 'files', 'envVars')
+    }
 )
 
 try {

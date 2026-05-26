@@ -132,11 +132,31 @@ BeforeAll {
     }
 
     function global:Invoke-ToolchainReconciliation {
-        param($SshClient, $Server, $Vm, $Providers)
+        # -OnProviderComplete added in the sub-step timing feature; the
+        # stub accepts it so the orchestrator's call site stays exercised
+        # but the callback is not invoked here (the dispatch tests do not
+        # assert per-provider timing, which has its own test file).
+        param($SshClient, $Server, $Vm, $Providers, $OnProviderComplete)
         $global:_PostProv_Calls['Invoke-ToolchainReconciliation'] += @{
             Vm        = $Vm
             Providers = $Providers
         }
+    }
+
+    # Sub-step timer stubs. The orchestrator captures these via
+    # ${function:Invoke-WithSubStepTimer} / ${function:Add-SubStepDuration}
+    # at the top of its closure; if they are not defined globally,
+    # the captured variables are $null and `& $captured` fails with
+    # "expression after '&' produced an object that was not valid".
+    # The Invoke-WithSubStepTimer stub forwards directly to the action
+    # so the dispatch tests still see the inner calls. Add-SubStepDuration
+    # is a no-op here because these tests do not assert timing data.
+    function global:Invoke-WithSubStepTimer {
+        param($Parent, $Name, [scriptblock] $Action)
+        & $Action
+    }
+    function global:Add-SubStepDuration {
+        param($Parent, $Name, $ElapsedMs, [switch] $Failed)
     }
 
     function global:Copy-VmFilesByPattern {

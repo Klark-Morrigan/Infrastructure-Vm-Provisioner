@@ -36,6 +36,17 @@ function Invoke-VmCreation {
     Write-Host ""
     Write-Host "--- Creating VM: $($Vm.vmName) ---" -ForegroundColor Cyan
 
+    # Phase split: 'create + start' covers everything up to and including
+    # Start-VM (Hyper-V API work, typically sub-second). 'wait for SSH'
+    # covers the subsequent polling loop, which is guest-boot dominated
+    # (typically 30-90 s on first boot with cloud-init). Separating
+    # these two clarifies whether a slow run is a Hyper-V issue or a
+    # guest-boot issue.
+    Invoke-WithSubStepTimer `
+        -Parent 'VM creation' `
+        -Name   'create + start' `
+        -Action {
+
     # -Path directs Hyper-V to store the VM configuration files (.vmcx etc.)
     # in vmConfigPath, keeping them co-located with the seed ISO and separate
     # from the OS disk in vhdPath.
@@ -105,6 +116,8 @@ function Invoke-VmCreation {
     Start-VM -VMName $Vm.vmName
     Write-Host "  [OK] VM started." -ForegroundColor Green
 
+        } # end 'create + start' sub-step
+
     # ------------------------------------------------------------------
     # Poll port 22 until cloud-init finishes, then delete seed ISO.
     #
@@ -129,6 +142,11 @@ function Invoke-VmCreation {
     $pollIntervalSeconds = 10
     $deadline            = (Get-Date).AddMinutes($timeoutMinutes)
     $sshReady            = $false
+
+    Invoke-WithSubStepTimer `
+        -Parent 'VM creation' `
+        -Name   'wait for SSH' `
+        -Action {
 
     try {
         Write-Host "  Polling SSH on $($Vm.vmName) ..." -NoNewline
@@ -181,6 +199,8 @@ function Invoke-VmCreation {
             Write-Host "  [OK] Seed ISO removed." -ForegroundColor Green
         }
     }
+
+        } # end 'wait for SSH' sub-step
 
     Write-Host "  [OK] $($Vm.vmName) ready." -ForegroundColor Green
     Write-Host "    Connect: ssh $($Vm.username)@$($Vm.vmName)" `

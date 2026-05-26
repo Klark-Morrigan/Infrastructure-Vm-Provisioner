@@ -599,6 +599,22 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
     [docs/dev/implementation/42 - dotnet sdk/](docs/dev/implementation/42%20-%20dotnet%20sdk/)
     for the full provider contract.
 
+    **Nested providers.** A provider may declare a `ParentProvider`
+    field naming a top-level provider's `Name`. Such providers are
+    NOT dispatched by the orchestrator's main loop; they are invoked
+    only by the children walker built into
+    `Invoke-ToolchainReconciliation`. Before a parent provider's
+    `Uninstall-Version` runs, the walker reads the parent manifest's
+    `children` array (each entry is `{ provider, manifestPath }`)
+    and dispatches the matching nested provider's `Uninstall-Version`
+    first, so a child install that lives under the parent's install
+    dir is torn down before its host directory disappears. A child
+    entry that names an unregistered provider produces a warning and
+    leaves the child in place rather than blocking the parent's
+    removal forever. v1 ships the walker but registers zero nested
+    providers; the first real consumer (global `dotnet` nuget tools
+    under `DotnetSdkProvider`) lands in [feature 43](docs/dev/implementation/43%20-%20dotnet%20nuget/).
+
 ---
 
 ## start-vms.ps1

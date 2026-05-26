@@ -4,6 +4,14 @@ BeforeAll {
     # in its own Tests/up/<software>/ file.
     function Invoke-JdkAcquisition { param($Vm) }
     function Invoke-DotnetSdkAcquisition { param($Vm, $CacheDir) }
+    # Stub the sub-step timer too so the dispatch tests stay focused on
+    # which acquirer ran, not on whether the timing scaffolding is wired
+    # up. The stub invokes the action directly so the underlying mocks
+    # still record the call.
+    function Invoke-WithSubStepTimer {
+        param($Parent, $Name, [scriptblock] $Action)
+        & $Action
+    }
 
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\acquire\Invoke-VmAcquisitions.ps1"
 

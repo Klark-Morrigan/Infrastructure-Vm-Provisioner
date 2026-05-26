@@ -21,6 +21,16 @@
     per-VM state, so deferring construction to call time keeps load
     order independent of registration order and lets each call snapshot
     a different VM.
+
+    Nested providers (feature 42 Phase D) live in the same returned
+    array but carry a non-empty ParentProvider member naming their
+    parent. The reconciler partitions on that field: top-level
+    providers run in the main loop in array order, nested providers
+    are dispatched only by the children walker when a parent manifest's
+    `children` array refers to them by Name. v1 of feature 42 ships
+    the walker but registers zero nested providers; the first real
+    consumer (a global nuget tools provider under DotnetSdkProvider)
+    lands in feature 43.
 #>
 function Get-Providers {
     [CmdletBinding()]
