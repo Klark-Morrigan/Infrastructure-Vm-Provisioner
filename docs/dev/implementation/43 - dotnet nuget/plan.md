@@ -14,7 +14,8 @@ committable steps that each carry their own tests.
   - [Step 3 - `dotnetTools` schema + `Assert-DotnetToolsField`](#step-3---dotnettools-schema--assert-dotnettoolsfield)
   - [Step 4 - Host-side `.nupkg` acquirer with repo-signature verification](#step-4---host-side-nupkg-acquirer-with-repo-signature-verification)
   - [Step 5 - `DotnetToolsProvider.*` operations (guest-side install / uninstall)](#step-5---dotnettoolsproviderx-operations-guest-side-install--uninstall)
-  - [Step 6 - Provider composition, nested registration, and dispatcher wiring](#step-6---provider-composition-nested-registration-and-dispatcher-wiring)
+  - [Step 6A - Provider composition, nested registration, and dispatcher wiring](#step-6a---provider-composition-nested-registration-and-dispatcher-wiring)
+  - [Step 6B - Reconciler dispatch for nested-provider installs](#step-6b---reconciler-dispatch-for-nested-provider-installs)
   - [Step 7 - E2E: happy-path nested-provider scenario for `reportgenerator`](#step-7---e2e-happy-path-nested-provider-scenario-for-reportgenerator)
 
 ## Shape of the change
@@ -233,7 +234,7 @@ install), nuget.org repo-countersignature verification, system-wide
 `/usr/local/bin/` symlinks derived from `dotnet tool list`, and
 exact-version pins only.
 
-Each step is independently committable. Steps 3-6 form the install
+Each step is independently committable. Steps 3-6B form the install
 spine; Step 7 is the live coverage that proves the spine. README
 updates land alongside each step's code change, so there is no
 separate documentation step at the end.
@@ -496,7 +497,7 @@ test surface small.
 
 ---
 
-## Step 6 - Provider composition, nested registration, and dispatcher wiring
+## Step 6A - Provider composition, nested registration, and dispatcher wiring
 
 **Reason.** Steps 3-5 ship the parts in isolation; this step is
 where they become reachable through the reconciler. Mirrors
@@ -595,6 +596,121 @@ sequenceDiagram
 its `ParentProvider` link to `dotnetSdk`. Note the
 `/usr/local/share/dotnet/tools/` + `/usr/local/bin/` topology in
 the Guest layout subsection.
+
+---
+
+## Step 6B - Reconciler dispatch for nested-provider installs
+
+**Reason.** Step 6A wired the `DotnetToolsProvider` factory and the
+`ParentProvider` field, but the reconciler still partitions nested
+providers out of the top-level loop - the children walker dispatches
+them only for uninstall. That leaves `Install-DotnetToolVersion` with
+no caller in real provision runs, so Step 7's E2E cannot exercise the
+tool install path. This step closes that gap.
+
+**Design choice (hybrid dispatch).** Nested providers run in the main
+reconciler loop just like top-level providers; the existing uninstall
+walker stays in place for the parent-uninstall ordering case. The
+`ParentProvider` field becomes pure metadata - the reconciler uses it
+only to look up the walker target by Name, not to gate dispatch.
+Provider array order (set in `Get-Providers`) is the operator-visible
+dispatch order, with the convention that a parent appears before its
+children.
+
+Alternatives considered and rejected:
+
+- *Install-side symmetric walker (fires after parent's
+  Install-Version).* Breaks the "child version-change while parent
+  is NoOp" case - if the parent's diff says NoOp, no Install-Version
+  fires, so the walker never runs and the child stays stuck on the
+  old version.
+- *Topological reorder of all providers, remove walker entirely.*
+  The per-provider uninstall-then-install boundary is no longer
+  aligned with the per-iteration boundary; a child whose parent is
+  being torn down would still see the parent dir mid-iteration.
+  Significant orchestrator refactor.
+- *Fold child dispatch into `DotnetSdkProvider.Install-Version`.*
+  Tightly couples parent to child, loses the generic nested-provider
+  contract, and shares the NoOp-parent problem with the symmetric
+  walker.
+
+Scenario trace for the chosen path:
+
+- **Parent NoOp + child new version**: parent's diff is NoOp, walker
+  quiet. Child's iteration: uninstall old, install new.
+- **Parent new version + child stays**: parent's uninstall fires the
+  walker -> child removed first -> parent reinstalls (children array
+  repopulated from operator config). Child's iteration: desired =
+  same pin, installed = empty (walker removed it) -> install fires.
+- **Both uninstall**: walker runs during parent's iteration and
+  uninstalls the child; parent uninstalls. Child's iteration sees
+  desired = empty, installed = empty -> NoOp (no double uninstall).
+- **Both install fresh**: parent installs SDK (children array
+  pre-populated). Child's iteration: desired = pin, installed =
+  empty -> install fires.
+
+**Files**
+
+- `hyper-v/ubuntu/up/reconciler/Invoke-ToolchainReconciliation.ps1` -
+  remove the `topLevelProviders` / `nestedProvidersByName` partition;
+  the main loop now iterates ALL providers in the supplied order.
+  Build `$nestedProvidersByName` from the same providers list (still
+  keyed by Name) so the children walker keeps its O(1) lookup.
+  Refresh the function header docstring (Phase D notes) to name the
+  new dispatch contract.
+- `hyper-v/ubuntu/up/reconciler/Get-Providers.ps1` - comment-block
+  refresh only: drop the "nested providers are NOT dispatched in the
+  top-level loop" claim, replace with "parent appears before children
+  in array order; the walker still gates child removal during parent
+  uninstall".
+- `Tests/up/reconciler/Invoke-ToolchainReconciliation.Tests.ps1` -
+  the existing `children walker (Phase D nested providers)` Context's
+  first test asserts `dotnetTools.Install-Version (UNEXPECTED)` is
+  never logged. Flip that assertion: nested providers MUST run in
+  the main loop. The updated case asserts:
+  - Parent's `Get-DesiredVersions` / `Get-InstalledVersions` /
+    `Install-Version` / `Uninstall-Version` fire in expected order.
+  - Walker fires on parent uninstall (existing assertion stays).
+  - Child's `Get-DesiredVersions` and `Install-Version` ALSO fire
+    AFTER the parent's iteration completes.
+  Add two new cases:
+  - Parent NoOp, child new version: walker quiet, child install
+    fires.
+  - Both uninstall: walker fires during parent iteration; child
+    iteration sees empty installed (walker removed manifest) and
+    takes the NoOp branch (no double `Uninstall-Version`).
+
+**Behaviour** Single dispatch path for all providers. Uninstall
+walker remains the only path that fires `Uninstall-Version` ahead of
+the parent's own uninstall.
+
+**Tests (unit)** As enumerated; no new files, two updated files.
+
+**Mermaid**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Recon as Reconciler
+    participant Sdk as DotnetSdkProvider
+    participant Walker as Children walker
+    participant Tools as DotnetToolsProvider
+
+    Recon->>Sdk: Get-Desired, Get-Installed, diff
+    alt parent has uninstalls
+        Sdk->>Walker: per Installed record
+        Walker->>Tools: Uninstall-Version (per child)
+        Sdk->>Sdk: Uninstall-Version (parent)
+    end
+    Sdk->>Sdk: Install-Version (writes children[])
+    Recon->>Tools: Get-Desired, Get-Installed, diff
+    Tools->>Tools: Install-Version (per tool)
+```
+
+**README** Update the Reconciler subsection of
+`hyper-v/ubuntu/README.md`'s nested-provider paragraph to name the
+hybrid dispatch: nested providers run in the main loop like any
+other provider; the walker stays for parent-uninstall ordering only.
 
 ---
 
