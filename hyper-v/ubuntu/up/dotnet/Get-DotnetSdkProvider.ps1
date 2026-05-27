@@ -21,15 +21,13 @@
 #   them via the call operator so resolution does not need the originating
 #   scope. Same pattern as Get-JdkProvider.ps1.
 #
-#   Why -Vm is accepted but not closed over: Get-Providers passes the
-#   per-VM object to every provider factory for symmetry, and a future
-#   per-Vm decision (e.g. a feature-gated channel override) can be wired
-#   here without changing the call site. Today's DotnetSdkProvider needs
-#   nothing from the Vm at composition time - the Spec produced by
-#   Get-DotnetSdkDesiredVersions already carries TarballPath and the
-#   resolved Version (stamped by Invoke-DotnetSdkAcquisition), so
-#   Install-Version forwards the Spec straight through without needing
-#   the host-side $Vm in scope.
+#   Why -Vm is captured: Install-Version has to populate its manifest's
+#   `children` array with the per-tool manifest paths the nested
+#   dotnetTools provider will write later in the same run. The mapping
+#   is `$Vm.dotnetTools` -> child entries, derived by Get-VmDotnetToolChildren
+#   from the fixed manifest filename grammar (no on-VM lookup). The
+#   Spec itself stays JSON-derived; $Vm only carries the cross-provider
+#   derivation that the contract's typed Spec does not surface.
 # ---------------------------------------------------------------------------
 
 function Get-DotnetSdkProvider {
@@ -44,6 +42,14 @@ function Get-DotnetSdkProvider {
     $getInstalledFn     = ${function:Get-DotnetSdkInstalledVersions}
     $installVersionFn   = ${function:Install-DotnetSdkVersion}
     $uninstallVersionFn = ${function:Uninstall-DotnetSdkVersion}
+    # Predict the nested-provider children at composition time and
+    # close over the resulting array. The dotnetTools provider runs
+    # AFTER the SDK provider in the same dispatch pass, so the parent
+    # manifest's `children` field has to be populated from the operator's
+    # config rather than discovered from the on-VM filesystem (which
+    # is still bare when the SDK install runs first time).
+    $childEntriesFn     = ${function:Get-VmDotnetToolChildren}
+    $childEntries       = @(& $childEntriesFn -Vm $Vm)
 
     $getDesired = {
         param($VmConfig)
@@ -57,10 +63,14 @@ function Get-DotnetSdkProvider {
 
     $installVersion = {
         param($SshClient, $Server, $Spec)
+        # $childEntries was computed in the outer scope and is captured
+        # by GetNewClosure() so the reconciler's invocation (which runs
+        # in Infrastructure.HyperV's session state) still sees it.
         & $installVersionFn `
-            -SshClient $SshClient `
-            -Server    $Server `
-            -Spec      $Spec
+            -SshClient    $SshClient `
+            -Server       $Server `
+            -Spec         $Spec `
+            -ChildEntries $childEntries
     }.GetNewClosure()
 
     $uninstallVersion = {

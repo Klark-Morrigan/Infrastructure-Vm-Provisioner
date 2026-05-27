@@ -306,7 +306,12 @@ Describe 'Invoke-ToolchainReconciliation' {
             )
         }
 
-        It 'dispatches the child provider Uninstall-Version BEFORE the parent Uninstall-Version' {
+        It 'dispatches the child Uninstall-Version BEFORE the parent uninstall, then runs the child''s own iteration' {
+            # Hybrid dispatch (Step 6B): the walker still fires the
+            # child's Uninstall-Version ahead of the parent uninstall
+            # to preserve ordering, but the child's own iteration
+            # ALSO runs in the main loop afterwards so its standalone
+            # install/diff path is reachable in a real provision.
             $log = New-CallLog
 
             $childManifestPath  = '/var/lib/infra-provisioner/manifests/dotnetTools-rg-5.4.1.json'
@@ -336,25 +341,34 @@ Describe 'Invoke-ToolchainReconciliation' {
                         -Desired   @() `
                         -Installed @($parentInstalled)
 
-            # Nested provider: ParentProvider set, no Desired / Installed
-            # ever read because the orchestrator must NOT dispatch
-            # nested providers in the main loop.
+            # Nested provider: ParentProvider set. Walker fires its
+            # Uninstall-Version during the parent's iteration; the
+            # child's own iteration runs afterwards and (with empty
+            # desired/installed sets) takes the NoOp branch through
+            # Get-Desired + Get-Installed without firing Install or
+            # Uninstall again.
+            # Pre-built result sets so the closure scriptblocks don't
+            # need to call any test helper at dispatch time - helper
+            # functions defined in BeforeAll are not in the closure
+            # invocation scope when the reconciler runs them.
+            $childDesired   = @()
+            $childInstalled = @()
             $childProvider = [PSCustomObject]@{
                 Name                    = 'dotnetTools'
                 ParentProvider          = 'dotnetSdk'
                 'Get-DesiredVersions'   = {
                     param($vm)
-                    $log.Add('dotnetTools.Get-DesiredVersions (UNEXPECTED)')
-                    return @()
+                    $log.Add('dotnetTools.Get-DesiredVersions')
+                    return ,$childDesired
                 }.GetNewClosure()
                 'Get-InstalledVersions' = {
                     param($ssh)
-                    $log.Add('dotnetTools.Get-InstalledVersions (UNEXPECTED)')
-                    return @()
+                    $log.Add('dotnetTools.Get-InstalledVersions')
+                    return ,$childInstalled
                 }.GetNewClosure()
                 'Install-Version'       = {
                     param($a,$b,$c)
-                    $log.Add('dotnetTools.Install-Version (UNEXPECTED)')
+                    $log.Add("dotnetTools.Install-Version:$($c.Version)")
                 }.GetNewClosure()
                 'Uninstall-Version'     = {
                     param($ssh, $rec)
@@ -370,7 +384,152 @@ Describe 'Invoke-ToolchainReconciliation' {
                 'dotnetSdk.Get-DesiredVersions',
                 'dotnetSdk.Get-InstalledVersions',
                 'dotnetTools.Uninstall-Version:5.4.1:/opt/dotnet-10.0.100/tools/.store/reportgenerator',
-                'dotnetSdk.Uninstall-Version:10.0.100'
+                'dotnetSdk.Uninstall-Version:10.0.100',
+                'dotnetTools.Get-DesiredVersions',
+                'dotnetTools.Get-InstalledVersions'
+            )
+        }
+
+        It 'runs the child''s install in its own iteration when the parent is NoOp' {
+            # "Parent NoOp, child new version" - the install-side
+            # symmetric-walker design was rejected because a NoOp
+            # parent would never fire the walker. The main loop must
+            # carry the child's install path on its own.
+            $log = New-CallLog
+            $parentInstalled = New-Installed -Version '10.0.100' -Provider 'dotnetSdk'
+            Register-Manifest -Path $parentInstalled.ManifestPath -Manifest ([PSCustomObject]@{
+                schemaVersion = 1
+                provider      = 'dotnetSdk'
+                version       = '10.0.100'
+                ownedPaths    = @('/opt/dotnet-10.0.100')
+                children      = @()
+            })
+
+            $parent = New-FakeProvider -Name 'dotnetSdk' -Log $log `
+                        -Desired   @(New-Spec      -Version '10.0.100' -Provider 'dotnetSdk') `
+                        -Installed @($parentInstalled)
+
+            $childDesired   = @(New-Spec -Version '5.4.4' -Provider 'dotnetTools')
+            $childInstalled = @()
+            $childProvider = [PSCustomObject]@{
+                Name                    = 'dotnetTools'
+                ParentProvider          = 'dotnetSdk'
+                'Get-DesiredVersions'   = {
+                    param($vm)
+                    $log.Add('dotnetTools.Get-DesiredVersions')
+                    return ,$childDesired
+                }.GetNewClosure()
+                'Get-InstalledVersions' = {
+                    param($ssh)
+                    $log.Add('dotnetTools.Get-InstalledVersions')
+                    return ,$childInstalled
+                }.GetNewClosure()
+                'Install-Version'       = {
+                    param($a,$b,$c)
+                    $log.Add("dotnetTools.Install-Version:$($c.Version)")
+                }.GetNewClosure()
+                'Uninstall-Version'     = {
+                    param($ssh, $rec)
+                    $log.Add("dotnetTools.Uninstall-Version:$($rec.Version) (UNEXPECTED)")
+                }.GetNewClosure()
+            }
+
+            Invoke-ToolchainReconciliation `
+                -SshClient 'ssh' -Server 'srv' -Vm 'vm' `
+                -Providers @($parent, $childProvider)
+
+            # Parent NoOp -> no parent uninstall -> walker quiet.
+            # Child's own iteration installs the new pin.
+            $log | Should -Be @(
+                'dotnetSdk.Get-DesiredVersions',
+                'dotnetSdk.Get-InstalledVersions',
+                'dotnetTools.Get-DesiredVersions',
+                'dotnetTools.Get-InstalledVersions',
+                'dotnetTools.Install-Version:5.4.4'
+            )
+        }
+
+        It 'does not double-uninstall a child when both parent and child are being torn down' {
+            # Walker removes the child during the parent's iteration.
+            # The child's own iteration then sees desired=empty,
+            # installed=empty (the walker took the manifest with it)
+            # and must take the NoOp branch - calling
+            # Uninstall-Version a second time would error against an
+            # already-deleted store.
+            $log = New-CallLog
+            $childManifestPath = '/var/lib/infra-provisioner/manifests/dotnetTools-rg-5.4.1.json'
+            $parentInstalled   = New-Installed -Version '10.0.100' -Provider 'dotnetSdk'
+
+            Register-Manifest -Path $parentInstalled.ManifestPath -Manifest ([PSCustomObject]@{
+                schemaVersion = 1
+                provider      = 'dotnetSdk'
+                version       = '10.0.100'
+                ownedPaths    = @('/opt/dotnet-10.0.100')
+                children      = @(
+                    [PSCustomObject]@{
+                        provider     = 'dotnetTools'
+                        manifestPath = $childManifestPath
+                    }
+                )
+            })
+            Register-Manifest -Path $childManifestPath -Manifest ([PSCustomObject]@{
+                schemaVersion = 1
+                provider      = 'dotnetTools'
+                version       = '5.4.1'
+                ownedPaths    = @('/opt/dotnet-10.0.100/tools/.store/reportgenerator')
+                children      = @()
+            })
+
+            $parent = New-FakeProvider -Name 'dotnetSdk' -Log $log `
+                        -Desired   @() `
+                        -Installed @($parentInstalled)
+
+            $childUninstallCount = [ref] 0
+            $childDesired   = @()
+            $childInstalled = @()
+            $childProvider = [PSCustomObject]@{
+                Name                    = 'dotnetTools'
+                ParentProvider          = 'dotnetSdk'
+                'Get-DesiredVersions'   = {
+                    param($vm)
+                    $log.Add('dotnetTools.Get-DesiredVersions')
+                    return ,$childDesired
+                }.GetNewClosure()
+                'Get-InstalledVersions' = {
+                    param($ssh)
+                    # By the time the child's own iteration runs, the
+                    # walker has already removed the on-VM manifest -
+                    # the real Get-InstalledVersions would observe
+                    # zero records, which we simulate here.
+                    $log.Add('dotnetTools.Get-InstalledVersions')
+                    return ,$childInstalled
+                }.GetNewClosure()
+                'Install-Version'       = {
+                    param($a,$b,$c)
+                    $log.Add("dotnetTools.Install-Version:$($c.Version) (UNEXPECTED)")
+                }.GetNewClosure()
+                'Uninstall-Version'     = {
+                    param($ssh, $rec)
+                    $childUninstallCount.Value++
+                    $log.Add("dotnetTools.Uninstall-Version:$($rec.Version)")
+                }.GetNewClosure()
+            }
+
+            Invoke-ToolchainReconciliation `
+                -SshClient 'ssh' -Server 'srv' -Vm 'vm' `
+                -Providers @($parent, $childProvider)
+
+            # One uninstall total (the walker's), then the child
+            # iteration is a clean NoOp - desired+installed read but
+            # no second Uninstall-Version.
+            $childUninstallCount.Value | Should -Be 1
+            $log | Should -Be @(
+                'dotnetSdk.Get-DesiredVersions',
+                'dotnetSdk.Get-InstalledVersions',
+                'dotnetTools.Uninstall-Version:5.4.1',
+                'dotnetSdk.Uninstall-Version:10.0.100',
+                'dotnetTools.Get-DesiredVersions',
+                'dotnetTools.Get-InstalledVersions'
             )
         }
 
@@ -457,11 +616,12 @@ Describe 'Invoke-ToolchainReconciliation' {
 
     Context 'OnProviderComplete callback' {
 
-        It 'fires once per top-level provider with name, elapsed, and no-error flag' {
+        It 'fires once per provider with name, elapsed, and no-error flag' {
             # The callback is the integration point used by the
             # timing layer to attribute per-provider work to its own
             # sub-step bucket; the orchestrator must invoke it once
-            # per top-level provider regardless of dispatch shape.
+            # per provider (top-level or nested) since hybrid
+            # dispatch puts both in the same main loop.
             $log = New-CallLog
             $p1 = New-FakeProvider -Name 'javaDevKit' -Log $log `
                     -Desired @() -Installed @()

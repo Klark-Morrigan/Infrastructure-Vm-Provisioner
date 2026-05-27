@@ -1,0 +1,248 @@
+<#
+.NOTES
+    Do not run this file directly. It is intended to be dot-sourced by
+    provision.ps1 (host-side, before any VM-bound .nupkg streaming).
+#>
+
+# ---------------------------------------------------------------------------
+# Invoke-DotnetToolAcquisition
+#   Host-side prefetch for each `dotnetTools` entry on a VM definition.
+#   The host is the only machine that talks to nuget.org; every VM
+#   consumes pre-verified bytes from the per-host cache (problem.md
+#   Option B). The acquirer:
+#
+#     1. Computes cache paths under $CacheDir:
+#          dotnet-tool-{id}-{version}.nupkg
+#          dotnet-tool-{id}-{version}.lock.json
+#     2. Cache hit when both files exist AND the lockfile's recorded
+#        SHA-512 matches the on-disk .nupkg. Otherwise re-fetch.
+#     3. Downloads the .nupkg from
+#          https://www.nuget.org/api/v2/package/{id}/{version}
+#        into a sibling temp file under $CacheDir, then fetches the
+#        registration leaf metadata at
+#          https://api.nuget.org/v3/registration5-semver1/{idLower}/{version}.json
+#        and follows its `catalogEntry` URL to the per-version catalog
+#        entry, which is where NuGet v3 actually carries `packageHash`
+#        (SHA-512) + `packageHashAlgorithm`. Either hop missing or the
+#        catalog entry lacking the hash fields throws - the catalog
+#        entry is the authoritative pin source.
+#     4. Verifies the downloaded file's SHA-512 against the catalog
+#        hash. Mismatch throws naming both hashes and removes the temp
+#        file so the next run is a fresh cache miss. Signature
+#        verification is intentionally NOT performed - see problem.md
+#        decision 2 for why pinning a fingerprint from the same vendor
+#        does not add a fresh trust boundary on top of SHA-512 + TLS.
+#     5. Atomically renames the temp file into the final cache path and
+#        writes the lockfile sidecar (schema below).
+#     6. Stamps $Vm._dotnetToolNupkgPaths (a hashtable keyed by
+#        "{id}@{version}") with the absolute cache path so the
+#        DotnetToolsProvider in Phase B can stream the bytes to the VM
+#        without re-acquiring.
+#
+#   Lockfile schema:
+#     { id, version, nupkg, sha512, source, acquiredAt }
+#   Absent/empty `dotnetTools` -> early return. No SSH; pure host I/O.
+# ---------------------------------------------------------------------------
+
+function Invoke-DotnetToolAcquisition {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object] $Vm,
+
+        [Parameter(Mandatory)]
+        [string] $CacheDir
+    )
+
+    # ------------------------------------------------------------------
+    # Absent / null / [] - operator's "ensure none" signal. Nothing to
+    # prefetch; the reconciler's uninstall path consumes no .nupkg.
+    # Safe to call unconditionally from the dispatcher.
+    # ------------------------------------------------------------------
+    $toolsProp = $Vm.PSObject.Properties['dotnetTools']
+    if ($null -eq $toolsProp -or $null -eq $toolsProp.Value) {
+        return
+    }
+    $entries = @($toolsProp.Value)
+    if ($entries.Count -eq 0) {
+        return
+    }
+
+    Write-Host ""
+    Write-Host "--- .NET tools acquisition: $($Vm.vmName) ---" -ForegroundColor Cyan
+
+    # ------------------------------------------------------------------
+    # Append-style stamp across entries. If the property is already set
+    # from a prior call (defensive - one provision should call us once),
+    # extend it rather than replace, so the dispatcher can never
+    # accidentally lose paths between entries.
+    # ------------------------------------------------------------------
+    $existing = $Vm.PSObject.Properties['_dotnetToolNupkgPaths']
+    $nupkgPaths = if ($null -ne $existing -and $existing.Value -is [hashtable]) {
+        $existing.Value
+    } else {
+        @{}
+    }
+
+    foreach ($entry in $entries) {
+        $id      = $entry.id
+        $version = $entry.version
+        $idLower = $id.ToLowerInvariant()
+
+        $nupkgPath = Join-Path $CacheDir "dotnet-tool-$id-$version.nupkg"
+        $lockPath  = Join-Path $CacheDir "dotnet-tool-$id-$version.lock.json"
+        $sourceUrl = "https://www.nuget.org/api/v2/package/$id/$version"
+
+        $cacheHit = $false
+        if ((Test-Path $lockPath) -and (Test-Path $nupkgPath)) {
+            $lock       = Get-Content -Path $lockPath -Raw | ConvertFrom-Json
+            $actualHash = (Get-FileHash -Path $nupkgPath -Algorithm SHA512).Hash
+            if ($actualHash -ieq $lock.sha512) {
+                $cacheHit = $true
+                Write-Host "  Cache hit: $nupkgPath" -ForegroundColor Green
+            }
+        }
+
+        if (-not $cacheHit) {
+            # ----------------------------------------------------------
+            # Cache miss (or hash drift). Download to a temp file first
+            # so a partial/corrupt fetch never poisons the final path;
+            # the atomic rename in step 7 is the commit point.
+            # ----------------------------------------------------------
+            $tempPath = "$nupkgPath.downloading"
+            Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
+
+            Write-Host "  Cache miss - acquiring $id@$version ..."
+            Write-Host "    From: $sourceUrl"
+
+            Invoke-WithRetry `
+                -OperationName ".NET tool .nupkg download ($id@$version)" `
+                -RetryStrategy (New-TransientNetworkRetryStrategy) `
+                -ScriptBlock {
+                    Invoke-WebRequest -Uri $sourceUrl `
+                                      -OutFile $tempPath `
+                                      -UseBasicParsing
+                }
+
+            # ----------------------------------------------------------
+            # Registration leaf -> catalogEntry URL -> SHA-512 + algorithm.
+            #
+            # NuGet v3's registration5-semver1 leaf returns a wrapper
+            # document whose `catalogEntry` is a STRING URL (not an
+            # inlined object) pointing at the per-version catalog entry
+            # that actually carries `packageHash` /
+            # `packageHashAlgorithm`. Both hops are required; either
+            # missing is a protocol error, not a transient failure.
+            # ----------------------------------------------------------
+            $registrationUrl =
+                "https://api.nuget.org/v3/registration5-semver1/$idLower/$version.json"
+            $registration = Invoke-WithRetry `
+                -OperationName ".NET tool registration metadata ($id@$version)" `
+                -RetryStrategy (New-TransientNetworkRetryStrategy) `
+                -ScriptBlock {
+                    Invoke-RestMethod -Uri $registrationUrl -UseBasicParsing
+                }
+
+            # Probe via PSObject.Properties so a missing field reads as
+            # $null instead of throwing under StrictMode.
+            $catalogEntryProp = $registration.PSObject.Properties['catalogEntry']
+            $catalogEntryUrl  = if ($catalogEntryProp) {
+                [string]$catalogEntryProp.Value
+            } else { $null }
+            if ([string]::IsNullOrEmpty($catalogEntryUrl)) {
+                Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
+                throw (
+                    "Registration metadata for '$id@$version' at " +
+                    "'$registrationUrl' is missing a catalogEntry URL. " +
+                    "Cannot resolve packageHash."
+                )
+            }
+
+            $catalogEntry = Invoke-WithRetry `
+                -OperationName ".NET tool catalog entry ($id@$version)" `
+                -RetryStrategy (New-TransientNetworkRetryStrategy) `
+                -ScriptBlock {
+                    Invoke-RestMethod -Uri $catalogEntryUrl -UseBasicParsing
+                }
+
+            $hashProp = $catalogEntry.PSObject.Properties['packageHash']
+            $algoProp = $catalogEntry.PSObject.Properties['packageHashAlgorithm']
+            $expectedHash = if ($hashProp) { $hashProp.Value } else { $null }
+            $hashAlgo     = if ($algoProp) { $algoProp.Value } else { $null }
+            if ([string]::IsNullOrEmpty($expectedHash) -or
+                [string]::IsNullOrEmpty($hashAlgo)) {
+                Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
+                throw (
+                    "Catalog entry for '$id@$version' at " +
+                    "'$catalogEntryUrl' is missing packageHash or " +
+                    "packageHashAlgorithm. Cannot verify download."
+                )
+            }
+            if ($hashAlgo -ine 'SHA512') {
+                Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
+                throw (
+                    "Registration metadata for '$id@$version' advertises " +
+                    "packageHashAlgorithm '$hashAlgo'; only SHA512 is " +
+                    "supported."
+                )
+            }
+
+            # ----------------------------------------------------------
+            # SHA-512 compare. Registration hashes are base64-encoded,
+            # Get-FileHash returns uppercase hex - normalise both sides
+            # to the same hex representation before comparing.
+            # ----------------------------------------------------------
+            $actualHashHex   = (Get-FileHash -Path $tempPath -Algorithm SHA512).Hash
+            $expectedHashHex = ConvertFrom-NugetHashBase64 -Base64 $expectedHash
+            if ($actualHashHex -ine $expectedHashHex) {
+                Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
+                throw (
+                    "SHA-512 mismatch for '$id@$version'. Registration " +
+                    "advertised '$expectedHashHex' but download from " +
+                    "'$sourceUrl' hashed to '$actualHashHex'."
+                )
+            }
+
+            # ----------------------------------------------------------
+            # Commit point. Move-Item -Force on the same volume is the
+            # closest PowerShell gets to atomic rename; the temp file
+            # lives under $CacheDir so we never cross volumes.
+            # ----------------------------------------------------------
+            Move-Item -Path $tempPath -Destination $nupkgPath -Force
+
+            $lockObject = [pscustomobject]@{
+                id         = $id
+                version    = $version
+                nupkg      = "dotnet-tool-$id-$version.nupkg"
+                sha512     = $actualHashHex
+                source     = $sourceUrl
+                acquiredAt = (Get-Date).ToUniversalTime().ToString('o')
+            }
+            $lockObject | ConvertTo-Json | Set-Content -Path $lockPath -Encoding UTF8
+
+            Write-Host "  [OK] $id@$version cached: $nupkgPath" -ForegroundColor Green
+        }
+
+        $nupkgPaths["$id@$version"] = $nupkgPath
+    }
+
+    Add-Member -InputObject $Vm -MemberType NoteProperty `
+               -Name '_dotnetToolNupkgPaths' -Value $nupkgPaths -Force
+}
+
+# ---------------------------------------------------------------------------
+# ConvertFrom-NugetHashBase64
+#   Registration metadata reports SHA-512 hashes as base64. Get-FileHash
+#   returns uppercase hex. This helper bridges the encodings so the
+#   compare in step 4 is a straight string match.
+# ---------------------------------------------------------------------------
+function ConvertFrom-NugetHashBase64 {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Base64
+    )
+
+    $bytes = [System.Convert]::FromBase64String($Base64)
+    return ([System.BitConverter]::ToString($bytes)).Replace('-', '').ToUpperInvariant()
+}

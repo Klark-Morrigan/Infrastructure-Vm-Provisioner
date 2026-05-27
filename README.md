@@ -12,6 +12,7 @@
   - [Removing a JDK](#removing-a-jdk)
   - [JDK list shape (multiple entries)](#jdk-list-shape-multiple-entries)
   - [Optional: install a .NET SDK](#optional-install-a-net-sdk)
+  - [Optional: install .NET global tools](#optional-install-net-global-tools)
   - [Optional: copy files to the VM](#optional-copy-files-to-the-vm)
     - [Bulk entries](#bulk-entries)
   - [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables)
@@ -126,6 +127,7 @@ All fields are required. After first boot, connect via `ssh username@ipAddress`.
 | `natName`       | string | Windows NAT rule name. Default: `VmLAN-NAT`        |
 | `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. See [Optional: install a JDK](#optional-install-a-jdk). |
 | `dotnetSdk`     | object? | Optional. Installs a .NET SDK system-wide on first boot. See [Optional: install a .NET SDK](#optional-install-a-net-sdk). |
+| `dotnetTools`   | array?  | Optional. Installs .NET global tools system-wide on first boot. Requires `dotnetSdk` on the same VM. See [Optional: install .NET global tools](#optional-install-net-global-tools). |
 | `files`         | array?  | Optional. Copies arbitrary host files onto the VM. See [Optional: copy files to the VM](#optional-copy-files-to-the-vm). |
 | `envVars`       | object? | Optional. Writes a managed block of system-wide environment variables into `/etc/environment`. See [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables). |
 
@@ -185,6 +187,8 @@ Ubuntu VHDX):
 |-----------------------------------------------------|-------------------------------------------------------------------------|
 | `jdk-{vendor}-{requestedVersion}-linux-x64.tar.gz`  | The Temurin tarball, keyed by the requested (not resolved) version.     |
 | `jdk-{vendor}-{requestedVersion}-linux-x64.lock.json` | Sidecar pin recording `resolvedVersion`, `sha256`, `sourceUrl`, and download timestamp. |
+| `dotnet-tool-{id}-{version}.nupkg`                  | A .NET global tool's NuGet package, prefetched once on the host so VMs never contact `nuget.org` directly. Verified against the registration-leaf SHA-512 and the nuget.org repo countersignature before being committed to the cache. |
+| `dotnet-tool-{id}-{version}.lock.json`              | Sidecar pin recording `sha512`, `source` URL, and acquisition timestamp. A re-run with a matching SHA short-circuits to a cache hit without re-fetching or re-verifying. |
 
 The cache key uses the **requested** version, so two VMs that both ask for
 `"21"` share one cache slot. The lockfile is authoritative on subsequent
@@ -335,6 +339,41 @@ Both `channel` and `version` must be JSON strings. Numeric values like
 `10.0` are rejected so `"10.0"` cannot silently degrade to `10` through
 trailing-zero loss — the same rule the `javaDevKit.version` field
 enforces.
+
+### Optional: install .NET global tools
+
+Add a `dotnetTools` array to any VM entry to install one or more
+[.NET global tools](https://learn.microsoft.com/dotnet/core/tools/global-tools)
+system-wide on first boot. The field is opt-in — absent or empty arrays
+leave the VM untouched — and **requires `dotnetSdk` on the same VM** (the
+SDK is needed to run `dotnet tool install`). Entries install in array
+order; a failure on any entry fails the provisioning, same posture as
+the JDK and SDK installs.
+
+```jsonc
+{
+  "vmName": "ci-runner-01",
+  "...":    "...",
+  "dotnetSdk":   { "channel": "10.0", "version": "10.0.100" },
+  "dotnetTools": [
+    { "id": "dotnet-reportgenerator-globaltool", "version": "5.4.4" }
+  ]
+}
+```
+
+| Sub-field | Type   | Required | Allowed values                                                                 |
+|-----------|--------|----------|--------------------------------------------------------------------------------|
+| `id`      | string | yes      | A NuGet package id matching `^[A-Za-z0-9._-]+$`.                               |
+| `version` | string | yes      | An **exact NuGet version pin**. No `"latest"`, no floating ranges (`[1.0,2.0)`), no whitespace. Reproducibility takes priority; if a version needs to move, edit the JSON. |
+
+Unknown sub-fields are rejected at schema time to catch silent typos
+(`versoin` vs `version`), the same strict-by-design posture
+`dotnetSdk` and `javaDevKit` take.
+
+`dotnetTools` is also accepted as `null` or `[]` to **uninstall** any
+.NET global tools the reconciler previously installed. `dotnetTools: []`
+is allowed regardless of whether `dotnetSdk` is set — "no tools" is a
+coherent state on any VM, SDK or not.
 
 ### Optional: copy files to the VM
 
@@ -511,6 +550,13 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
      `.lock.json` naming convention (see
      [Optional: install a .NET SDK](#optional-install-a-net-sdk)).
      Skipped when `dotnetSdk` is `null` or `[]` for the same reason.
+   - **`dotnetTools`** acquires each requested .NET global tool's
+     `.nupkg` from `nuget.org` into the same `vhdPath` cache
+     (filenames `dotnet-tool-{id}-{version}.nupkg` and matching
+     `.lock.json`). The host verifies SHA-512 and the nuget.org repo
+     countersignature before committing bytes to the cache, so VMs
+     never contact `nuget.org` directly. Skipped when `dotnetTools`
+     is absent, `null`, or `[]`.
 
    Skipped silently for VMs that have no opt-in fields. Each acquirer is
    idempotent via its on-host lockfile, so a re-run against an already-
@@ -590,30 +636,47 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
 
     Registered providers (in dispatch order):
 
-    | Provider            | JSON field   | Notes                                                                                                                                                            |
-    |---------------------|--------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-    | `JdkProvider`       | `javaDevKit` | Manifest-driven install/uninstall of one Temurin JDK per VM.                                                                                                     |
-    | `DotnetSdkProvider` | `dotnetSdk`  | Manifest-driven install/uninstall of one .NET SDK per VM. Exports `DOTNET_ROOT` and sets `DOTNET_CLI_TELEMETRY_OPTOUT=1` via `/etc/profile.d/dotnet.sh`.         |
+    | Provider              | JSON field    | Notes                                                                                                                                                                                                                                       |
+    |-----------------------|---------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+    | `JdkProvider`         | `javaDevKit`  | Manifest-driven install/uninstall of one Temurin JDK per VM.                                                                                                                                                                                |
+    | `DotnetSdkProvider`   | `dotnetSdk`   | Manifest-driven install/uninstall of one .NET SDK per VM. Exports `DOTNET_ROOT`, `DOTNET_TOOLS_ROOT`, and sets `DOTNET_CLI_TELEMETRY_OPTOUT=1` via `/etc/profile.d/dotnet.sh`. `PATH` prepends both the SDK install dir and the tools dir.   |
+    | `DotnetToolsProvider` | `dotnetTools` | Nested under `DotnetSdkProvider`. Manifest-driven install/uninstall of one or more .NET global tools system-wide under `/usr/local/share/dotnet/tools/`, with per-command symlinks under `/usr/local/bin/`. One manifest per `(id, version)`. |
 
     See
     [docs/dev/implementation/42 - dotnet sdk/](docs/dev/implementation/42%20-%20dotnet%20sdk/)
     for the full provider contract.
 
-    **Nested providers.** A provider may declare a `ParentProvider`
-    field naming a top-level provider's `Name`. Such providers are
-    NOT dispatched by the orchestrator's main loop; they are invoked
-    only by the children walker built into
-    `Invoke-ToolchainReconciliation`. Before a parent provider's
+    **Nested providers (hybrid dispatch).** A provider may declare
+    a `ParentProvider` field naming another provider's `Name`.
+    Nested providers run in the orchestrator's main loop just like
+    top-level providers, in `Get-Providers` array order (convention:
+    a parent appears before its children). The `ParentProvider`
+    field is pure metadata used by the children walker built into
+    `Invoke-ToolchainReconciliation`: before a parent provider's
     `Uninstall-Version` runs, the walker reads the parent manifest's
     `children` array (each entry is `{ provider, manifestPath }`)
     and dispatches the matching nested provider's `Uninstall-Version`
     first, so a child install that lives under the parent's install
-    dir is torn down before its host directory disappears. A child
-    entry that names an unregistered provider produces a warning and
-    leaves the child in place rather than blocking the parent's
-    removal forever. v1 ships the walker but registers zero nested
-    providers; the first real consumer (global `dotnet` nuget tools
-    under `DotnetSdkProvider`) lands in [feature 43](docs/dev/implementation/43%20-%20dotnet%20nuget/).
+    dir is torn down before its host directory disappears. Every
+    other operation (install, standalone uninstall, diff/NoOp) goes
+    through the main loop, including for nested providers — so a
+    child install fires even when the parent's diff is a NoOp. A
+    child entry that names an unregistered provider produces a
+    warning and leaves the child in place rather than blocking the
+    parent's removal forever. The first real consumer of this
+    contract is `DotnetToolsProvider` (global `dotnet` nuget tools
+    nested under `DotnetSdkProvider`) — see
+    [feature 43](docs/dev/implementation/43%20-%20dotnet%20nuget/).
+
+    **Guest layout for `dotnetTools`.** Tools install system-wide
+    under `/usr/local/share/dotnet/tools/` (the `--tool-path` argument
+    to `dotnet tool install`). Each installed tool's commands are
+    discovered by parsing `dotnet tool list --tool-path …` output and
+    surfaced as symlinks under `/usr/local/bin/{cmd}` so non-login
+    shells (sshd command exec, systemd units, cron) find them without
+    sourcing `/etc/profile.d/`. Login shells pick the same dir up
+    automatically because `DotnetSdkProvider`'s `/etc/profile.d/dotnet.sh`
+    prepends `DOTNET_TOOLS_ROOT` to `PATH`.
 
 ---
 
@@ -738,6 +801,22 @@ Infrastructure-VM-Provisioner/
 |     |  |  |- JdkProvider.Install-Version.ps1        # Reconciler op: extracts tarball, writes profile.d + symlinks, records manifest
 |     |  |  |- JdkProvider.Uninstall-Version.ps1      # Reconciler op: manifest-driven teardown of one JDK install
 |     |  |  `- Get-JdkProvider.ps1                    # Composes the four ops into an IToolchainProvider object
+|     |  |- dotnet/
+|     |  |  |- Resolve-DotnetSdkRelease.ps1             # Resolves version granularity via Microsoft's release-metadata feed
+|     |  |  |- Invoke-DotnetSdkAcquisition.ps1          # Host-side .NET SDK tarball prefetch + lockfile pin
+|     |  |  |- Invoke-DotnetToolAcquisition.ps1         # Host-side .nupkg prefetch with SHA-512 + nuget.org repo-signature verification
+|     |  |  |- nuget-trusted-signers.config             # Pinned nuget.org trusted-signers config used by 'dotnet nuget verify'
+|     |  |  |- DotnetSdkProvider.Get-DesiredVersions.ps1   # Reconciler op: parses dotnetSdk into a typed Spec
+|     |  |  |- DotnetSdkProvider.Get-InstalledVersions.ps1 # Reconciler op: reads SDK manifests from the on-VM store
+|     |  |  |- DotnetSdkProvider.Install-Version.ps1       # Reconciler op: extracts tarball, writes profile.d, symlinks, manifest
+|     |  |  |- DotnetSdkProvider.Uninstall-Version.ps1     # Reconciler op: manifest-driven teardown of one SDK install
+|     |  |  |- Get-VmDotnetToolChildren.ps1             # Predicts child-manifest entries for the SDK manifest's `children` array
+|     |  |  |- Get-DotnetSdkProvider.ps1                # Composes the SDK ops into an IToolchainProvider; closes over the derived child-manifest entries
+|     |  |  |- DotnetToolsProvider.Get-DesiredVersions.ps1   # Reconciler op: parses dotnetTools into typed Spec records
+|     |  |  |- DotnetToolsProvider.Get-InstalledVersions.ps1 # Reconciler op: reads tool manifests from the on-VM store
+|     |  |  |- DotnetToolsProvider.Install-Version.ps1       # Reconciler op: stages .nupkg, dotnet tool install, /usr/local/bin symlinks, manifest
+|     |  |  |- DotnetToolsProvider.Uninstall-Version.ps1     # Reconciler op: ownership-bounded teardown of one tool install
+|     |  |  `- Get-DotnetToolsProvider.ps1              # Composes the tools ops into an IToolchainProvider; sets ParentProvider = 'dotnetSdk'
 |     |  |- acquire/
 |     |  |  `- Invoke-VmAcquisitions.ps1        # Per-VM host-side acquisition orchestrator; dispatches each per-software acquirer guarded by its opt-in field
 |     |  |- post/

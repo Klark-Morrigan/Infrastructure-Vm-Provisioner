@@ -52,11 +52,18 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\jdk\Get-JdkProvider.ps1"
 . "$PSScriptRoot\up\dotnet\Resolve-DotnetSdkRelease.ps1"
 . "$PSScriptRoot\up\dotnet\Invoke-DotnetSdkAcquisition.ps1"
+. "$PSScriptRoot\up\dotnet\Invoke-DotnetToolAcquisition.ps1"
 . "$PSScriptRoot\up\dotnet\DotnetSdkProvider.Get-DesiredVersions.ps1"
 . "$PSScriptRoot\up\dotnet\DotnetSdkProvider.Get-InstalledVersions.ps1"
 . "$PSScriptRoot\up\dotnet\DotnetSdkProvider.Install-Version.ps1"
 . "$PSScriptRoot\up\dotnet\DotnetSdkProvider.Uninstall-Version.ps1"
+. "$PSScriptRoot\up\dotnet\Get-VmDotnetToolChildren.ps1"
 . "$PSScriptRoot\up\dotnet\Get-DotnetSdkProvider.ps1"
+. "$PSScriptRoot\up\dotnet\DotnetToolsProvider.Get-DesiredVersions.ps1"
+. "$PSScriptRoot\up\dotnet\DotnetToolsProvider.Get-InstalledVersions.ps1"
+. "$PSScriptRoot\up\dotnet\DotnetToolsProvider.Install-Version.ps1"
+. "$PSScriptRoot\up\dotnet\DotnetToolsProvider.Uninstall-Version.ps1"
+. "$PSScriptRoot\up\dotnet\Get-DotnetToolsProvider.ps1"
 . "$PSScriptRoot\up\acquire\Invoke-VmAcquisitions.ps1"
 . "$PSScriptRoot\up\reconciler\Provider-Contract.ps1"
 . "$PSScriptRoot\up\reconciler\Initialize-VmManifestStore.ps1"
@@ -157,7 +164,7 @@ Initialize-PhaseTimings -Phases @(
     },
     @{
         Name     = 'Host-side acquisitions'
-        SubSteps = @('JDK', 'dotnet SDK')
+        SubSteps = @('JDK', 'dotnet SDK', 'dotnet tools')
     },
     'Cloud-init seed ISO',
     'Virtual switch + NAT',

@@ -1363,7 +1363,3 @@ them.
     place). Lives under
     `Infrastructure-E2E/agent/e2e/vm-provisioning/` alongside the
     other reconciler E2Es.
-
-Feature 43's Phase B (`DotnetToolsProvider`) remains TBD and is the
-first registration that exercises the walker via a real nested
-provider.

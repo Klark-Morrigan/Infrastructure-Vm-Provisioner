@@ -11,6 +11,7 @@
 # so the shared shape checks are not duplicated across consumers.
 . "$PSScriptRoot\Assert-JavaDevKitField.ps1"
 . "$PSScriptRoot\Assert-DotnetSdkField.ps1"
+. "$PSScriptRoot\Assert-DotnetToolsField.ps1"
 
 # ---------------------------------------------------------------------------
 # ConvertFrom-VmConfigJson
@@ -75,6 +76,11 @@ function ConvertFrom-VmConfigJson {
         # the envVars shape - the provisioner adds no per-entry policy.
         Assert-JavaDevKitField -Vm $vm
         Assert-DotnetSdkField -Vm $vm
+        # Runs after Assert-DotnetSdkField so its cross-field check
+        # ("dotnetTools requires dotnetSdk") sees an already-validated
+        # dotnetSdk and only fires for genuine cross-field violations
+        # rather than masking a malformed SDK declaration.
+        Assert-DotnetToolsField -Vm $vm
         Assert-VmFilesField `
             -Vm                $vm `
             -AllowBulkEntries `

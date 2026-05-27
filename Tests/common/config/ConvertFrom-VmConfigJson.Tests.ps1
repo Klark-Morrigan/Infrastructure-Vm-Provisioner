@@ -229,6 +229,49 @@ Describe 'ConvertFrom-VmConfigJson' {
     }
 
     # ------------------------------------------------------------------
+    Context 'Assert-DotnetToolsField wiring' {
+    # ------------------------------------------------------------------
+
+        It 'invokes Assert-DotnetToolsField once per VM' {
+            # Wiring-only check. Behaviour cases for the validator itself
+            # live in Assert-DotnetToolsField.Tests.ps1 - duplicating them
+            # here would couple the caller's tests to its callee's rules.
+            Mock Assert-DotnetToolsField {}
+            $json = "[$(New-ValidVmJson 'node-01'), $(New-ValidVmJson 'node-02')]"
+            @(ConvertFrom-VmConfigJson -Json $json)
+            Should -Invoke Assert-DotnetToolsField -Times 2 -Exactly
+        }
+
+        It 'propagates a throw from Assert-DotnetToolsField' {
+            Mock Assert-DotnetToolsField { throw "dotnetTools requires dotnetSdk on the same VM" }
+            { ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]" } |
+                Should -Throw -ExpectedMessage "*dotnetTools*"
+        }
+
+        It 'passes a VM with one dotnetSdk and one dotnetTools entry end-to-end' {
+            # End-to-end through the real validator (no mock) - confirms
+            # the happy-path schema fixture from problem.md parses cleanly.
+            $core   = (New-ValidVmJson) -replace '\}\s*$', ''
+            $extras = ', "dotnetSdk": { "channel": "10.0", "version": "10.0.100" }' +
+                      ', "dotnetTools": [ { "id": "dotnet-reportgenerator-globaltool", "version": "5.4.4" } ]'
+            $result = @(ConvertFrom-VmConfigJson -Json "[$core$extras }]")
+            $result | Should -HaveCount 1
+            $result[0].dotnetTools[0].id      | Should -Be 'dotnet-reportgenerator-globaltool'
+            $result[0].dotnetTools[0].version | Should -Be '5.4.4'
+        }
+
+        It 'throws the cross-field error when dotnetTools is set without dotnetSdk' {
+            # End-to-end through the real validator (no mock) - the
+            # cross-field rule is the one observable behaviour ConvertFrom
+            # callers depend on across the two .NET validators.
+            $core   = (New-ValidVmJson) -replace '\}\s*$', ''
+            $extras = ', "dotnetTools": [ { "id": "dotnet-ef", "version": "8.0.0" } ]'
+            { ConvertFrom-VmConfigJson -Json "[$core$extras }]" } |
+                Should -Throw -ExpectedMessage "*dotnetTools*dotnetSdk*"
+        }
+    }
+
+    # ------------------------------------------------------------------
     Context 'Assert-VmFilesField wiring (Infrastructure.HyperV)' {
     # ------------------------------------------------------------------
 

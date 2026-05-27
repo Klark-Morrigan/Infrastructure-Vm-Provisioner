@@ -66,4 +66,29 @@ function Invoke-VmAcquisitions {
             -Name   'dotnet SDK' `
             -Action { Invoke-DotnetSdkAcquisition -Vm $Vm -CacheDir $Vm.vhdPath }
     }
+
+    # dotnetTools acquirer. Runs AFTER the SDK acquirer so the SDK
+    # tarball lands in the cache first - the on-VM install order
+    # (SDK then tool) is enforced by the reconciler later, but
+    # acquisition order is still meaningful when an operator inspects
+    # a partial host cache state. Same vhdPath cache as the SDK
+    # acquirer; the .nupkg/.lock.json artefacts live alongside the
+    # SDK tarball with their own filename prefixes.
+    #
+    # Same ensure-none guard as the SDK branch: skip nuget.org calls
+    # entirely when dotnetTools is absent / null / []. The reconciler's
+    # uninstall path reads on-VM manifests, not the host cache, so a
+    # cache miss in ensure-none mode would just waste a round trip.
+    #
+    # The cross-field constraint that dotnetTools requires dotnetSdk on
+    # the same VM is enforced upstream by Assert-DotnetToolsField at
+    # config-parse time - we do not re-validate here.
+    if ($Vm.PSObject.Properties['dotnetTools'] -and
+        $null -ne $Vm.dotnetTools -and
+        @($Vm.dotnetTools).Count -gt 0) {
+        Invoke-WithSubStepTimer `
+            -Parent 'Host-side acquisitions' `
+            -Name   'dotnet tools' `
+            -Action { Invoke-DotnetToolAcquisition -Vm $Vm -CacheDir $Vm.vhdPath }
+    }
 }

@@ -13,7 +13,13 @@ BeforeAll {
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\DotnetSdkProvider.Get-InstalledVersions.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\DotnetSdkProvider.Install-Version.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\DotnetSdkProvider.Uninstall-Version.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\Get-VmDotnetToolChildren.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\Get-DotnetSdkProvider.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\DotnetToolsProvider.Get-DesiredVersions.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\DotnetToolsProvider.Get-InstalledVersions.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\DotnetToolsProvider.Install-Version.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\DotnetToolsProvider.Uninstall-Version.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\Get-DotnetToolsProvider.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\reconciler\Get-Providers.ps1"
 
     function New-PlainVm {
@@ -23,22 +29,37 @@ BeforeAll {
             _jdkResolvedVersion       = '21.0.6+7'
             _dotnetSdkTarballPath     = 'C:\cache\dotnet.tar.gz'
             _dotnetSdkResolvedVersion = '10.0.100'
+            _dotnetToolNupkgPaths     = @{}
         }
     }
 }
 
 Describe 'Get-Providers' {
 
-    It 'registers JDK first, then dotnet SDK (JSON-declaration dispatch order)' {
+    It 'registers JDK, dotnet SDK, then dotnet tools (declaration order)' {
         # Dispatch order is a contract: JDK was the first reconciler-owned
         # toolchain and existing manifests assume that order. New providers
         # append after; reordering would change diagnostic log ordering and
-        # any future provider-precedence semantics.
+        # any future provider-precedence semantics. dotnetTools is nested
+        # (ParentProvider = 'dotnetSdk'), so the top-level loop will skip
+        # it - but Get-Providers still surfaces it so the reconciler's
+        # by-Name lookup for the children walker is populated.
         $providers = @(Get-Providers -Vm (New-PlainVm))
 
-        $providers.Count   | Should -Be 2
+        $providers.Count   | Should -Be 3
         $providers[0].Name | Should -Be 'javaDevKit'
         $providers[1].Name | Should -Be 'dotnetSdk'
+        $providers[2].Name | Should -Be 'dotnetTools'
+    }
+
+    It 'marks dotnetTools as nested under dotnetSdk' {
+        # The children walker keys off ParentProvider to partition
+        # nested providers out of the main dispatch loop. A regression
+        # that drops this field would cause dotnetTools to run twice
+        # (top-level AND via the walker) on parent uninstall.
+        $providers = @(Get-Providers -Vm (New-PlainVm))
+        $tools     = $providers | Where-Object { $_.Name -eq 'dotnetTools' }
+        $tools.ParentProvider | Should -Be 'dotnetSdk'
     }
 
     It 'returns providers that pass Assert-ToolchainProvider' {
@@ -59,6 +80,6 @@ Describe 'Get-Providers' {
         # unwrapped to a scalar when only one provider is registered.
         $count = 0
         foreach ($p in (Get-Providers -Vm (New-PlainVm))) { $count++ }
-        $count | Should -Be 2
+        $count | Should -Be 3
     }
 }

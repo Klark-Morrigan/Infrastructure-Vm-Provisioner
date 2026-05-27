@@ -50,36 +50,58 @@
     provider is registered).
 
     Providers carrying a non-empty ParentProvider member are NESTED
-    providers: the orchestrator does not dispatch them in the top-level
-    loop. They are invoked only by the children walker (see below) when
-    a parent manifest's `children` array refers to them. The lookup is
-    by Name, so a nested provider's Name must equal the value used in
-    its parents' manifest `children[].provider` field.
+    providers: they run in this same loop alongside top-level
+    providers, in the order they appear in -Providers (convention:
+    parent before its children). The ParentProvider field is pure
+    metadata used by the children walker (see below) to look the
+    nested provider up by Name when a parent manifest's `children`
+    array refers to it during parent uninstall. The walker still
+    handles the parent-uninstall ordering case; the main loop
+    handles every install and every standalone (non-parent-driven)
+    uninstall. A nested provider's Name must equal the value used
+    in its parents' manifest `children[].provider` field for the
+    walker lookup to succeed.
 
 .PARAMETER OnProviderComplete
-    Optional scriptblock invoked once per top-level provider after its
+    Optional scriptblock invoked once per provider after its
     diff/install/uninstall block finishes (regardless of success or
     failure). Receives ($providerName, $elapsedMs, $hadError) so a
     caller can feed per-provider durations into a timing report
     without the orchestrator having to know about that subsystem.
+    Fires for every provider in -Providers, including nested ones,
+    since the hybrid dispatch runs all providers in this loop.
     A throwing callback is swallowed and surfaced as a warning - it
     must not mask a real provider failure or interfere with dispatch
     of the remaining providers.
 
 .NOTES
-    Children walker (Phase D of feature 42). Before invoking a parent
-    provider's Uninstall-Version on an installed record, the
-    orchestrator reads that record's manifest and, for every entry in
-    its `children` array, dispatches the matching nested provider's
-    Uninstall-Version first. This ordering matters: a child install
-    typically lives UNDER its parent's install dir (e.g. a dotnet
-    global tool inside the SDK install root), so removing the parent
-    first would orphan the child manifest and leave nothing for the
-    next reconcile to clean up. When no nested provider is registered
-    for a child entry the walker logs a warning and proceeds - the
-    alternative (throw) would leave the parent forever installed once
-    the child provider is unregistered, which is the worse failure
-    mode for an operator who just wants their VM clean.
+    Hybrid dispatch (feature 43 Step 6B). Nested providers run in
+    this same main loop just like top-level providers - their
+    install pass, and any standalone uninstall that is not driven
+    by a parent's teardown, happen during their own iteration. The
+    children walker (originally Phase D of feature 42) is retained
+    for the parent-uninstall ordering case only: before invoking a
+    parent provider's Uninstall-Version on an installed record, the
+    orchestrator reads that record's manifest and, for every entry
+    in its `children` array, dispatches the matching nested
+    provider's Uninstall-Version first. This ordering matters: a
+    child install typically lives UNDER its parent's install dir
+    (e.g. a dotnet global tool inside the SDK install root), so
+    removing the parent first would orphan the child manifest and
+    leave nothing for the next reconcile to clean up. When no
+    nested provider is registered for a child entry the walker logs
+    a warning and proceeds - the alternative (throw) would leave
+    the parent forever installed once the child provider is
+    unregistered, which is the worse failure mode for an operator
+    who just wants their VM clean.
+
+    Why not an install-side symmetric walker: it would miss the
+    "parent NoOp, child new version" case - a NoOp parent does not
+    fire Install-Version, so the walker would never run and the
+    child would stay stuck on the old pin. The main-loop pass
+    handles that case naturally because the child's own iteration
+    sees its own desired/installed diff regardless of what the
+    parent decided.
 #>
 function Invoke-ToolchainReconciliation {
     [CmdletBinding()]
@@ -112,27 +134,27 @@ function Invoke-ToolchainReconciliation {
     # one provision-run at a time.
     $failures = New-Object System.Collections.Generic.List[object]
 
-    # Partition providers into top-level (no ParentProvider) and nested
-    # (ParentProvider set). Nested providers are NOT visited by the main
-    # loop; the children walker dispatches them via the by-Name index
-    # below. Hashtable lookup is O(1) and lets the walker stay agnostic
-    # to provider count.
-    $topLevelProviders     = @()
+    # Build the by-Name lookup the children walker consumes during
+    # parent uninstall. Every provider (top-level or nested) goes into
+    # the index so the walker can resolve any child reference, but the
+    # main loop below iterates ALL providers in the supplied order -
+    # nested providers no longer get partitioned out. Hybrid dispatch:
+    # nested providers run their own install/standalone-uninstall pass
+    # in the main loop just like top-level providers; the walker keeps
+    # the parent-uninstall ordering case so a child install that lives
+    # under the parent's install dir is removed before the parent dir
+    # disappears. Last-write-wins on duplicate Names is acceptable:
+    # provider registration is operator-controlled and a duplicate Name
+    # would trip the parent's manifest schema sooner or later. Keep
+    # this loop minimal.
     $nestedProvidersByName = @{}
     foreach ($candidate in $Providers) {
-        $parentName = Get-ToolchainProviderParentName -Provider $candidate
-        if ([string]::IsNullOrWhiteSpace($parentName)) {
-            $topLevelProviders += $candidate
-        } else {
-            # Last-write-wins on duplicate Names is acceptable: provider
-            # registration is operator-controlled and a duplicate Name
-            # would also trip the parent's manifest schema sooner or
-            # later. Keep this loop minimal.
+        if ($null -ne $candidate -and $candidate.Name) {
             $nestedProvidersByName[[string]$candidate.Name] = $candidate
         }
     }
 
-    foreach ($provider in $topLevelProviders) {
+    foreach ($provider in $Providers) {
 
         # Resolve the provider Name up-front for log lines. If the
         # provider object is so malformed that even Name is missing,
@@ -267,29 +289,6 @@ function Invoke-ToolchainReconciliation {
             "failed:`n" + ($lines -join "`n")
         )
     }
-}
-
-# Inspects a provider object for its optional ParentProvider member
-# without leaning on PSObject.Properties (which misses hashtable keys
-# under strict mode - see user's hashtable_psobject_properties memo).
-# Returns $null when the member is absent or empty.
-function Get-ToolchainProviderParentName {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)] [AllowNull()] [object] $Provider
-    )
-    if ($null -eq $Provider) { return $null }
-
-    if ($Provider -is [hashtable]) {
-        if ($Provider.ContainsKey('ParentProvider')) {
-            return [string]$Provider['ParentProvider']
-        }
-        return $null
-    }
-
-    $prop = $Provider.PSObject.Properties['ParentProvider']
-    if ($null -eq $prop) { return $null }
-    return [string]$prop.Value
 }
 
 <#
