@@ -22,13 +22,15 @@
     order independent of registration order and lets each call snapshot
     a different VM.
 
-    Nested providers (feature 42 Phase D) live in the same returned
-    array but carry a non-empty ParentProvider member naming their
-    parent. The reconciler partitions on that field: top-level
-    providers run in the main loop in array order, nested providers
-    are dispatched only by the children walker when a parent manifest's
-    `children` array refers to them by Name. The first real consumer
-    is `dotnetTools` (feature 43, nested under `dotnetSdk`).
+    Nested providers (feature 42 Phase D, feature 43 Step 6B) live
+    in the same returned array but carry a non-empty ParentProvider
+    member naming their parent. Convention: a parent appears before
+    its children in array order. The reconciler runs every provider
+    in this order via the main loop (hybrid dispatch); the children
+    walker stays in place only to gate child removal during a parent
+    uninstall, so a child install that lives under the parent dir is
+    torn down before the parent dir disappears. The first real
+    consumer is `dotnetTools` (feature 43, nested under `dotnetSdk`).
 #>
 function Get-Providers {
     [CmdletBinding()]
@@ -47,10 +49,14 @@ function Get-Providers {
     return @(
         Get-JdkProvider         -Vm $Vm
         Get-DotnetSdkProvider   -Vm $Vm
-        # Nested under dotnetSdk - not dispatched by the top-level loop,
-        # only via the children walker when an SDK manifest's `children`
-        # array names it. Registration order alongside its parent keeps
-        # the by-Name lookup populated in the same Get-Providers pass.
+        # Nested under dotnetSdk. Hybrid dispatch: it runs in the
+        # reconciler's main loop like any other provider (so its
+        # install pass fires) AND its Name registers in the by-Name
+        # lookup the children walker uses during SDK uninstall.
+        # Listed AFTER its parent so the convention "parent before
+        # children" holds; the install loop order does not actually
+        # matter (each iteration is self-contained) but the
+        # convention makes Get-Providers readable as a tree.
         Get-DotnetToolsProvider -Vm $Vm
     )
 }

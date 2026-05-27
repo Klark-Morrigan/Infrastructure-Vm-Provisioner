@@ -646,21 +646,26 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
     [docs/dev/implementation/42 - dotnet sdk/](docs/dev/implementation/42%20-%20dotnet%20sdk/)
     for the full provider contract.
 
-    **Nested providers.** A provider may declare a `ParentProvider`
-    field naming a top-level provider's `Name`. Such providers are
-    NOT dispatched by the orchestrator's main loop; they are invoked
-    only by the children walker built into
-    `Invoke-ToolchainReconciliation`. Before a parent provider's
+    **Nested providers (hybrid dispatch).** A provider may declare
+    a `ParentProvider` field naming another provider's `Name`.
+    Nested providers run in the orchestrator's main loop just like
+    top-level providers, in `Get-Providers` array order (convention:
+    a parent appears before its children). The `ParentProvider`
+    field is pure metadata used by the children walker built into
+    `Invoke-ToolchainReconciliation`: before a parent provider's
     `Uninstall-Version` runs, the walker reads the parent manifest's
     `children` array (each entry is `{ provider, manifestPath }`)
     and dispatches the matching nested provider's `Uninstall-Version`
     first, so a child install that lives under the parent's install
-    dir is torn down before its host directory disappears. A child
-    entry that names an unregistered provider produces a warning and
-    leaves the child in place rather than blocking the parent's
-    removal forever. The first real consumer of this contract is
-    `DotnetToolsProvider` (global `dotnet` nuget tools nested under
-    `DotnetSdkProvider`) — see
+    dir is torn down before its host directory disappears. Every
+    other operation (install, standalone uninstall, diff/NoOp) goes
+    through the main loop, including for nested providers — so a
+    child install fires even when the parent's diff is a NoOp. A
+    child entry that names an unregistered provider produces a
+    warning and leaves the child in place rather than blocking the
+    parent's removal forever. The first real consumer of this
+    contract is `DotnetToolsProvider` (global `dotnet` nuget tools
+    nested under `DotnetSdkProvider`) — see
     [feature 43](docs/dev/implementation/43%20-%20dotnet%20nuget/).
 
     **Guest layout for `dotnetTools`.** Tools install system-wide
