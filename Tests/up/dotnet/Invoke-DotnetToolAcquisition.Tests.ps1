@@ -61,6 +61,54 @@ BeforeAll {
             acquiredAt = '2026-05-01T00:00:00.0000000Z'
         } | ConvertTo-Json
     }
+
+    # Per-test fixture URL for the per-version catalog entry the
+    # registration leaf points at. The exact value is opaque to the
+    # acquirer - all it does is follow the string URL - so a synthetic
+    # api.nuget.org/v3/catalog0/... shape is enough to match the real
+    # protocol without making the mock depend on the actual upstream
+    # catalog timestamps.
+    $script:CatalogEntryUrl = 'https://api.nuget.org/v3/catalog0/data/test/pkg.json'
+
+    # Dispatch-on-Uri factory for `Invoke-RestMethod` mocks. NuGet v3's
+    # registration leaf returns the catalogEntry as a STRING URL; the
+    # per-version packageHash lives in the document AT that URL. The
+    # acquirer therefore makes two REST calls per cache miss, and the
+    # tests need a mock that distinguishes them by Uri.
+    function New-RestMethodMockScript {
+        param(
+            [string] $RegistrationHashBase64 = $script:KnownHashBase64,
+            [string] $RegistrationHashAlgo   = 'SHA512',
+            [switch] $OmitCatalogEntryUrl,
+            [switch] $OmitCatalogHash,
+            [switch] $OmitCatalogAlgo
+        )
+        # Returns a scriptblock callers pass to `Mock Invoke-RestMethod`.
+        # Captured locals are interpolated up-front so the scriptblock
+        # body has no late-bound parameters of its own.
+        $catalogUrl = $script:CatalogEntryUrl
+        $hash       = $RegistrationHashBase64
+        $algo       = $RegistrationHashAlgo
+        $skipUrl    = [bool]$OmitCatalogEntryUrl
+        $skipHash   = [bool]$OmitCatalogHash
+        $skipAlgo   = [bool]$OmitCatalogAlgo
+        return {
+            param($Uri, [switch]$UseBasicParsing)
+            if ($Uri -match 'registration5-semver1') {
+                if ($skipUrl) {
+                    # Registration leaf without catalogEntry - protocol
+                    # error branch.
+                    return [pscustomobject]@{ listed = $true }
+                }
+                return [pscustomobject]@{ catalogEntry = $catalogUrl }
+            }
+            # Otherwise it must be the catalog entry follow-up fetch.
+            $obj = [ordered]@{}
+            if (-not $skipHash) { $obj.packageHash          = $hash }
+            if (-not $skipAlgo) { $obj.packageHashAlgorithm = $algo }
+            return [pscustomobject]$obj
+        }.GetNewClosure()
+    }
 }
 
 Describe 'Invoke-DotnetToolAcquisition' {
@@ -139,12 +187,7 @@ Describe 'Invoke-DotnetToolAcquisition' {
             Mock Test-Path                { return $false }
             Mock Get-FileHash             { return [pscustomobject]@{ Hash = $script:KnownHashHex } }
             Mock Invoke-WebRequest        { }
-            Mock Invoke-RestMethod        {
-                return [pscustomobject]@{
-                    packageHash          = $script:KnownHashBase64
-                    packageHashAlgorithm = 'SHA512'
-                }
-            }
+            Mock Invoke-RestMethod (New-RestMethodMockScript)
             Mock Invoke-DotnetNugetVerify { return [pscustomobject]@{ ExitCode = 0; Output = '' } }
             Mock Move-Item                { }
             Mock Set-Content              { }
@@ -175,12 +218,7 @@ Describe 'Invoke-DotnetToolAcquisition' {
             Mock Test-Path                { return $false }
             Mock Get-FileHash             { return [pscustomobject]@{ Hash = $script:KnownHashHex } }
             Mock Invoke-WebRequest        { }
-            Mock Invoke-RestMethod        {
-                return [pscustomobject]@{
-                    packageHash          = $script:KnownHashBase64
-                    packageHashAlgorithm = 'SHA512'
-                }
-            }
+            Mock Invoke-RestMethod (New-RestMethodMockScript)
             Mock Invoke-DotnetNugetVerify { return [pscustomobject]@{ ExitCode = 0; Output = '' } }
             Mock Move-Item                { }
             Mock Set-Content              { }
@@ -204,12 +242,7 @@ Describe 'Invoke-DotnetToolAcquisition' {
             # File hashes to something else than what registration says.
             Mock Get-FileHash             { return [pscustomobject]@{ Hash = ('BB' * 64) } }
             Mock Invoke-WebRequest        { }
-            Mock Invoke-RestMethod        {
-                return [pscustomobject]@{
-                    packageHash          = $script:KnownHashBase64
-                    packageHashAlgorithm = 'SHA512'
-                }
-            }
+            Mock Invoke-RestMethod (New-RestMethodMockScript)
             Mock Invoke-DotnetNugetVerify { throw 'must not verify on hash mismatch' }
             Mock Set-Content              { }
             Mock Move-Item                { }
@@ -234,16 +267,14 @@ Describe 'Invoke-DotnetToolAcquisition' {
     }
 
     # ------------------------------------------------------------------
-    Context 'registration metadata missing packageHash' {
+    Context 'catalog entry missing packageHash' {
     # ------------------------------------------------------------------
 
         It 'throws with a diagnostic naming the package' {
             Mock Test-Path         { return $false }
             Mock Get-FileHash      { return [pscustomobject]@{ Hash = $script:KnownHashHex } }
             Mock Invoke-WebRequest { }
-            Mock Invoke-RestMethod {
-                return [pscustomobject]@{ packageHashAlgorithm = 'SHA512' }
-            }
+            Mock Invoke-RestMethod (New-RestMethodMockScript -OmitCatalogHash)
             Mock Remove-Item       { }
             Mock Set-Content       { }
 
@@ -256,6 +287,29 @@ Describe 'Invoke-DotnetToolAcquisition' {
     }
 
     # ------------------------------------------------------------------
+    Context 'registration leaf missing catalogEntry URL' {
+    # ------------------------------------------------------------------
+
+        It 'throws with a diagnostic naming the registration URL, no catalog fetch' {
+            Mock Test-Path         { return $false }
+            Mock Get-FileHash      { return [pscustomobject]@{ Hash = $script:KnownHashHex } }
+            Mock Invoke-WebRequest { }
+            Mock Invoke-RestMethod (New-RestMethodMockScript -OmitCatalogEntryUrl)
+            Mock Remove-Item       { }
+            Mock Set-Content       { }
+
+            $vm = New-TestVm -Tools @((New-ToolEntry 'pkg.a' '1.0.0'))
+            { Invoke-DotnetToolAcquisition -Vm $vm -CacheDir 'C:\VHDs' } |
+                Should -Throw -ExpectedMessage '*registration5-semver1*missing a catalogEntry URL*'
+
+            # Only the registration call should have fired; the catalog
+            # fetch must not be issued when the URL is unavailable.
+            Should -Invoke Invoke-RestMethod -Times 1
+            Should -Invoke Set-Content       -Times 0
+        }
+    }
+
+    # ------------------------------------------------------------------
     Context 'dotnet nuget verify non-zero exit' {
     # ------------------------------------------------------------------
 
@@ -263,12 +317,7 @@ Describe 'Invoke-DotnetToolAcquisition' {
             Mock Test-Path                { return $false }
             Mock Get-FileHash             { return [pscustomobject]@{ Hash = $script:KnownHashHex } }
             Mock Invoke-WebRequest        { }
-            Mock Invoke-RestMethod        {
-                return [pscustomobject]@{
-                    packageHash          = $script:KnownHashBase64
-                    packageHashAlgorithm = 'SHA512'
-                }
-            }
+            Mock Invoke-RestMethod (New-RestMethodMockScript)
             Mock Invoke-DotnetNugetVerify {
                 return [pscustomobject]@{
                     ExitCode = 1
@@ -296,12 +345,7 @@ Describe 'Invoke-DotnetToolAcquisition' {
             Mock Test-Path                { return $false }
             Mock Get-FileHash             { return [pscustomobject]@{ Hash = $script:KnownHashHex } }
             Mock Invoke-WebRequest        { }
-            Mock Invoke-RestMethod        {
-                return [pscustomobject]@{
-                    packageHash          = $script:KnownHashBase64
-                    packageHashAlgorithm = 'SHA512'
-                }
-            }
+            Mock Invoke-RestMethod (New-RestMethodMockScript)
             Mock Invoke-DotnetNugetVerify { return [pscustomobject]@{ ExitCode = 0; Output = '' } }
             Mock Set-Content              { }
             Mock Move-Item                { }

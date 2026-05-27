@@ -359,11 +359,24 @@ mocked HTTP surface before any VM-side code depends on it.
     registration metadata; lockfile written; verifier invoked with
     the trusted-signers config.
   - SHA-512 mismatch: throws; no lockfile written; temp file removed.
-  - Registration metadata missing `packageHash`: throws with a
-    diagnostic naming the package.
+  - Catalog entry missing `packageHash`: throws with a diagnostic
+    naming the package.
+  - Registration leaf missing the `catalogEntry` URL: throws without
+    making the second HTTP call.
   - `dotnet nuget verify` non-zero: throws and surfaces the verifier
     stderr.
   - Stamping is additive across multiple entries (one VM, two tools).
+
+> **Amendment landed during Step 7's live coverage.** The original
+> draft of this step read `packageHash` / `packageHashAlgorithm` from
+> the top level of the registration leaf response. NuGet v3 actually
+> returns `catalogEntry` as a STRING URL there; the hash fields live
+> in the document at that URL, so the acquirer now makes a second
+> `Invoke-RestMethod` call to follow `catalogEntry` before reading
+> the hashes. The "missing packageHash" test became "catalog entry
+> missing packageHash" and a new "registration leaf missing
+> catalogEntry URL" test was added; the rest of the step is
+> unchanged.
 
 **Behaviour** All work is on the host. No SSH. The script is safe to
 call when `dotnetTools` is absent / empty (early return, same shape

@@ -21,9 +21,11 @@
 #        into a sibling temp file under $CacheDir, then fetches the
 #        registration leaf metadata at
 #          https://api.nuget.org/v3/registration5-semver1/{idLower}/{version}.json
-#        and pulls `packageHash` (SHA-512) + `packageHashAlgorithm` from
-#        the response. Missing fields throw - the registration is the
-#        authoritative pin source.
+#        and follows its `catalogEntry` URL to the per-version catalog
+#        entry, which is where NuGet v3 actually carries `packageHash`
+#        (SHA-512) + `packageHashAlgorithm`. Either hop missing or the
+#        catalog entry lacking the hash fields throws - the catalog
+#        entry is the authoritative pin source.
 #     4. Verifies the downloaded file's SHA-512 against the registration
 #        hash. Mismatch throws naming both hashes and removes the temp
 #        file so the next run is a fresh cache miss.
@@ -130,9 +132,14 @@ function Invoke-DotnetToolAcquisition {
                 }
 
             # ----------------------------------------------------------
-            # Registration leaf carries the authoritative SHA-512 and
-            # algorithm name. Both fields are required; absence is a
-            # protocol error, not a transient failure.
+            # Registration leaf -> catalogEntry URL -> SHA-512 + algorithm.
+            #
+            # NuGet v3's registration5-semver1 leaf returns a wrapper
+            # document whose `catalogEntry` is a STRING URL (not an
+            # inlined object) pointing at the per-version catalog entry
+            # that actually carries `packageHash` /
+            # `packageHashAlgorithm`. Both hops are required; either
+            # missing is a protocol error, not a transient failure.
             # ----------------------------------------------------------
             $registrationUrl =
                 "https://api.nuget.org/v3/registration5-semver1/$idLower/$version.json"
@@ -145,16 +152,36 @@ function Invoke-DotnetToolAcquisition {
 
             # Probe via PSObject.Properties so a missing field reads as
             # $null instead of throwing under StrictMode.
-            $hashProp = $registration.PSObject.Properties['packageHash']
-            $algoProp = $registration.PSObject.Properties['packageHashAlgorithm']
+            $catalogEntryProp = $registration.PSObject.Properties['catalogEntry']
+            $catalogEntryUrl  = if ($catalogEntryProp) {
+                [string]$catalogEntryProp.Value
+            } else { $null }
+            if ([string]::IsNullOrEmpty($catalogEntryUrl)) {
+                Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
+                throw (
+                    "Registration metadata for '$id@$version' at " +
+                    "'$registrationUrl' is missing a catalogEntry URL. " +
+                    "Cannot resolve packageHash."
+                )
+            }
+
+            $catalogEntry = Invoke-WithRetry `
+                -OperationName ".NET tool catalog entry ($id@$version)" `
+                -RetryStrategy (New-TransientNetworkRetryStrategy) `
+                -ScriptBlock {
+                    Invoke-RestMethod -Uri $catalogEntryUrl -UseBasicParsing
+                }
+
+            $hashProp = $catalogEntry.PSObject.Properties['packageHash']
+            $algoProp = $catalogEntry.PSObject.Properties['packageHashAlgorithm']
             $expectedHash = if ($hashProp) { $hashProp.Value } else { $null }
             $hashAlgo     = if ($algoProp) { $algoProp.Value } else { $null }
             if ([string]::IsNullOrEmpty($expectedHash) -or
                 [string]::IsNullOrEmpty($hashAlgo)) {
                 Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
                 throw (
-                    "Registration metadata for '$id@$version' at " +
-                    "'$registrationUrl' is missing packageHash or " +
+                    "Catalog entry for '$id@$version' at " +
+                    "'$catalogEntryUrl' is missing packageHash or " +
                     "packageHashAlgorithm. Cannot verify download."
                 )
             }
