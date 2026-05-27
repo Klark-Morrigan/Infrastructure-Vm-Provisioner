@@ -120,7 +120,40 @@ function Install-DotnetSdkVersion {
         -Path      $linkPath `
         -Target    $linkTarget
 
-    # Step 4 - manifest, written LAST. See the function header for why
+    # Step 4 - /etc/dotnet/install_location. The dotnet apphost (the
+    # tiny native binary every `dotnet tool install` shim is built
+    # around) probes for the .NET runtime in this fixed order:
+    # DOTNET_ROOT env var, then a Microsoft-baked default that points
+    # at /usr/share/dotnet, then /etc/dotnet/install_location. Because
+    # we install to /opt/dotnet-<version> (not the baked default) AND
+    # DOTNET_ROOT is only set in login shells (profile.d), a global
+    # tool invoked from a non-login shell (sshd command exec, systemd
+    # units, cron) has no way to find the runtime - which surfaces as
+    # "You must install .NET to run this application" on first tool
+    # invocation. Writing the install path here is Microsoft's
+    # documented escape hatch and works regardless of shell type.
+    # Path is fixed (one global SDK install per VM); uninstall removes
+    # the file in lockstep.
+    $installLocationScript = @"
+set -euo pipefail
+sudo mkdir -p /etc/dotnet
+printf '%s\n' '$installDir' | sudo tee /etc/dotnet/install_location > /dev/null
+sudo chmod 0644 /etc/dotnet/install_location
+"@ -replace "`r`n", "`n"
+
+    $installLocationResult = Invoke-SshClientCommand `
+                                -SshClient $SshClient `
+                                -Command   $installLocationScript
+    if ($installLocationResult.ExitStatus -ne 0) {
+        throw (
+            "Install-DotnetSdkVersion: writing /etc/dotnet/install_location " +
+            "failed (exit $($installLocationResult.ExitStatus)). " +
+            "stdout: $($installLocationResult.Output)  " +
+            "stderr: $($installLocationResult.Error)"
+        )
+    }
+
+    # Step 5 - manifest, written LAST. See the function header for why
     # the ordering matters. ownedPaths[0] is the install dir; the
     # Get-DotnetSdkInstalledVersions reader assumes this invariant when
     # projecting the manifest into an Installed record.

@@ -12,6 +12,7 @@ BeforeAll {
     function Remove-VmProfileDScript     { param($SshClient, $Name) }
     function Remove-VmDirectory          { param($SshClient, $Path) }
     function Remove-VmManifest           { param($SshClient, $Path) }
+    function Invoke-SshClientCommand     { param($SshClient, $Command) }
 
     # ConvertTo-Array ships in Infrastructure.Common in production. The
     # SUT relies on it to keep the manifest sub-arrays array-shaped.
@@ -72,6 +73,9 @@ Describe 'Uninstall-DotnetSdkVersion' {
         Mock Remove-VmProfileDScript   { }
         Mock Remove-VmDirectory        { }
         Mock Remove-VmManifest         { }
+        Mock Invoke-SshClientCommand   {
+            return [pscustomobject]@{ ExitStatus = 0; Output = ''; Error = '' }
+        }
     }
 
     # ----------------------------------------------------------------------
@@ -129,6 +133,20 @@ Describe 'Uninstall-DotnetSdkVersion' {
             }
         }
 
+        It 'removes /etc/dotnet/install_location (the apphost runtime-discovery hint)' {
+            # Symmetric to Install-Version's install_location write. A
+            # leftover file would point the apphost at the now-gone
+            # /opt/dotnet-<version> dir and break tool shims that try
+            # to launch the runtime from a non-login shell.
+            Uninstall-DotnetSdkVersion `
+                -SshClient $script:FakeSshClient `
+                -Installed (New-Installed)
+
+            Should -Invoke Invoke-SshClientCommand -Times 1 -Exactly -ParameterFilter {
+                $Command -match 'rm -f /etc/dotnet/install_location'
+            }
+        }
+
         It 'removes the manifest last' {
             Uninstall-DotnetSdkVersion `
                 -SshClient $script:FakeSshClient `
@@ -166,16 +184,20 @@ Describe 'Uninstall-DotnetSdkVersion' {
     Context 'ordering and crash safety' {
     # ----------------------------------------------------------------------
 
-        It 'tears down in order: processes -> symlinks -> profile.d -> dirs -> manifest' {
+        It 'tears down in order: processes -> symlinks -> profile.d -> install_location -> dirs -> manifest' {
             # Manifest LAST so a crash mid-uninstall leaves the manifest
             # claiming ownership of whatever wreckage remains, and the
             # next reconciler run can replay the whole teardown.
             $script:callOrder = New-Object System.Collections.Generic.List[string]
-            Mock Stop-VmProcessesUsingPath { $script:callOrder.Add('stop')      }
-            Mock Remove-VmSymlink          { $script:callOrder.Add('symlink')   }
-            Mock Remove-VmProfileDScript   { $script:callOrder.Add('profile.d') }
-            Mock Remove-VmDirectory        { $script:callOrder.Add('dir')       }
-            Mock Remove-VmManifest         { $script:callOrder.Add('manifest')  }
+            Mock Stop-VmProcessesUsingPath { $script:callOrder.Add('stop')             }
+            Mock Remove-VmSymlink          { $script:callOrder.Add('symlink')          }
+            Mock Remove-VmProfileDScript   { $script:callOrder.Add('profile.d')        }
+            Mock Invoke-SshClientCommand   {
+                $script:callOrder.Add('install_location')
+                return [pscustomobject]@{ ExitStatus = 0; Output = ''; Error = '' }
+            }
+            Mock Remove-VmDirectory        { $script:callOrder.Add('dir')              }
+            Mock Remove-VmManifest         { $script:callOrder.Add('manifest')         }
 
             Uninstall-DotnetSdkVersion `
                 -SshClient $script:FakeSshClient `
@@ -188,11 +210,13 @@ Describe 'Uninstall-DotnetSdkVersion' {
             $stopIdx     = $script:callOrder.IndexOf('stop')
             $firstSym    = $script:callOrder.IndexOf('symlink')
             $profIdx     = $script:callOrder.IndexOf('profile.d')
+            $locIdx      = $script:callOrder.IndexOf('install_location')
             $dirIdx      = $script:callOrder.IndexOf('dir')
 
             ($firstSym -gt $stopIdx)  | Should -BeTrue
             ($profIdx  -gt $firstSym) | Should -BeTrue
-            ($dirIdx   -gt $profIdx)  | Should -BeTrue
+            ($locIdx   -gt $profIdx)  | Should -BeTrue
+            ($dirIdx   -gt $locIdx)   | Should -BeTrue
         }
 
         It 'swallows a StillAlive throw from Stop-VmProcessesUsingPath and keeps tearing down' {
@@ -211,6 +235,7 @@ Describe 'Uninstall-DotnetSdkVersion' {
 
             Should -Invoke Remove-VmSymlink        -Times 1 -Exactly
             Should -Invoke Remove-VmProfileDScript -Times 1 -Exactly
+            Should -Invoke Invoke-SshClientCommand -Times 1 -Exactly
             Should -Invoke Remove-VmDirectory      -Times 1 -Exactly
             Should -Invoke Remove-VmManifest       -Times 1 -Exactly
         }
@@ -245,6 +270,7 @@ Describe 'Uninstall-DotnetSdkVersion' {
             Should -Not -Invoke Stop-VmProcessesUsingPath
             Should -Not -Invoke Remove-VmSymlink
             Should -Not -Invoke Remove-VmProfileDScript
+            Should -Not -Invoke Invoke-SshClientCommand
             Should -Not -Invoke Remove-VmDirectory
             Should -Not -Invoke Remove-VmManifest
         }

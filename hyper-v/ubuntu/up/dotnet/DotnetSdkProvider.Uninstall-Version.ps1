@@ -110,6 +110,27 @@ function Uninstall-DotnetSdkVersion {
         Remove-VmProfileDScript -SshClient $SshClient -Name $scriptName
     }
 
+    # Step 3.5 - /etc/dotnet/install_location. Symmetric to the install
+    # path's step 4: the file is the apphost's runtime-discovery hint for
+    # non-login shells and must go away when the SDK does, otherwise
+    # tool shims keep pointing at a now-deleted install dir. The path
+    # is fixed (one global SDK install per VM); only the file is
+    # removed, not the parent /etc/dotnet/ dir (other tooling may
+    # share that directory). rm -f tolerates the file already being
+    # absent so a partial-uninstall replay does not throw here.
+    $installLocationCleanup = "sudo rm -f /etc/dotnet/install_location"
+    $cleanupResult = Invoke-SshClientCommand `
+                        -SshClient $SshClient `
+                        -Command   $installLocationCleanup
+    if ($cleanupResult.ExitStatus -ne 0) {
+        throw (
+            "Uninstall-DotnetSdkVersion: removing /etc/dotnet/install_location " +
+            "failed (exit $($cleanupResult.ExitStatus)). " +
+            "stdout: $($cleanupResult.Output)  " +
+            "stderr: $($cleanupResult.Error)"
+        )
+    }
+
     # Step 4 - install dir(s). Heavy step that may legitimately fail
     # (a stuck process, a read-only mount); propagating that failure
     # keeps the manifest in place for the next reconciler run.

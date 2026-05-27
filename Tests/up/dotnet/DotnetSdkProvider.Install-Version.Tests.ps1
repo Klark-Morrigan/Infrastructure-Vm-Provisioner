@@ -5,10 +5,11 @@ BeforeAll {
     # each is exercised by its own test suite, so this file only
     # verifies orchestration (order, arg flow, manifest shape,
     # fail-fast on extract / symlink failure).
-    function Expand-VmTarball     { param($SshClient, $Server, $TarballPath, $Destination, $StripComponents) }
-    function Set-VmProfileDScript { param($SshClient, $Name, $Content) }
-    function New-VmSymlink        { param($SshClient, $Path, $Target) }
-    function Write-VmManifest     { param($SshClient, $Manifest) }
+    function Expand-VmTarball      { param($SshClient, $Server, $TarballPath, $Destination, $StripComponents) }
+    function Set-VmProfileDScript  { param($SshClient, $Name, $Content) }
+    function New-VmSymlink         { param($SshClient, $Path, $Target) }
+    function Write-VmManifest      { param($SshClient, $Manifest) }
+    function Invoke-SshClientCommand { param($SshClient, $Command) }
 
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\dotnet\DotnetSdkProvider.Install-Version.ps1"
 
@@ -29,10 +30,13 @@ BeforeAll {
 Describe 'Install-DotnetSdkVersion' {
 
     BeforeEach {
-        Mock Expand-VmTarball     { }
-        Mock Set-VmProfileDScript { }
-        Mock New-VmSymlink        { }
-        Mock Write-VmManifest     { }
+        Mock Expand-VmTarball       { }
+        Mock Set-VmProfileDScript   { }
+        Mock New-VmSymlink          { }
+        Mock Write-VmManifest       { }
+        Mock Invoke-SshClientCommand {
+            return [pscustomobject]@{ ExitStatus = 0; Output = ''; Error = '' }
+        }
     }
 
     # ----------------------------------------------------------------------
@@ -131,6 +135,46 @@ Describe 'Install-DotnetSdkVersion' {
             }
         }
 
+        It 'writes /etc/dotnet/install_location with the SDK install dir for non-login apphost discovery' {
+            # The dotnet apphost (the tiny launcher inside every global
+            # tool shim) probes DOTNET_ROOT -> /usr/share/dotnet ->
+            # /etc/dotnet/install_location. Because we install to
+            # /opt/dotnet-<version> and DOTNET_ROOT is login-shell-only,
+            # the install_location file is what lets a non-login
+            # invocation (sshd command exec, systemd unit, cron) find
+            # the runtime. A regression that drops the write would
+            # surface as "You must install .NET" on the first tool run.
+            Install-DotnetSdkVersion `
+                -SshClient $script:FakeSshClient `
+                -Server    $script:FakeServer `
+                -Spec      (New-DotnetSpec)
+
+            Should -Invoke Invoke-SshClientCommand -Times 1 -Exactly -ParameterFilter {
+                $Command -match 'mkdir -p /etc/dotnet'           -and
+                $Command -match '/etc/dotnet/install_location'   -and
+                $Command -match '/opt/dotnet-10\.0\.100'         -and
+                $Command -match 'chmod 0644 /etc/dotnet/install_location'
+            }
+        }
+
+        It 'throws when writing /etc/dotnet/install_location fails, no manifest written' {
+            Mock Invoke-SshClientCommand {
+                return [pscustomobject]@{
+                    ExitStatus = 1
+                    Output     = ''
+                    Error      = 'tee: /etc/dotnet/install_location: Permission denied'
+                }
+            }
+
+            { Install-DotnetSdkVersion `
+                -SshClient $script:FakeSshClient `
+                -Server    $script:FakeServer `
+                -Spec      (New-DotnetSpec) } |
+                Should -Throw -ExpectedMessage '*install_location*Permission denied*'
+
+            Should -Not -Invoke Write-VmManifest
+        }
+
         It 'records the created symlink under ownedSymlinks (path + target)' {
             Install-DotnetSdkVersion `
                 -SshClient $script:FakeSshClient `
@@ -149,16 +193,20 @@ Describe 'Install-DotnetSdkVersion' {
     Context 'ordering and crash safety' {
     # ----------------------------------------------------------------------
 
-        It 'writes the manifest LAST (after extract, profile.d, and symlink)' {
+        It 'writes the manifest LAST (after extract, profile.d, symlink, and install_location)' {
             # A manifest written before the side effects would lie about
             # ownership if the install crashes mid-flight; the next run
             # would treat half-installed state as owned and try to clean
             # it up rather than re-running the extract.
             $script:callOrder = New-Object System.Collections.Generic.List[string]
-            Mock Expand-VmTarball     { $script:callOrder.Add('extract')   }
-            Mock Set-VmProfileDScript { $script:callOrder.Add('profile.d') }
-            Mock New-VmSymlink        { $script:callOrder.Add('symlink')   }
-            Mock Write-VmManifest     { $script:callOrder.Add('manifest')  }
+            Mock Expand-VmTarball        { $script:callOrder.Add('extract')          }
+            Mock Set-VmProfileDScript    { $script:callOrder.Add('profile.d')        }
+            Mock New-VmSymlink           { $script:callOrder.Add('symlink')          }
+            Mock Invoke-SshClientCommand {
+                $script:callOrder.Add('install_location')
+                return [pscustomobject]@{ ExitStatus = 0; Output = ''; Error = '' }
+            }
+            Mock Write-VmManifest        { $script:callOrder.Add('manifest')         }
 
             Install-DotnetSdkVersion `
                 -SshClient $script:FakeSshClient `
@@ -168,6 +216,7 @@ Describe 'Install-DotnetSdkVersion' {
             $script:callOrder[0]                           | Should -Be 'extract'
             $script:callOrder[1]                           | Should -Be 'profile.d'
             $script:callOrder[2]                           | Should -Be 'symlink'
+            $script:callOrder[3]                           | Should -Be 'install_location'
             $script:callOrder[$script:callOrder.Count - 1] | Should -Be 'manifest'
         }
 
