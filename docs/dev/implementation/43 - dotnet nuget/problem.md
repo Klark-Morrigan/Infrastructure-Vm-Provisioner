@@ -130,12 +130,11 @@ flowchart LR
 1. Host-side acquirer `up/dotnet/Invoke-DotnetToolAcquisition.ps1`
    downloads `https://www.nuget.org/api/v2/package/{id}/{version}`,
    verifies the package's SHA-512 against `nuget.org`'s registration
-   metadata, then verifies the **nuget.org repo countersignature** via
-   `dotnet nuget verify` against a pinned trusted-signer entry for the
-   nuget.org repo certificate, and writes it to
+   metadata (catalog entry), and writes it to
    `vhdPath/dotnet-tool-{id}-{version}.nupkg` plus a sidecar
-   `dotnet-tool-{id}-{version}.lock.json`. Author-signature
-   verification is deferred (see [Decisions Locked In](#decisions-locked-in)).
+   `dotnet-tool-{id}-{version}.lock.json`. Signature verification is
+   intentionally NOT performed - see
+   [Decisions Locked In](#decisions-locked-in), decision 2.
 2. The cached `.nupkg`(s) are streamed to a VM-side staging dir via
    the existing host file server + SSH path used by `Install-Jdk` and
    the new `Install-DotnetSdk`.
@@ -314,15 +313,18 @@ sequenceDiagram
    entry must be an object with both `id` and `version`. No
    shorthand `"id@version"` string form. Matches the verbosity bar
    `javaDevKit` already set, keeps the parser single-path.
-2. **Signature verification - repo countersignature in v1, author
-   signature deferred.** Every package on `nuget.org` is
-   repo-countersigned with a single well-known Microsoft cert, so
-   `dotnet nuget verify` against one pinned trusted-signer entry
-   gives uniform "served by nuget.org, untampered" coverage for free
-   - strictly stronger than the SHA-512-from-registration check
-   alone (which is also fetched from nuget.org and so trusts the
-   same endpoint). Author-signature verification needs a per-author
-   trust policy and is out of scope for v1.
+2. **Signature verification - not performed; SHA-512 from the
+   catalog entry plus TLS is the integrity boundary.** Both the
+   `.nupkg` and the catalog entry are fetched from `nuget.org` over
+   TLS, so verifying the repo countersignature against a fingerprint
+   *also* sourced from `nuget.org` is circular - it adds compute but
+   not a fresh trust boundary. A real "second trust path" check
+   (sigstore-style transparency log, OS cert store, or an
+   independently-mirrored fingerprint feed) would be worth wiring
+   up; pinning-from-the-same-vendor is not, and Microsoft's
+   rotation cadence would turn it into a hand-maintenance tax on
+   top. Author-signature verification stays out of scope for the
+   same reason: it does not change the trust boundary either.
 3. **`/usr/local/bin/<tool>` names - derived, not declared.** After
    install, enumerate command names via `dotnet tool list
    --tool-path /usr/local/share/dotnet/tools/` and create one

@@ -26,16 +26,15 @@
 #        (SHA-512) + `packageHashAlgorithm`. Either hop missing or the
 #        catalog entry lacking the hash fields throws - the catalog
 #        entry is the authoritative pin source.
-#     4. Verifies the downloaded file's SHA-512 against the registration
+#     4. Verifies the downloaded file's SHA-512 against the catalog
 #        hash. Mismatch throws naming both hashes and removes the temp
-#        file so the next run is a fresh cache miss.
-#     5. Verifies the nuget.org repo countersignature by invoking
-#          dotnet nuget verify --all --configfile <pinned config>
-#        against the trusted-signers config checked in alongside this
-#        script. Non-zero exit throws and surfaces the verifier stderr.
-#     6. Atomically renames the temp file into the final cache path and
+#        file so the next run is a fresh cache miss. Signature
+#        verification is intentionally NOT performed - see problem.md
+#        decision 2 for why pinning a fingerprint from the same vendor
+#        does not add a fresh trust boundary on top of SHA-512 + TLS.
+#     5. Atomically renames the temp file into the final cache path and
 #        writes the lockfile sidecar (schema below).
-#     7. Stamps $Vm._dotnetToolNupkgPaths (a hashtable keyed by
+#     6. Stamps $Vm._dotnetToolNupkgPaths (a hashtable keyed by
 #        "{id}@{version}") with the absolute cache path so the
 #        DotnetToolsProvider in Phase B can stream the bytes to the VM
 #        without re-acquiring.
@@ -71,12 +70,6 @@ function Invoke-DotnetToolAcquisition {
 
     Write-Host ""
     Write-Host "--- .NET tools acquisition: $($Vm.vmName) ---" -ForegroundColor Cyan
-
-    # ------------------------------------------------------------------
-    # Path to the pinned trusted-signers config. Resolved once - the
-    # config is checked in next to this script.
-    # ------------------------------------------------------------------
-    $trustedSignersConfig = Join-Path $PSScriptRoot 'nuget-trusted-signers.config'
 
     # ------------------------------------------------------------------
     # Append-style stamp across entries. If the property is already set
@@ -211,24 +204,6 @@ function Invoke-DotnetToolAcquisition {
             }
 
             # ----------------------------------------------------------
-            # Repo countersignature check. Author signatures are out of
-            # scope for v1 (problem.md decision 2). --configfile pins
-            # the trust policy to the checked-in fingerprint so the
-            # verifier cannot fall back to a host-level config.
-            # ----------------------------------------------------------
-            $verifyResult = Invoke-DotnetNugetVerify `
-                                -NupkgPath  $tempPath `
-                                -ConfigPath $trustedSignersConfig
-            if ($verifyResult.ExitCode -ne 0) {
-                Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
-                throw (
-                    "dotnet nuget verify failed for '$id@$version' (exit " +
-                    "$($verifyResult.ExitCode)). Verifier output: " +
-                    $verifyResult.Output
-                )
-            }
-
-            # ----------------------------------------------------------
             # Commit point. Move-Item -Force on the same volume is the
             # closest PowerShell gets to atomic rename; the temp file
             # lives under $CacheDir so we never cross volumes.
@@ -261,29 +236,6 @@ function Invoke-DotnetToolAcquisition {
 #   returns uppercase hex. This helper bridges the encodings so the
 #   compare in step 4 is a straight string match.
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Invoke-DotnetNugetVerify
-#   Thin wrapper around `dotnet nuget verify` so the acquirer's verify
-#   step is a single mockable function instead of a raw native-exec.
-#   Returns { ExitCode, Output } - the caller decides how to surface
-#   failures.
-# ---------------------------------------------------------------------------
-function Invoke-DotnetNugetVerify {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)] [string] $NupkgPath,
-        [Parameter(Mandatory)] [string] $ConfigPath
-    )
-
-    $output = & dotnet nuget verify $NupkgPath `
-                  --all `
-                  --configfile $ConfigPath 2>&1
-    return [pscustomobject]@{
-        ExitCode = $LASTEXITCODE
-        Output   = ($output -join [Environment]::NewLine)
-    }
-}
-
 function ConvertFrom-NugetHashBase64 {
     [CmdletBinding()]
     param(

@@ -298,13 +298,13 @@ the field is opt-in and requires `dotnetSdk` on the same VM.
 
 ---
 
-## Step 4 - Host-side `.nupkg` acquirer with repo-signature verification
+## Step 4 - Host-side `.nupkg` acquirer with SHA-512 verification
 
 **Reason.** The host is the only machine that talks to `nuget.org`;
 every VM consumes pre-verified bytes from the cache. This step
 delivers the acquirer in isolation so its failure modes (network,
-SHA mismatch, signature mismatch) can be unit-covered against a
-mocked HTTP surface before any VM-side code depends on it.
+SHA mismatch) can be unit-covered against a mocked HTTP surface
+before any VM-side code depends on it.
 
 **Files**
 
@@ -323,15 +323,7 @@ mocked HTTP surface before any VM-side code depends on it.
      Throw if either is missing.
   5. Verify the temp file's SHA-512 against the registration hash.
      Throw with both hashes on mismatch.
-  6. Verify the package's nuget.org repo countersignature by invoking
-     `dotnet nuget verify --all` against a pinned trusted-signer
-     config file checked in alongside this script
-     (`up/dotnet/nuget-trusted-signers.config`), which contains
-     exactly one `<repository>` entry for the nuget.org repo cert
-     fingerprint. Non-zero exit throws with the verifier's stderr.
-     Author-signature verification is **not** requested (deferred per
-     problem.md decision 2).
-  7. Atomically rename the temp file into the final cache path and
+  6. Atomically rename the temp file into the final cache path and
      write the lockfile:
      ```json
      {
@@ -343,47 +335,27 @@ mocked HTTP surface before any VM-side code depends on it.
        "acquiredAt":    "ISO-8601 UTC"
      }
      ```
-  8. Stamp `$Vm._dotnetToolNupkgPaths` (hashtable: `{id}@{version}` ->
+  7. Stamp `$Vm._dotnetToolNupkgPaths` (hashtable: `{id}@{version}` ->
      absolute `.nupkg` path) via `Add-Member`, append-style across
      entries. The reconciler's provider reads these paths the same
      way the SDK provider reads `$Vm._dotnetSdkTarballPath`.
-- `hyper-v/ubuntu/up/dotnet/nuget-trusted-signers.config` (new) -
-  minimal NuGet config with one `<trustedSigners><repository>` entry
-  for nuget.org. Pinned fingerprint, sourced from
-  `https://learn.microsoft.com/nuget/reference/signed-packages-reference`
-  and recorded in a comment naming the source URL and check date.
 - `Tests/up/dotnet/Invoke-DotnetToolAcquisition.Tests.ps1` (new):
   - Cache hit (lockfile + `.nupkg` SHA match): no HTTP calls; state
     stamped correctly.
   - Cache miss happy path: HTTP mocked to return a fixture nupkg and
-    registration metadata; lockfile written; verifier invoked with
-    the trusted-signers config.
+    catalog entry; lockfile written.
   - SHA-512 mismatch: throws; no lockfile written; temp file removed.
   - Catalog entry missing `packageHash`: throws with a diagnostic
     naming the package.
   - Registration leaf missing the `catalogEntry` URL: throws without
     making the second HTTP call.
-  - `dotnet nuget verify` non-zero: throws and surfaces the verifier
-    stderr.
   - Stamping is additive across multiple entries (one VM, two tools).
-
-> **Amendment landed during Step 7's live coverage.** The original
-> draft of this step read `packageHash` / `packageHashAlgorithm` from
-> the top level of the registration leaf response. NuGet v3 actually
-> returns `catalogEntry` as a STRING URL there; the hash fields live
-> in the document at that URL, so the acquirer now makes a second
-> `Invoke-RestMethod` call to follow `catalogEntry` before reading
-> the hashes. The "missing packageHash" test became "catalog entry
-> missing packageHash" and a new "registration leaf missing
-> catalogEntry URL" test was added; the rest of the step is
-> unchanged.
 
 **Behaviour** All work is on the host. No SSH. The script is safe to
 call when `dotnetTools` is absent / empty (early return, same shape
 as `Invoke-DotnetSdkAcquisition`).
 
-**Tests (unit)** As enumerated; HTTP and `dotnet nuget verify` are
-mocked.
+**Tests (unit)** As enumerated; HTTP is mocked.
 
 **Mermaid**
 
@@ -394,18 +366,16 @@ sequenceDiagram
     participant Acq as Invoke-DotnetToolAcquisition
     participant Cache as vhdPath cache
     participant Nu as nuget.org
-    participant Verify as dotnet nuget verify
 
     Prov->>Acq: each dotnetTools entry
     Acq->>Cache: lockfile + nupkg present, SHA matches?
     alt cache hit
         Cache-->>Acq: yes
     else cache miss
-        Acq->>Nu: GET .nupkg + registration metadata
-        Nu-->>Acq: bytes + packageHash
+        Acq->>Nu: GET .nupkg
+        Acq->>Nu: GET registration leaf -> catalogEntry URL
+        Acq->>Nu: GET catalog entry -> packageHash
         Acq->>Acq: verify SHA-512
-        Acq->>Verify: --all with pinned repo signer
-        Verify-->>Acq: exit 0
         Acq->>Cache: write .nupkg + lockfile
     end
     Acq->>Prov: stamp $Vm._dotnetToolNupkgPaths

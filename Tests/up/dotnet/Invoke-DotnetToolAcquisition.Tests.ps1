@@ -118,16 +118,14 @@ Describe 'Invoke-DotnetToolAcquisition' {
     # ------------------------------------------------------------------
 
         It 'returns silently when the field is absent' {
-            Mock Invoke-WebRequest        { throw 'must not be called' }
-            Mock Invoke-RestMethod        { throw 'must not be called' }
-            Mock Invoke-DotnetNugetVerify { throw 'must not be called' }
+            Mock Invoke-WebRequest { throw 'must not be called' }
+            Mock Invoke-RestMethod { throw 'must not be called' }
 
             $vm = [PSCustomObject]@{ vmName = 'node-01'; vhdPath = 'C:\VHDs' }
             Invoke-DotnetToolAcquisition -Vm $vm -CacheDir 'C:\VHDs'
 
-            Should -Invoke Invoke-WebRequest        -Times 0
-            Should -Invoke Invoke-RestMethod        -Times 0
-            Should -Invoke Invoke-DotnetNugetVerify -Times 0
+            Should -Invoke Invoke-WebRequest -Times 0
+            Should -Invoke Invoke-RestMethod -Times 0
             $vm.PSObject.Properties['_dotnetToolNupkgPaths'] | Should -BeNullOrEmpty
         }
 
@@ -154,25 +152,23 @@ Describe 'Invoke-DotnetToolAcquisition' {
     Context 'cache hit: lockfile + nupkg present, SHA matches' {
     # ------------------------------------------------------------------
 
-        It 'skips download / registration / verify and stamps the path' {
-            Mock Test-Path                { return $true }
-            Mock Get-Content              {
+        It 'skips download / catalog fetch and stamps the path' {
+            Mock Test-Path         { return $true }
+            Mock Get-Content       {
                 return (New-LockJson -Id 'pkg.a' -Version '1.0.0' -Sha512 $script:KnownHashHex)
             }
-            Mock Get-FileHash             { return [pscustomobject]@{ Hash = $script:KnownHashHex } }
-            Mock Invoke-WebRequest        { throw 'must not download on cache hit' }
-            Mock Invoke-RestMethod        { throw 'must not fetch metadata on cache hit' }
-            Mock Invoke-DotnetNugetVerify { throw 'must not verify on cache hit' }
-            Mock Set-Content              { throw 'must not write lockfile on cache hit' }
-            Mock Move-Item                { throw 'must not move on cache hit' }
+            Mock Get-FileHash      { return [pscustomobject]@{ Hash = $script:KnownHashHex } }
+            Mock Invoke-WebRequest { throw 'must not download on cache hit' }
+            Mock Invoke-RestMethod { throw 'must not fetch metadata on cache hit' }
+            Mock Set-Content       { throw 'must not write lockfile on cache hit' }
+            Mock Move-Item         { throw 'must not move on cache hit' }
 
             $vm = New-TestVm -Tools @((New-ToolEntry 'pkg.a' '1.0.0'))
             Invoke-DotnetToolAcquisition -Vm $vm -CacheDir 'C:\VHDs'
 
-            Should -Invoke Invoke-WebRequest        -Times 0
-            Should -Invoke Invoke-RestMethod        -Times 0
-            Should -Invoke Invoke-DotnetNugetVerify -Times 0
-            Should -Invoke Set-Content              -Times 0
+            Should -Invoke Invoke-WebRequest -Times 0
+            Should -Invoke Invoke-RestMethod -Times 0
+            Should -Invoke Set-Content       -Times 0
 
             $vm._dotnetToolNupkgPaths['pkg.a@1.0.0'] |
                 Should -Be 'C:\VHDs\dotnet-tool-pkg.a-1.0.0.nupkg'
@@ -183,15 +179,14 @@ Describe 'Invoke-DotnetToolAcquisition' {
     Context 'cache miss: happy path' {
     # ------------------------------------------------------------------
 
-        It 'downloads, verifies SHA, verifies signature, writes lockfile, stamps path' {
-            Mock Test-Path                { return $false }
-            Mock Get-FileHash             { return [pscustomobject]@{ Hash = $script:KnownHashHex } }
-            Mock Invoke-WebRequest        { }
+        It 'downloads, verifies SHA, writes lockfile, stamps path' {
+            Mock Test-Path         { return $false }
+            Mock Get-FileHash      { return [pscustomobject]@{ Hash = $script:KnownHashHex } }
+            Mock Invoke-WebRequest { }
             Mock Invoke-RestMethod (New-RestMethodMockScript)
-            Mock Invoke-DotnetNugetVerify { return [pscustomobject]@{ ExitCode = 0; Output = '' } }
-            Mock Move-Item                { }
-            Mock Set-Content              { }
-            Mock Remove-Item              { }
+            Mock Move-Item         { }
+            Mock Set-Content       { }
+            Mock Remove-Item       { }
 
             $vm = New-TestVm -Tools @((New-ToolEntry 'pkg.a' '1.0.0'))
             Invoke-DotnetToolAcquisition -Vm $vm -CacheDir 'C:\VHDs'
@@ -201,9 +196,6 @@ Describe 'Invoke-DotnetToolAcquisition' {
             }
             Should -Invoke Invoke-RestMethod -Times 1 -ParameterFilter {
                 $Uri -eq 'https://api.nuget.org/v3/registration5-semver1/pkg.a/1.0.0.json'
-            }
-            Should -Invoke Invoke-DotnetNugetVerify -Times 1 -ParameterFilter {
-                $ConfigPath -match 'nuget-trusted-signers\.config$'
             }
             Should -Invoke Move-Item   -Times 1
             Should -Invoke Set-Content -Times 1 -ParameterFilter {
@@ -215,14 +207,13 @@ Describe 'Invoke-DotnetToolAcquisition' {
         }
 
         It 'lowercases the package id in the registration URL' {
-            Mock Test-Path                { return $false }
-            Mock Get-FileHash             { return [pscustomobject]@{ Hash = $script:KnownHashHex } }
-            Mock Invoke-WebRequest        { }
+            Mock Test-Path         { return $false }
+            Mock Get-FileHash      { return [pscustomobject]@{ Hash = $script:KnownHashHex } }
+            Mock Invoke-WebRequest { }
             Mock Invoke-RestMethod (New-RestMethodMockScript)
-            Mock Invoke-DotnetNugetVerify { return [pscustomobject]@{ ExitCode = 0; Output = '' } }
-            Mock Move-Item                { }
-            Mock Set-Content              { }
-            Mock Remove-Item              { }
+            Mock Move-Item         { }
+            Mock Set-Content       { }
+            Mock Remove-Item       { }
 
             $vm = New-TestVm -Tools @((New-ToolEntry 'Pkg.Mixed.Case' '1.0.0'))
             Invoke-DotnetToolAcquisition -Vm $vm -CacheDir 'C:\VHDs'
@@ -238,15 +229,14 @@ Describe 'Invoke-DotnetToolAcquisition' {
     # ------------------------------------------------------------------
 
         It 'throws naming both hashes, deletes temp file, writes no lockfile' {
-            Mock Test-Path                { return $false }
+            Mock Test-Path         { return $false }
             # File hashes to something else than what registration says.
-            Mock Get-FileHash             { return [pscustomobject]@{ Hash = ('BB' * 64) } }
-            Mock Invoke-WebRequest        { }
+            Mock Get-FileHash      { return [pscustomobject]@{ Hash = ('BB' * 64) } }
+            Mock Invoke-WebRequest { }
             Mock Invoke-RestMethod (New-RestMethodMockScript)
-            Mock Invoke-DotnetNugetVerify { throw 'must not verify on hash mismatch' }
-            Mock Set-Content              { }
-            Mock Move-Item                { }
-            Mock Remove-Item              { }
+            Mock Set-Content       { }
+            Mock Move-Item         { }
+            Mock Remove-Item       { }
 
             $vm  = New-TestVm -Tools @((New-ToolEntry 'pkg.a' '1.0.0'))
             $err = $null
@@ -257,10 +247,9 @@ Describe 'Invoke-DotnetToolAcquisition' {
             $err.ToString() | Should -Match $script:KnownHashHex
             $err.ToString() | Should -Match ('BB' * 64)
 
-            Should -Invoke Invoke-DotnetNugetVerify -Times 0
-            Should -Invoke Set-Content              -Times 0
-            Should -Invoke Move-Item                -Times 0
-            Should -Invoke Remove-Item              -Times 1 -ParameterFilter {
+            Should -Invoke Set-Content -Times 0
+            Should -Invoke Move-Item   -Times 0
+            Should -Invoke Remove-Item -Times 1 -ParameterFilter {
                 $Path -match '\.downloading$'
             }
         }
@@ -310,46 +299,17 @@ Describe 'Invoke-DotnetToolAcquisition' {
     }
 
     # ------------------------------------------------------------------
-    Context 'dotnet nuget verify non-zero exit' {
-    # ------------------------------------------------------------------
-
-        It 'throws surfacing the verifier output, writes no lockfile' {
-            Mock Test-Path                { return $false }
-            Mock Get-FileHash             { return [pscustomobject]@{ Hash = $script:KnownHashHex } }
-            Mock Invoke-WebRequest        { }
-            Mock Invoke-RestMethod (New-RestMethodMockScript)
-            Mock Invoke-DotnetNugetVerify {
-                return [pscustomobject]@{
-                    ExitCode = 1
-                    Output   = 'NU3008: signature mismatch'
-                }
-            }
-            Mock Set-Content { }
-            Mock Move-Item   { }
-            Mock Remove-Item { }
-
-            $vm = New-TestVm -Tools @((New-ToolEntry 'pkg.a' '1.0.0'))
-            { Invoke-DotnetToolAcquisition -Vm $vm -CacheDir 'C:\VHDs' } |
-                Should -Throw -ExpectedMessage '*NU3008*'
-
-            Should -Invoke Set-Content -Times 0
-            Should -Invoke Move-Item   -Times 0
-        }
-    }
-
-    # ------------------------------------------------------------------
     Context 'multiple entries: stamping is additive' {
     # ------------------------------------------------------------------
 
         It 'records every entry under _dotnetToolNupkgPaths' {
-            Mock Test-Path                { return $false }
-            Mock Get-FileHash             { return [pscustomobject]@{ Hash = $script:KnownHashHex } }
-            Mock Invoke-WebRequest        { }
+            Mock Test-Path         { return $false }
+            Mock Get-FileHash      { return [pscustomobject]@{ Hash = $script:KnownHashHex } }
+            Mock Invoke-WebRequest { }
             Mock Invoke-RestMethod (New-RestMethodMockScript)
-            Mock Invoke-DotnetNugetVerify { return [pscustomobject]@{ ExitCode = 0; Output = '' } }
-            Mock Set-Content              { }
-            Mock Move-Item                { }
-            Mock Remove-Item              { }
+            Mock Set-Content       { }
+            Mock Move-Item         { }
+            Mock Remove-Item       { }
 
             $vm = New-TestVm -Tools @(
                 (New-ToolEntry 'pkg.a' '1.0.0'),
