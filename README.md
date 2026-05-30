@@ -48,7 +48,7 @@ PowerShell 7+ (`pwsh`). Windows PowerShell 5.1 is not supported.
 **Prerequisites:** Windows 11 with Hyper-V enabled, PowerShell 7+, and
 Administrator privileges. WSL2 is installed automatically by `provision.ps1`
 on first run if not already present (a reboot may be required).
-`Infrastructure.Common` and `Infrastructure.Secrets` are installed from
+`PowerShell.Common` and `Infrastructure.Secrets` are installed from
 PSGallery automatically on first run.
 
 ```powershell
@@ -731,7 +731,7 @@ Reads the same `VmProvisionerConfig` from the vault and for each VM definition:
 3. Deletes the per-VM VHDX (`{vmName}.vhdx`) in `vhdPath`. If Windows VMMS
    still holds a handle after `Remove-VM`, deletion is retried up to 5 times
    with exponential backoff (capped at 30 s) via `Invoke-WithRetry` from
-   `Infrastructure.Common` using the file-lock retry strategy. If the file is
+   `PowerShell.Common` using the file-lock retry strategy. If the file is
    still locked after all retries the script throws with the path identified
    — re-running after a few seconds retries the deletion.
 4. Deletes the seed ISO (`{vmName}-seed.iso`) in `vmConfigPath` if present.
@@ -756,13 +756,13 @@ manually from `vhdPath` if it is no longer needed.
 
 CI runs on pull requests targeting `master` via `.github/workflows/ci.yml`,
 which delegates to the shared reusable workflow in
-[Infrastructure-Common](https://github.com/VitaliiAndreev/Infrastructure-Common):
+[PowerShell-Common](https://github.com/VitaliiAndreev/PowerShell-Common):
 
 ```
-VitaliiAndreev/Infrastructure-Common/.github/workflows/ci-powershell.yml@master
+VitaliiAndreev/PowerShell-Common/.github/workflows/ci-powershell.yml@master
 ```
 
-The shared workflow runs `Run-Tests.ps1` on PowerShell 7.
+The shared workflow runs `scripts\Run-Tests.ps1` on PowerShell 7.
 No additional CI configuration is needed in this repo.
 
 ---
@@ -773,7 +773,7 @@ No additional CI configuration is needed in this repo.
 Infrastructure-VM-Provisioner/
 |- .github/
 |  `- workflows/
-|     `- ci.yml              # Delegates to shared ci-powershell.yml in Infrastructure-Common
+|     `- ci.yml              # Delegates to shared ci-powershell.yml in PowerShell-Common
 |- hyper-v/
 |  `- ubuntu/
 |     |- provision.ps1       # Entry point - orchestrates all provisioning steps
