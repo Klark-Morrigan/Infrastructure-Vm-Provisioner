@@ -1,13 +1,13 @@
 BeforeAll {
     # Stub Assert-RequiredProperties before dot-sourcing so the function exists
     # when ConvertFrom-VmConfigJson.ps1 is loaded. The real implementation
-    # lives in Infrastructure.Common, which is not required in the test
+    # lives in PowerShell.Common, which is not required in the test
     # environment.
     function Assert-RequiredProperties {
         param($Object, $Properties, $Context)
     }
 
-    # ConvertTo-Array is provided by Infrastructure.Common at runtime.
+    # ConvertTo-Array is provided by PowerShell.Common at runtime.
     # Stub it here so the unit tests have no cross-repo dependency.
     function ConvertTo-Array {
         param([AllowNull()] $InputObject)

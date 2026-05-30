@@ -7,10 +7,10 @@ BeforeAll {
     function Test-Path     { param($Path) }
 
     # remove-vm.ps1 wraps file deletions in Invoke-WithRetry (from
-    # Infrastructure.Common) with the file-lock retry strategy. Stub both
+    # PowerShell.Common) with the file-lock retry strategy. Stub both
     # as pass-throughs so these tests focus on Invoke-VmRemoval's
     # orchestration; the retry loop itself is covered by
-    # Invoke-WithRetry.Tests.ps1 in Infrastructure.Common.
+    # Invoke-WithRetry.Tests.ps1 in PowerShell.Common.
     function Invoke-WithRetry {
         param([scriptblock] $ScriptBlock, [hashtable[]] $RetryStrategy,
               [hashtable] $BackoffStrategy, [int] $MaxAttempts,
@@ -166,7 +166,7 @@ Describe 'Invoke-VmRemoval' {
 
         It 'wraps VHDX deletion in Invoke-WithRetry with the FileLock strategy and MaxAttempts 5' {
             # The retry loop itself is covered by Invoke-WithRetry.Tests.ps1
-            # in Infrastructure.Common; here we only assert the call site
+            # in PowerShell.Common; here we only assert the call site
             # plumbs the right strategy and attempt budget.
             Initialize-Mocks
             Mock Test-Path { param($Path) $Path -like '*node-01.vhdx' }

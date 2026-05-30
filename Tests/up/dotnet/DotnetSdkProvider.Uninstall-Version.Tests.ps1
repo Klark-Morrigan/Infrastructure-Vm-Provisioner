@@ -14,7 +14,7 @@ BeforeAll {
     function Remove-VmManifest           { param($SshClient, $Path) }
     function Invoke-SshClientCommand     { param($SshClient, $Command) }
 
-    # ConvertTo-Array ships in Infrastructure.Common in production. The
+    # ConvertTo-Array ships in PowerShell.Common in production. The
     # SUT relies on it to keep the manifest sub-arrays array-shaped.
     function ConvertTo-Array {
         param([Parameter(ValueFromPipeline)] $InputObject)

@@ -1,7 +1,7 @@
 <#
 .NOTES
     Do not run this file directly. It is intended to be dot-sourced by
-    provision.ps1 and setup-secrets.ps1 after Infrastructure.Common is loaded.
+    provision.ps1 and setup-secrets.ps1 after PowerShell.Common is loaded.
 #>
 
 # Sibling validators dot-sourced here so callers of ConvertFrom-VmConfigJson
@@ -57,7 +57,7 @@ function ConvertFrom-VmConfigJson {
     )
 
     foreach ($vm in $vmDefs) {
-        # Assert-RequiredProperties is provided by Infrastructure.Common.
+        # Assert-RequiredProperties is provided by PowerShell.Common.
         Assert-RequiredProperties `
             -Object      $vm `
             -Properties  $requiredFields `
