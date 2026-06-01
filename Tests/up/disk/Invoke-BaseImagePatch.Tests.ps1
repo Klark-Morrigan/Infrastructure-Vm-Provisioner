@@ -1,7 +1,6 @@
 BeforeAll {
     function Test-Path   { param($Path) }
     function New-Item    { param($ItemType, $Path, [switch]$Force) }
-    function Get-Command { param($Name, $ErrorAction) }
     function Mount-VHD   { param($Path, [switch]$NoDriveLetter, [switch]$PassThru) }
     function Dismount-VHD { param($Path) }
 
@@ -9,6 +8,12 @@ BeforeAll {
     # -u and -e flags passed by the callers (see Invoke-DiskImageAcquisition
     # tests for the detailed explanation).
     function wsl { $global:LASTEXITCODE = 0 }
+
+    # Assert-Wsl2Ready is owned by PowerShell.Common and unit-tested there.
+    # Stub it here so this test file does not redundantly assert the same
+    # readiness/install/throw paths; the consumer-side concerns are only
+    # "do we call it" and "do we propagate its throw without continuing".
+    function Assert-Wsl2Ready { }
 
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\disk\Invoke-BaseImagePatch.ps1"
 
@@ -44,55 +49,33 @@ Describe 'Invoke-BaseImagePatch' {
     }
 
     # ------------------------------------------------------------------
-    Context 'WSL2 not ready' {
+    Context 'WSL2 readiness delegated to Assert-Wsl2Ready' {
     # ------------------------------------------------------------------
-        # When wsl.exe is absent or no distro is registered, the function
-        # runs wsl --install and throws a Wsl2NotReady error. provision.ps1
-        # catches that prefix and exits with code 0 after printing the
-        # reboot prompt.
-        #
-        # This path was previously expressed as `exit 0` inside the function,
-        # which terminated the test runner process and made it untestable.
-        # The throw approach keeps the behavior observable.
+        # The readiness/install/throw paths live in PowerShell.Common's
+        # Assert-Wsl2Ready (and are covered by its tests there). Here we
+        # only verify the consumer-side contract: we call the helper, and
+        # if it throws we propagate the throw without proceeding to mount.
 
-        It 'throws a Wsl2NotReady error when wsl.exe is not found' {
+        It 'invokes Assert-Wsl2Ready after the sentinel check' {
             Mock Test-Path { $false }
-            Mock Get-Command { }    # wsl.exe not on PATH
-
-            { Invoke-BaseImagePatch -BaseImagePath $BaseImage -SentinelPath $Sentinel } |
-                Should -Throw -ExpectedMessage 'Wsl2NotReady:*'
-        }
-
-        It 'throws a Wsl2NotReady error when no WSL2 distro is registered' {
-            Mock Test-Path { $false }
-            Mock Get-Command { [PSCustomObject]@{ Name = 'wsl.exe' } }
-            # wsl --list returns exit code 0 but empty output - no distro.
-            Mock wsl { $global:LASTEXITCODE = 0; return '' }
-
-            { Invoke-BaseImagePatch -BaseImagePath $BaseImage -SentinelPath $Sentinel } |
-                Should -Throw -ExpectedMessage 'Wsl2NotReady:*'
-        }
-
-        It 'calls wsl --install before throwing when WSL2 is not ready' {
-            Mock Test-Path { $false }
-            Mock Get-Command { }
-            Mock wsl {}
+            Mock Assert-Wsl2Ready {}
+            # Mount-VHD throws to short-circuit before the WSL/lsblk
+            # branch, which is not the subject of this test.
+            Mock Mount-VHD { throw 'short-circuit after readiness check' }
 
             { Invoke-BaseImagePatch -BaseImagePath $BaseImage -SentinelPath $Sentinel } |
                 Should -Throw
 
-            # wsl --install should have been called to initiate setup.
-            Should -Invoke wsl -ParameterFilter { $args -contains '--install' }
+            Should -Invoke Assert-Wsl2Ready -Times 1 -Exactly
         }
 
-        It 'does not call Mount-VHD when WSL2 is not ready' {
+        It 'does not call Mount-VHD when Assert-Wsl2Ready throws' {
             Mock Test-Path { $false }
-            Mock Get-Command { }
-            Mock wsl {}
+            Mock Assert-Wsl2Ready { throw 'Wsl2NotReady: reboot required.' }
             Mock Mount-VHD {}
 
             { Invoke-BaseImagePatch -BaseImagePath $BaseImage -SentinelPath $Sentinel } |
-                Should -Throw
+                Should -Throw -ExpectedMessage 'Wsl2NotReady:*'
 
             Should -Invoke Mount-VHD -Times 0
         }
@@ -106,30 +89,24 @@ Describe 'Invoke-BaseImagePatch' {
 
         BeforeEach {
             Mock Test-Path { $false }
-            Mock Get-Command { [PSCustomObject]@{ Name = 'wsl.exe' } }
+            # Readiness lives in PowerShell.Common; stub it out so these
+            # tests focus on the --bare-failure path.
+            Mock Assert-Wsl2Ready {}
             Mock Mount-VHD { [PSCustomObject]@{ DiskNumber = 3 } }
             Mock Dismount-VHD {}
             Mock New-Item {}
+            Mock wsl {
+                if ($args -contains '--bare') { $global:LASTEXITCODE = 1; return 'error' }
+                $global:LASTEXITCODE = 0; return ''
+            }
         }
 
         It 'throws when wsl --mount --bare returns a non-zero exit code' {
-            Mock wsl {
-                if ($args -contains '--list') { $global:LASTEXITCODE = 0; return 'Ubuntu' }
-                if ($args -contains '--bare') { $global:LASTEXITCODE = 1; return 'error'  }
-                $global:LASTEXITCODE = 0; return ''
-            }
-
             { Invoke-BaseImagePatch -BaseImagePath $BaseImage -SentinelPath $Sentinel } |
                 Should -Throw -ExpectedMessage '*wsl --mount --bare failed*'
         }
 
         It 'calls Dismount-VHD in the finally block when wsl --mount --bare fails' {
-            Mock wsl {
-                if ($args -contains '--list') { $global:LASTEXITCODE = 0; return 'Ubuntu' }
-                if ($args -contains '--bare') { $global:LASTEXITCODE = 1; return 'error'  }
-                $global:LASTEXITCODE = 0; return ''
-            }
-
             { Invoke-BaseImagePatch -BaseImagePath $BaseImage -SentinelPath $Sentinel } |
                 Should -Throw
 
@@ -139,12 +116,6 @@ Describe 'Invoke-BaseImagePatch' {
         }
 
         It 'does not create the sentinel file when wsl --mount --bare fails' {
-            Mock wsl {
-                if ($args -contains '--list') { $global:LASTEXITCODE = 0; return 'Ubuntu' }
-                if ($args -contains '--bare') { $global:LASTEXITCODE = 1; return 'error'  }
-                $global:LASTEXITCODE = 0; return ''
-            }
-
             { Invoke-BaseImagePatch -BaseImagePath $BaseImage -SentinelPath $Sentinel } |
                 Should -Throw
 

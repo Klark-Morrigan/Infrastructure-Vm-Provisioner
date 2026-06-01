@@ -41,11 +41,10 @@
 #
 #   Implementation:
 #     1. Skip immediately if the sentinel file is present (already patched).
-#     2. Check WSL2 readiness (wsl.exe + at least one registered distro).
-#        If not ready, run wsl --install and throw a Wsl2NotReady error.
-#        provision.ps1 catches that specific error and exits with code 0 after
-#        printing the reboot prompt. Throwing rather than calling exit 0 here
-#        keeps this function unit-testable.
+#     2. Delegate WSL2 readiness to Assert-Wsl2Ready (PowerShell.Common). It
+#        runs wsl --install and throws a Wsl2NotReady error if not ready;
+#        provision.ps1 catches that specific error and exits with code 0
+#        after printing the reboot prompt.
 #     3. Mount the VHDX via Mount-VHD (no drive letter).
 #     4. Attach the raw disk to the WSL2 kernel with wsl --mount --bare.
 #     5. Identify the new block device by diffing lsblk before and after.
@@ -86,34 +85,9 @@ function Invoke-BaseImagePatch {
     Write-Host "  Patching datasource config in base image ..."
 
     # WSL2 is required for wsl --mount (kernel) and wsl -u root (distro).
-    # If either is missing, install now and signal the caller to exit so the
-    # operator can reboot before re-running provision.ps1.
-    #
-    # wsl --install on Windows 11 is idempotent: it enables the
-    # 'Windows Subsystem for Linux' and 'Virtual Machine Platform'
-    # features if absent, and installs Ubuntu as the default distro.
-    # Running as Administrator (already required by this script) is
-    # sufficient - no separate elevated prompt is needed.
-    #
-    # Throwing rather than calling exit 0 keeps this function testable.
-    # provision.ps1 catches the Wsl2NotReady prefix and exits with 0.
-    $wslExe   = Get-Command 'wsl.exe' -ErrorAction SilentlyContinue
-    $wslReady = $false
-    if ($null -ne $wslExe) {
-        # A distro must exist; wsl -u root -e sh requires one.
-        $distroList = wsl --list --quiet 2>&1
-        $wslReady   = ($LASTEXITCODE -eq 0) -and ("$distroList" -match '\S')
-    }
-
-    if (-not $wslReady) {
-        Write-Host "  WSL2 is not ready - installing now ..." -ForegroundColor Cyan
-        wsl --install
-        Write-Host ""
-        throw (
-            "Wsl2NotReady: WSL2 has been installed. A reboot may be required " +
-            "to complete setup. Please reboot and re-run provision.ps1."
-        )
-    }
+    # Assert-Wsl2Ready (PowerShell.Common) installs WSL2 if missing and
+    # throws Wsl2NotReady so provision.ps1 can prompt for reboot and exit 0.
+    Assert-Wsl2Ready
 
     # Attach the base VHDX as a raw disk (no drive letter - Windows
     # cannot read the ext4 partition, so assigning one would only
