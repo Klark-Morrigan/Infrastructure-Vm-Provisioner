@@ -49,6 +49,17 @@
 #                                     and whether patch 2's drop-in is
 #                                     being applied
 #
+#     Network (root cause of most slow runs - DNS timing out makes
+#     apt-get update sit on retries for several minutes per source)
+#       network-interfaces.txt      - `ip addr` + `ip route` + `ip rule`
+#                                     (interface IPs, routing table)
+#       network-resolv.txt          - /etc/resolv.conf contents +
+#                                     symlink target + resolvectl status
+#       network-reachability.txt    - ping gateway / 8.8.8.8 / 1.1.1.1,
+#                                     DNS lookup via default and via
+#                                     8.8.8.8 directly, HTTP probe of
+#                                     archive.ubuntu.com
+#
 #     Logs (full files, not tails)
 #       cloud-init.log              - cloud-init's own module log
 #       cloud-init-output.log       - stdout/stderr from cloud-init's
@@ -165,6 +176,50 @@ function Invoke-CloudInitDiagnostics {
             'echo "=== sockets.target.wants/ ===" && ' +
             'ls -la /etc/systemd/system/sockets.target.wants/ ' +
             '/lib/systemd/system/sockets.target.wants/ 2>&1'
+
+        # ---------- Network (root cause of most slow runs) ----------
+        # DNS resolution against Ubuntu mirrors has been the dominant
+        # cost in every slow first-boot we've observed - apt-get update
+        # waits the full ~90s DNS-timeout budget per source x 4 sources
+        # = ~6 minutes before falling back to cached package lists.
+        # The captures below distinguish among:
+        #   - NAT / routing broken (gateway unreachable, no default
+        #     route, NAT rule missing on host)
+        #   - Outbound blocked (gateway reachable but 8.8.8.8 / 1.1.1.1
+        #     unreachable from the host)
+        #   - DNS specifically broken (ICMP succeeds but name lookup
+        #     fails; usually resolved.conf pointing at the wrong server,
+        #     or systemd-resolved using DHCP-supplied DNS that does not
+        #     exist on a NAT-only network)
+        'network-interfaces.txt'      =
+            'echo "=== ip addr ===" && ip -d addr; ' +
+            'echo "=== ip route ===" && ip route; ' +
+            'echo "=== ip rule ===" && ip rule'
+        # /etc/resolv.conf is a symlink to /run/systemd/resolve/stub-resolv.conf
+        # on systemd-resolved systems; print both the symlink target
+        # and its contents so an operator can see where resolution
+        # actually goes.
+        'network-resolv.txt'          =
+            'echo "=== /etc/resolv.conf ($(readlink -f /etc/resolv.conf)) ===" && ' +
+            'cat /etc/resolv.conf; ' +
+            'echo "=== resolvectl status ===" && ' +
+            'resolvectl status 2>&1 || echo "resolvectl not available"'
+        # Reachability probes. Gateway is derived from the default route
+        # so the script does not bake in the host's vNIC subnet. Each
+        # ping is capped at -W 2 (per-packet 2s budget) and -c 3 (three
+        # packets) so a fully unreachable target costs ~6s, not ~30s.
+        # curl --max-time 10 caps the HTTP probe similarly.
+        'network-reachability.txt'    =
+            'GW=$(ip route show default | awk "{print \$3}" | head -1); ' +
+            'echo "=== ping gateway ($GW) ===" && ping -c 3 -W 2 "$GW" 2>&1; ' +
+            'echo "=== ping 8.8.8.8 ===" && ping -c 3 -W 2 8.8.8.8 2>&1; ' +
+            'echo "=== ping 1.1.1.1 ===" && ping -c 3 -W 2 1.1.1.1 2>&1; ' +
+            'echo "=== DNS via default resolver ===" && getent hosts archive.ubuntu.com 2>&1; ' +
+            'echo "=== DNS via 8.8.8.8 directly ===" && nslookup archive.ubuntu.com 8.8.8.8 2>&1; ' +
+            'echo "=== HTTP to archive.ubuntu.com ===" && ' +
+            'curl --max-time 10 -sS -o /dev/null ' +
+            '-w "http_code=%{http_code} time_total=%{time_total}\n" ' +
+            'http://archive.ubuntu.com/ 2>&1'
 
         # ---------- Logs (full) ----------
         'cloud-init.log'              = 'sudo cat /var/log/cloud-init.log'
