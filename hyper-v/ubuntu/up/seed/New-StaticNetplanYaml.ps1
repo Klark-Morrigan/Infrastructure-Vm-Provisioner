@@ -29,7 +29,8 @@
 #   emitted the inner block only - it parsed fine when cloud-init
 #   re-rendered it into /etc/netplan/50-cloud-init.yaml (cloud-init
 #   added the wrapper), but is rejected when written directly into
-#   /etc/netplan/*.yaml via write_files. See plan.md step 4 follow-up.
+#   /etc/netplan/*.yaml via write_files. See docs/dev/implementation/
+#   40 - static network config/plan.md step 4 follow-up.
 # ---------------------------------------------------------------------------
 function New-StaticNetplanYaml {
     [CmdletBinding()]

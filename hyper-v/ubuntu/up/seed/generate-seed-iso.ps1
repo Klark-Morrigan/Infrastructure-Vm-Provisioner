@@ -30,7 +30,8 @@
 #                 by the persistent disable flag landed via
 #                 write_files (see below) and by /etc/netplan/
 #                 99-static.yaml outranking the legacy
-#                 50-cloud-init.yaml. See plan.md step 4 follow-up.
+#                 50-cloud-init.yaml. See docs/dev/implementation/
+#                 40 - static network config/plan.md step 4 follow-up.
 #
 #   SECURITY - user-data contains Vm.password in plaintext so cloud-init
 #   can hash it internally (plain_text_passwd). The ISO persists on the
