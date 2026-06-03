@@ -80,10 +80,13 @@ BeforeAll {
 
     # PSSA's plain-text password warning is suppressed for the same reason
     # it is on the real cmdlet - SSH.NET requires a plain string.
+    # -Timeout / -ProgressInterval added to mirror the real cmdlet's
+    # public surface (Infrastructure.HyperV 0.10.0+); tests do not assert
+    # on either value, so the stub accepts and ignores them.
     function global:New-VmSshClient {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
             'PSAvoidUsingPlainTextForPassword', 'Password')]
-        param($IpAddress, $Username, $Password)
+        param($IpAddress, $Username, $Password, $Timeout, $ProgressInterval)
         $global:_PostProv_Calls['New-VmSshClient'] += @{
             IpAddress = $IpAddress
             Username  = $Username

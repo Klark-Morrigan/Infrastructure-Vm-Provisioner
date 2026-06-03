@@ -108,10 +108,21 @@ function Invoke-VmPostProvisioning {
 
         $sshClient = $null
         try {
+            # Generous Timeout because ssh.socket binds port 22 early via
+            # socket activation, so the upstream 'wait for SSH' TCP probe
+            # returns true before ssh.service has actually started. The
+            # client connect after port 22 opens blocks while systemd
+            # activates ssh.service, which is held off by patch 2's
+            # After=cloud-config.service ordering until cloud-config
+            # completes. Worst observed cloud-config duration so far is
+            # ~7.5 minutes when apt's noble mirror is DNS-flapping; 10 min
+            # matches the upstream 'wait for SSH' budget in Invoke-VmCreation
+            # and gives ~30% headroom over the worst observed run.
             $sshClient = New-VmSshClient `
                              -IpAddress $vmIp `
                              -Username  $username `
-                             -Password  $password
+                             -Password  $password `
+                             -Timeout   ([TimeSpan]::FromMinutes(10))
 
             # TODO(diagnostic, remove): replace $sshClient with a duck-type-
             # compatible wrapper that tees every RunCommand to ssh.log under
