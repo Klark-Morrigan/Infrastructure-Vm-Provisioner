@@ -155,12 +155,18 @@ function Invoke-DiskImageAcquisition {
     #   .nocloud-patched     - original (only NoCloud datasource)
     #   .image-patched       - v1 of Patch 2, used cloud-init.target -
     #                          BROKEN: caused sshd to never start
-    #   .image-patched-v2    - current (cloud-config.service, works)
+    #   .image-patched-v2    - drop-in on ssh.service AND ssh.socket -
+    #                          BROKEN: created an ordering cycle that
+    #                          systemd resolved non-deterministically,
+    #                          dropping cloud-config.service half the
+    #                          time and failing SSH password auth
+    #   .image-patched-v3    - current: drop-in on ssh.service ONLY,
+    #                          plus ssh.socket masked
     # Bumping the name on each substantive change forces existing
     # patched images to be re-patched and pick up the fix; the new
     # patch run also cleans up obsolete drop-in files from prior revs.
     # ------------------------------------------------------------------
-    $patchedSentinel = $baseImagePath -replace '\.vhdx$', '.image-patched-v2'
+    $patchedSentinel = $baseImagePath -replace '\.vhdx$', '.image-patched-v3'
     Invoke-WithSubStepTimer `
         -Parent 'Disk image acquisition' `
         -Name   'WSL2 base-image patch' `
