@@ -18,7 +18,7 @@ BeforeAll {
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\disk\Invoke-BaseImagePatch.ps1"
 
     $BaseImage = 'C:\VHDs\ubuntu-24.04-server-cloudimg-amd64.vhdx'
-    $Sentinel  = 'C:\VHDs\ubuntu-24.04-server-cloudimg-amd64.image-patched-v2'
+    $Sentinel  = 'C:\VHDs\ubuntu-24.04-server-cloudimg-amd64.image-patched-v3'
 }
 
 Describe 'Invoke-BaseImagePatch' {

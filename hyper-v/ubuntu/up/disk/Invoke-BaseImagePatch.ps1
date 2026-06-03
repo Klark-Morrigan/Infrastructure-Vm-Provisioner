@@ -17,27 +17,45 @@
 #     writes a higher-priority override file (99-nocloud.cfg) into
 #     /etc/cloud/cloud.cfg.d/ inside the VHDX to add NoCloud.
 #
-#   Patch 2: order sshd after cloud-config.service
+#   Patch 2: order sshd after cloud-config.service, mask ssh.socket
 #     Ubuntu cloud images ship with openssh-server already installed and
 #     enabled, so ssh.service binds port 22 at boot - BEFORE cloud-init's
 #     'users' and 'set_passwords' modules have provisioned the OS user.
 #     The host's TCP-port probe then returns "SSH reachable" while
 #     password auth still fails with "Permission denied (password)".
 #
-#     This drop-in adds After=cloud-config.service + Wants= to ssh.service
-#     and ssh.socket so sshd does not bind port 22 until the config stage
-#     has finished. cloud-config.service runs the set_passwords module,
-#     so once it completes the OS user has a usable password.
+#     This patch lands two artefacts under /etc/systemd/system/:
+#       1. ssh.service.d/10-wait-cloud-config.conf - drop-in adding
+#          After=cloud-config.service + Wants=cloud-config.service so
+#          ssh.service waits for cc_users_groups + cc_set_passwords
+#          to finish before sshd starts. cloud-config.service was
+#          chosen over the broader cloud-init.target because (a) it
+#          is a strictly narrower wait, only 'config' stage modules
+#          have to finish, not also 'final' stage which runs runcmd
+#          and could hang on user content; (b) ordering against
+#          cloud-init.target risks an activation deadlock because
+#          both ssh.service and cloud-init.target are WantedBy=
+#          multi-user.target. cloud-config.service is a single
+#          oneshot unit with bounded runtime.
+#       2. ssh.socket -> /dev/null symlink - offline equivalent of
+#          `systemctl mask ssh.socket`. Without masking, ssh.socket
+#          remains enabled and binds port 22 at sockets.target time
+#          (early in boot, well before cloud-config), socket-activating
+#          ssh.service on the first connect. That would defeat the
+#          drop-in above: the host TCP probe would succeed before
+#          users exist, and SSH would block on auth until the
+#          orchestrator's connect timeout.
 #
-#     cloud-config.service was chosen over the broader cloud-init.target
-#     for two reasons: (1) it is a strictly narrower wait - only modules
-#     in the 'config' stage have to finish, not also 'final' stage which
-#     runs runcmd / scripts-user and could hang on user content; (2)
-#     ordering against cloud-init.target risks an activation deadlock
-#     because both ssh.service and cloud-init.target are WantedBy=
-#     multi-user.target, so a poisoned cloud-init.target keeps sshd
-#     held off indefinitely. cloud-config.service is a single oneshot
-#     unit with bounded runtime.
+#     History: the prior revision wrote the drop-in to BOTH
+#     ssh.service.d/ AND ssh.socket.d/. ssh.socket + After=cloud-
+#     config.service created a cycle through sockets.target ->
+#     ssh.socket; systemd resolved it non-deterministically by
+#     dropping a start job - ~50% of boots it dropped
+#     cloud-config.service entirely, the OS user was never created,
+#     and password auth hung for 30s before the orchestrator gave up.
+#     The current shape (drop-in on ssh.service, mask on ssh.socket)
+#     has no cycle because ssh.socket is no longer in the dependency
+#     graph at all.
 #
 #   Implementation:
 #     1. Skip immediately if the sentinel file is present (already patched).
@@ -58,14 +76,17 @@
 #     BaseImagePath  - absolute path to the base .vhdx to patch.
 #     SentinelPath   - absolute path to the sentinel file that marks the
 #                      patch as done (conventionally
-#                      <base>.image-patched-v2). The "-v2" suffix forces a
-#                      re-patch on images previously patched with v1 of
-#                      Patch 2, which used After=cloud-init.target and
-#                      caused sshd to never start (cloud-init.target was
-#                      the wrong sync point; see Patch 2 doc above for the
-#                      switch to cloud-config.service). The re-patch run
-#                      also removes the obsolete 10-wait-cloud-init.conf
-#                      drop-in left behind by v1.
+#                      <base>.image-patched-v3). The version suffix is
+#                      bumped on every substantive change so existing
+#                      cached images get re-patched and pick up the fix:
+#                        v1: After=cloud-init.target (sshd never started)
+#                        v2: drop-in on ssh.service AND ssh.socket
+#                            (ordering cycle, cloud-config skipped ~50%
+#                            of boots, SSH password auth then failed)
+#                        v3: drop-in on ssh.service only, ssh.socket
+#                            masked - no cycle, deterministic
+#                      The re-patch run also removes obsolete drop-in
+#                      files left behind by prior revs.
 # ---------------------------------------------------------------------------
 
 function Invoke-BaseImagePatch {
@@ -168,12 +189,33 @@ function Invoke-BaseImagePatch {
             '      CFG="$M/etc/cloud/cloud.cfg.d"'
             '      mkdir -p "$CFG"'
             '      printf "datasource_list: [ NoCloud, None ]\n" > "$CFG/99-nocloud.cfg"'
-            '      for UNIT in ssh.service ssh.socket; do'
-            '        DROP="$M/etc/systemd/system/$UNIT.d"'
-            '        mkdir -p "$DROP"'
-            '        printf "[Unit]\nAfter=cloud-config.service\nWants=cloud-config.service\n" > "$DROP/10-wait-cloud-config.conf"'
-            '        rm -f "$DROP/10-wait-cloud-init.conf"'
-            '      done'
+            # Drop-in lands on ssh.service ONLY. An earlier revision
+            # also wrote it to ssh.socket.d/, which created an ordering
+            # cycle (ssh.socket -> cloud-config.service -> basic.target
+            # -> sockets.target -> ssh.socket). systemd resolves cycles
+            # non-deterministically by deleting one start job - in ~50%
+            # of boots it deleted cloud-config.service, so cc_users_groups
+            # never ran, the OS user was never created, and the
+            # orchestrator hung on SSH password auth until its 30s
+            # connect timeout. With the drop-in restricted to ssh.service,
+            # ssh.socket has no extra ordering edge and no cycle forms.
+            '      DROP="$M/etc/systemd/system/ssh.service.d"'
+            '      mkdir -p "$DROP"'
+            '      printf "[Unit]\nAfter=cloud-config.service\nWants=cloud-config.service\n" > "$DROP/10-wait-cloud-config.conf"'
+            '      rm -f "$DROP/10-wait-cloud-init.conf"'
+            # Clean up the prior revision's ssh.socket.d/ drop-in if
+            # present, so a base image patched by an older provisioner
+            # version cannot still carry the cycle.
+            '      rm -rf "$M/etc/systemd/system/ssh.socket.d"'
+            # Mask ssh.socket entirely so port 22 is bound only by
+            # ssh.service (which has the After/Wants ordering above).
+            # The offline-mount equivalent of `systemctl mask` is a
+            # symlink to /dev/null under /etc/systemd/system/. Without
+            # masking, ssh.socket would socket-activate sshd on the
+            # first TCP connect, defeating the whole purpose of the
+            # drop-in - the host TCP probe would succeed before
+            # cloud-config has finished provisioning the user.
+            '      ln -sf /dev/null "$M/etc/systemd/system/ssh.socket"'
             '      echo "OK:$P:$(ls $CFG)"'
             '      sync'
             '      umount "$M"'
