@@ -59,6 +59,9 @@ function Invoke-VmPostProvisioning {
     $username = $Vm.username
     $password = $Vm.password
     $vmRef    = $Vm
+    # TODO(diagnostic, remove): see Invoke-CloudInitDiagnostics.ps1 header.
+    $vmConfigPath               = $Vm.vmConfigPath
+    $invokeCloudInitDiagnostics = ${function:Invoke-CloudInitDiagnostics}
 
     # Capture the per-step functions as scriptblock locals so the closure
     # below can invoke them via the call operator. Name-based command
@@ -123,6 +126,11 @@ function Invoke-VmPostProvisioning {
                             "with post-provisioning steps.")
                     }
                 }
+
+            # TODO(diagnostic, remove): see Invoke-CloudInitDiagnostics.ps1
+            # header. Same closure-capture rationale as the other per-step
+            # functions above.
+            & $invokeCloudInitDiagnostics -SshClient $sshClient -VmConfigPath $vmConfigPath
 
             # Manifest store init runs unconditionally near the top of
             # the per-VM loop: it costs one cheap mkdir + chown + chmod

@@ -85,6 +85,8 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\reconciler\Invoke-ToolchainReconciliation.ps1"
 . "$PSScriptRoot\up\reconciler\Get-Providers.ps1"
 . "$PSScriptRoot\up\post\Set-EnvironmentVariables.ps1"
+# TODO(diagnostic, remove): see Invoke-CloudInitDiagnostics.ps1 header.
+. "$PSScriptRoot\up\post\Invoke-CloudInitDiagnostics.ps1"
 . "$PSScriptRoot\up\post\Invoke-VmPostProvisioning.ps1"
 . "$PSScriptRoot\up\seed\New-StaticNetplanYaml.ps1"
 . "$PSScriptRoot\up\seed\generate-seed-iso.ps1"
