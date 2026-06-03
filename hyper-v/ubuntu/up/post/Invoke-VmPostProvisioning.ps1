@@ -98,6 +98,10 @@ function Invoke-VmPostProvisioning {
     # each sub-step's wall-clock across every VM in the per-VM loop.
     $invokeWithSubStepTimer  = ${function:Invoke-WithSubStepTimer}
     $addSubStepDuration      = ${function:Add-SubStepDuration}
+    # TODO(diagnostic, remove): wrap real SshClient with a tee-to-file
+    # logger covering the whole post-provisioning phase. See
+    # New-DiagnosticSshClientWrapper.ps1 for rationale.
+    $newDiagSshWrapper       = ${function:New-DiagnosticSshClientWrapper}
 
     $postBlock = {
         param($server)
@@ -108,6 +112,19 @@ function Invoke-VmPostProvisioning {
                              -IpAddress $vmIp `
                              -Username  $username `
                              -Password  $password
+
+            # TODO(diagnostic, remove): replace $sshClient with a duck-type-
+            # compatible wrapper that tees every RunCommand to ssh.log under
+            # the per-run diag folder. Every downstream consumer (cloud-init
+            # wait, files copy, reconciler, env vars) sees the wrapper via
+            # this exact variable, so no other call site needs to change.
+            # The wrapper forwards Disconnect/Dispose so the finally block
+            # below tears the real client down correctly.
+            $sshClient = & $newDiagSshWrapper `
+                              -RealClient    $sshClient `
+                              -VmConfigPath  $vmConfigPath `
+                              -VmName        $vmName `
+                              -Timestamp     $vmRef._diagTimestamp
 
             # cloud-init may still be running its later modules (apt holding
             # the dpkg lock, runcmd not yet started). Wait once, here, so no

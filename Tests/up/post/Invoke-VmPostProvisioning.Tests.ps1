@@ -159,12 +159,17 @@ BeforeAll {
         param($Parent, $Name, $ElapsedMs, [switch] $Failed)
     }
 
-    # TODO(diagnostic, remove): stub for the diagnostic helper captured by
-    # the orchestrator via ${function:Invoke-CloudInitDiagnostics}. Same
-    # null-capture failure mode as the timer stubs above. No-op here -
-    # the dispatch tests do not assert anything about diagnostic capture.
+    # TODO(diagnostic, remove): stubs for the diagnostic helpers captured
+    # by the orchestrator via ${function:...}. Same null-capture failure
+    # mode as the timer stubs above. The SSH wrapper stub passes the
+    # real client straight through so the orchestrator's downstream
+    # consumers still observe the fake SshClient the tests injected.
     function global:Invoke-CloudInitDiagnostics {
         param($SshClient, $VmConfigPath, $VmName, $Timestamp)
+    }
+    function global:New-DiagnosticSshClientWrapper {
+        param($RealClient, $VmConfigPath, $VmName, $Timestamp)
+        return $RealClient
     }
 
     function global:Copy-VmFilesByPattern {

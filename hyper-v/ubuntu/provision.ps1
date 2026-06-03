@@ -86,9 +86,11 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\reconciler\Get-Providers.ps1"
 . "$PSScriptRoot\up\post\Set-EnvironmentVariables.ps1"
 # TODO(diagnostic, remove): see Invoke-CloudInitDiagnostics.ps1 +
-# Invoke-SerialConsoleCapture.ps1 headers. Paired diagnostic helpers.
+# Invoke-SerialConsoleCapture.ps1 + New-DiagnosticSshClientWrapper.ps1
+# headers. Paired diagnostic helpers.
 . "$PSScriptRoot\up\post\Invoke-CloudInitDiagnostics.ps1"
 . "$PSScriptRoot\up\post\Invoke-SerialConsoleCapture.ps1"
+. "$PSScriptRoot\up\post\New-DiagnosticSshClientWrapper.ps1"
 . "$PSScriptRoot\up\post\Invoke-VmPostProvisioning.ps1"
 . "$PSScriptRoot\up\seed\New-StaticNetplanYaml.ps1"
 . "$PSScriptRoot\up\seed\generate-seed-iso.ps1"

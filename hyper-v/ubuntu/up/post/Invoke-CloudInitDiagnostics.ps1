@@ -41,9 +41,9 @@
 #       systemctl-failed.txt        - any units that exited non-zero
 #       systemctl-cloud-init.txt    - status of all four cloud-init units
 #
-#     Logs (tail-only to keep files small; full logs stay on the VM)
-#       cloud-init.log.tail.txt     - cloud-init's own module log
-#       cloud-init-output.log.tail  - stdout/stderr from cloud-init's
+#     Logs (full files, not tails)
+#       cloud-init.log              - cloud-init's own module log
+#       cloud-init-output.log       - stdout/stderr from cloud-init's
 #                                     subprocesses (apt, runcmd, etc.)
 #       journal-cloud-config.txt    - cloud-config.service journal
 #                                     (sshd ordering targets this unit,
@@ -53,10 +53,16 @@
 #                                     (where apt sat for 6 min in the
 #                                     prior baseline run)
 #
-#     Apt / package state (was the dominant time sink at 362s)
+#     Apt / dpkg (the dominant time sink at 362s)
 #       apt-config.txt              - `apt-config dump` (mirrors, options)
 #       apt-sources.txt             - rendered /etc/apt/sources.list and
 #                                     /etc/apt/sources.list.d/* contents
+#       apt-history.log             - one entry per apt invocation, with
+#                                     start/end timestamps and packages
+#       apt-term.log                - apt subprocess output (downloads,
+#                                     dpkg messages) keyed to history.log
+#       dpkg.log                    - every package state transition with
+#                                     ms-precision timestamps
 # ---------------------------------------------------------------------------
 
 function Invoke-CloudInitDiagnostics {
@@ -99,10 +105,15 @@ function Invoke-CloudInitDiagnostics {
     # has no stream-merge option of its own. Single-quotes in the
     # command body are escaped via the standard '\'' dance.
     #
-    # `tail` and `journalctl -n` keep individual files bounded (~tens of
-    # KB) - the full logs stay on the VM. `--no-pager` is mandatory for
-    # `systemctl` and `journalctl` over non-interactive SSH; without it
-    # they invoke `less` and hang the SSH command indefinitely.
+    # Logs are pulled in full (`cat`, not `tail`). cloud-init.log on a
+    # slow first boot is a few hundred KB - well within the budget for
+    # host-side capture, and the headline 362s of apt activity scrolls
+    # past `tail -n 500` so a tail cuts the most interesting region.
+    # `journalctl -n 1000` keeps the per-unit journals bounded because
+    # those can grow unboundedly across boots.
+    # `--no-pager` is mandatory for `systemctl` and `journalctl` over
+    # non-interactive SSH; without it they invoke `less` and hang the
+    # SSH command indefinitely.
     $diagCommands = [ordered]@{
         # ---------- Timing ----------
         'cloud-init-blame.txt'        = 'cloud-init analyze blame'
@@ -118,22 +129,31 @@ function Invoke-CloudInitDiagnostics {
             'systemctl status --no-pager cloud-init-local.service ' +
             'cloud-init.service cloud-config.service cloud-final.service'
 
-        # ---------- Logs (tail-only) ----------
-        'cloud-init.log.tail.txt'     = 'sudo tail -n 500 /var/log/cloud-init.log'
-        'cloud-init-output.log.tail.txt' =
-            'sudo tail -n 500 /var/log/cloud-init-output.log'
+        # ---------- Logs (full) ----------
+        'cloud-init.log'              = 'sudo cat /var/log/cloud-init.log'
+        'cloud-init-output.log'       = 'sudo cat /var/log/cloud-init-output.log'
         'journal-cloud-config.txt'    =
-            'sudo journalctl --no-pager -n 200 -u cloud-config.service'
+            'sudo journalctl --no-pager -n 1000 -u cloud-config.service'
         'journal-cloud-final.txt'     =
-            'sudo journalctl --no-pager -n 200 -u cloud-final.service'
+            'sudo journalctl --no-pager -n 1000 -u cloud-final.service'
 
-        # ---------- Apt / package state ----------
+        # ---------- Apt / dpkg ----------
+        # history.log lists every apt invocation with its packages and
+        # start/end timestamps - the headline source for "what did apt
+        # spend 6 minutes doing". term.log carries the corresponding
+        # apt subprocess output (download + dpkg lines). dpkg.log
+        # records every package state transition with millisecond
+        # timestamps and is the authoritative "who installed what
+        # when" record.
         'apt-config.txt'              = 'apt-config dump'
         'apt-sources.txt'             =
             'echo "=== /etc/apt/sources.list ===" && ' +
             'cat /etc/apt/sources.list 2>/dev/null; ' +
             'for f in /etc/apt/sources.list.d/*; do ' +
             'echo "=== $f ==="; cat "$f"; done'
+        'apt-history.log'             = 'sudo cat /var/log/apt/history.log'
+        'apt-term.log'                = 'sudo cat /var/log/apt/term.log'
+        'dpkg.log'                    = 'sudo cat /var/log/dpkg.log'
     }
 
     foreach ($entry in $diagCommands.GetEnumerator()) {
