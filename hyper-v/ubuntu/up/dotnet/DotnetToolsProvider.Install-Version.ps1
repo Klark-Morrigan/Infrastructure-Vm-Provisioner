@@ -28,10 +28,19 @@
 #   so non-login shells (sshd command exec, systemd units, cron) can find
 #   the tool without sourcing /etc/profile.d/.
 #
-#   --ignore-failed-sources lets the install proceed even if the host has
-#   no nuget.org access (we already verified the .nupkg in step 4); the
-#   --add-source <staging-dir> entry is the only source the operation
-#   needs to succeed.
+#   --configfile points the resolver at a minimal NuGet.Config written
+#   into the staging dir that declares ONLY the staging dir as a source
+#   (with <clear /> to drop any ambient nuget.org entry). Per the
+#   `dotnet tool install` docs, --configfile means "only the settings
+#   from this file will be used", so the resolver never contacts
+#   api.nuget.org for its service index. This honours the Phase B /
+#   Option B design (host prefetches + SHA-512-verifies, VM consumes
+#   pre-verified bytes only) - without --configfile, --add-source merely
+#   APPENDS to the ambient sources and a transient socket failure
+#   against api.nuget.org:443 aborts the install before the local
+#   source is ever consulted; --ignore-failed-sources is documented to
+#   handle that case but does not in SDK 8.0.x (service-index probes
+#   are not treated as "failed sources" the way package fetches are).
 # ---------------------------------------------------------------------------
 
 # Tools live under a fixed system-wide path so every shell that gets PATH
@@ -53,28 +62,46 @@ function Install-DotnetToolVersion {
         [object] $Spec
     )
 
-    $id         = [string]$Spec.Id
-    $version    = [string]$Spec.RawVersion
-    $nupkgPath  = [string]$Spec.NupkgPath
-    $name       = "$id@$version"
-    $stagingDir = "/var/lib/infra-provisioner/staging/dotnet-tools/$name"
-    $toolsRoot  = $script:DotnetToolsRoot
-    $storeDir   = "$toolsRoot/.store/$id/$version"
+    $id              = [string]$Spec.Id
+    $version         = [string]$Spec.RawVersion
+    $nupkgPath       = [string]$Spec.NupkgPath
+    $name            = "$id@$version"
+    $stagingDir      = "/var/lib/infra-provisioner/staging/dotnet-tools/$name"
+    $nugetConfigPath = "$stagingDir/NuGet.Config"
+    $toolsRoot       = $script:DotnetToolsRoot
+    $storeDir        = "$toolsRoot/.store/$id/$version"
 
     Write-Host "  [dotnetTools] $name -> $toolsRoot"
 
-    # Step 1 - stage the host-cached .nupkg into a per-tool dir on the VM.
+    # Step 1 - stage the host-cached .nupkg into a per-tool dir on the VM,
+    # alongside a NuGet.Config that pins the staging dir as the sole
+    # source. <clear /> drops any ambient nuget.org entry that machine /
+    # user / dotnet-shipped config might contribute, so the resolver has
+    # exactly one local source to consider when --configfile points here.
     # Use the same Add-VmFileServerFile + curl pattern Expand-VmTarball
     # uses internally; we cannot reuse Expand-VmTarball itself because it
     # pipes into `tar -xzf -` and the .nupkg is a zip, not a gzip tarball.
-    $nupkgUrl = Add-VmFileServerFile -Server $Server -LocalPath $nupkgPath
+    $nupkgUrl  = Add-VmFileServerFile -Server $Server -LocalPath $nupkgPath
     $nupkgLeaf = Split-Path -Path $nupkgPath -Leaf
 
+    # Bash heredoc delimiter is quoted ('NUGETCONFIG') so the VM-side
+    # shell does NOT expand $stagingDir or backticks while writing the
+    # file. The PowerShell here-string above already substituted
+    # $stagingDir into the file body host-side.
     $stagingScript = @"
 set -euo pipefail
 sudo mkdir -p '$stagingDir'
 sudo chmod 0755 '$stagingDir'
 curl -fsSL '$nupkgUrl' | sudo tee '$stagingDir/$nupkgLeaf' >/dev/null
+sudo tee '$nugetConfigPath' >/dev/null <<'NUGETCONFIG'
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <packageSources>
+    <clear />
+    <add key="local-staging" value="$stagingDir" />
+  </packageSources>
+</configuration>
+NUGETCONFIG
 "@
     # CRLF -> LF (Windows here-strings would otherwise tag a `\r` onto
     # every line and bash would parse it as part of the previous token).
@@ -92,15 +119,15 @@ curl -fsSL '$nupkgUrl' | sudo tee '$stagingDir/$nupkgLeaf' >/dev/null
     # Step 2 - dotnet tool install. The driver provides idempotency on the
     # same version (a second install of the same id@version is a no-op
     # error, so a re-provision recovers cleanly from a mid-install crash).
-    # --ignore-failed-sources guards against ambient nuget.config sources
-    # being unreachable - we only need our --add-source to succeed.
+    # --configfile means "only the settings from this file will be used"
+    # (per `dotnet tool install --help`), so the resolver consults the
+    # staging dir alone and never touches the network.
     $installScript = @"
 set -euo pipefail
 sudo dotnet tool install '$id' \
     --tool-path '$toolsRoot' \
-    --add-source '$stagingDir' \
-    --version '$version' \
-    --ignore-failed-sources
+    --configfile '$nugetConfigPath' \
+    --version '$version'
 "@
     $installScript = $installScript -replace "`r`n", "`n"
 
