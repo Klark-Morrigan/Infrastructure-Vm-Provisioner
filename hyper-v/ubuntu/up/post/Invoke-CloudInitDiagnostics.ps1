@@ -69,7 +69,10 @@ function Invoke-CloudInitDiagnostics {
         [string] $VmConfigPath,
 
         [Parameter(Mandatory)]
-        [string] $VmName
+        [string] $VmName,
+
+        [Parameter(Mandatory)]
+        [string] $Timestamp
     )
 
     # diagnostics/<vmName>/<timestamp>/ so:
@@ -78,10 +81,13 @@ function Invoke-CloudInitDiagnostics {
     #   - re-provisioning the same VM (reconcile path) does not overwrite
     #     the headline first-boot capture - idle re-runs land in a new
     #     timestamped folder
-    $timestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
-    $diagDir   = Join-Path $VmConfigPath 'diagnostics'
-    $diagDir   = Join-Path $diagDir      $VmName
-    $diagDir   = Join-Path $diagDir      $timestamp
+    #   - $Timestamp is supplied by the caller (set once per VM in
+    #     Invoke-VmCreation as $Vm._diagTimestamp) so console.log from
+    #     Start-SerialConsoleCapture and the dumps below land in the
+    #     SAME folder for a given run.
+    $diagDir = Join-Path $VmConfigPath 'diagnostics'
+    $diagDir = Join-Path $diagDir      $VmName
+    $diagDir = Join-Path $diagDir      $Timestamp
     if (-not (Test-Path -Path $diagDir -PathType Container)) {
         New-Item -ItemType Directory -Path $diagDir -Force | Out-Null
     }

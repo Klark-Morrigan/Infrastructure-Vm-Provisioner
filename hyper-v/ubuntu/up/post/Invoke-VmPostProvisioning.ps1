@@ -50,6 +50,17 @@ function Invoke-VmPostProvisioning {
     Write-Host ""
     Write-Host "--- Post-provisioning: $($Vm.vmName) ---" -ForegroundColor Cyan
 
+    # TODO(diagnostic, remove): ensure $Vm._diagTimestamp is set. Normally
+    # populated by Invoke-VmCreation alongside the serial-console capture,
+    # but the reconcile path on an existing VM skips creation entirely, so
+    # we fall back to Get-Date here. Either way Invoke-CloudInitDiagnostics
+    # below uses the same value.
+    if (-not $Vm.PSObject.Properties['_diagTimestamp']) {
+        Add-Member -InputObject $Vm -MemberType NoteProperty `
+                   -Name '_diagTimestamp' `
+                   -Value (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss') -Force
+    }
+
     # Capture VM fields explicitly into locals so the closure scriptblock
     # below sees them when invoked from another module (Invoke-WithVmFileServer
     # lives in Infrastructure.HyperV - function-scoped variables are not in
@@ -129,11 +140,14 @@ function Invoke-VmPostProvisioning {
 
             # TODO(diagnostic, remove): see Invoke-CloudInitDiagnostics.ps1
             # header. Same closure-capture rationale as the other per-step
-            # functions above.
+            # functions above. $vmRef._diagTimestamp was set in
+            # Invoke-VmCreation so console.log + the dumps below land in
+            # the same per-run folder.
             & $invokeCloudInitDiagnostics `
                 -SshClient     $sshClient `
                 -VmConfigPath  $vmConfigPath `
-                -VmName        $vmName
+                -VmName        $vmName `
+                -Timestamp     $vmRef._diagTimestamp
 
             # Manifest store init runs unconditionally near the top of
             # the per-VM loop: it costs one cheap mkdir + chown + chmod
