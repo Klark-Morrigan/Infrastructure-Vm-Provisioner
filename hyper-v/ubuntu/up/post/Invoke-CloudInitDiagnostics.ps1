@@ -40,6 +40,14 @@
 #       cloud-init-status.txt       - `cloud-init status --long` (state, errors)
 #       systemctl-failed.txt        - any units that exited non-zero
 #       systemctl-cloud-init.txt    - status of all four cloud-init units
+#       ssh-units-status.txt        - status of ssh.service + ssh.socket
+#                                     (verifies patch 2's ordering took)
+#       ssh-units-config.txt        - merged unit config (systemctl cat),
+#                                     is-enabled state, and sockets
+#                                     target.wants/ symlinks - tells us
+#                                     whether ssh.socket actually runs
+#                                     and whether patch 2's drop-in is
+#                                     being applied
 #
 #     Logs (full files, not tails)
 #       cloud-init.log              - cloud-init's own module log
@@ -128,6 +136,35 @@ function Invoke-CloudInitDiagnostics {
         'systemctl-cloud-init.txt'    =
             'systemctl status --no-pager cloud-init-local.service ' +
             'cloud-init.service cloud-config.service cloud-final.service'
+
+        # ---------- SSH-unit state (patch 2 verification) ----------
+        # Invoke-BaseImagePatch.ps1 writes a drop-in to both
+        # ssh.service.d/ and ssh.socket.d/ that adds
+        # After/Wants=cloud-config.service. On boot, systemd reported
+        # an ordering cycle involving ssh.socket and resolved it by
+        # dropping the cloud-config.service start job, which silently
+        # disabled patch 2's protection for that boot. These captures
+        # answer:
+        #   - is ssh.socket actually enabled on this image?
+        #   - is the patch 2 drop-in present and being merged into
+        #     the active unit config?
+        #   - which target.wants/ symlink controls activation?
+        'ssh-units-status.txt'        =
+            'systemctl status --no-pager ssh.service ssh.socket'
+        # `systemctl cat` prints the unit file PLUS every drop-in
+        # systemd applied, so if patch 2's 10-wait-cloud-config.conf
+        # is being read, it will appear here. `is-enabled` confirms
+        # whether the unit is active in the boot graph at all.
+        'ssh-units-config.txt'        =
+            'echo "=== systemctl cat ssh.service ===" && ' +
+            'systemctl cat ssh.service 2>&1; ' +
+            'echo "=== systemctl cat ssh.socket ===" && ' +
+            'systemctl cat ssh.socket 2>&1; ' +
+            'echo "=== is-enabled ===" && ' +
+            'systemctl is-enabled ssh.service ssh.socket 2>&1; ' +
+            'echo "=== sockets.target.wants/ ===" && ' +
+            'ls -la /etc/systemd/system/sockets.target.wants/ ' +
+            '/lib/systemd/system/sockets.target.wants/ 2>&1'
 
         # ---------- Logs (full) ----------
         'cloud-init.log'              = 'sudo cat /var/log/cloud-init.log'
