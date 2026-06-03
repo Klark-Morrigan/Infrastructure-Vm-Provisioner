@@ -118,6 +118,14 @@ function Invoke-VmPostProvisioning {
             # ~7.5 minutes when apt's noble mirror is DNS-flapping; 10 min
             # matches the upstream 'wait for SSH' budget in Invoke-VmCreation
             # and gives ~30% headroom over the worst observed run.
+            #
+            # Connect is synchronous with no progress output. The leading
+            # Write-Host below tells the operator the silence is expected,
+            # so a multi-minute wait does not read like a hang.
+            Write-Host (
+                "  Connecting to $vmIp (this may take several minutes " +
+                "while cloud-init finishes) ..."
+            )
             $sshClient = New-VmSshClient `
                              -IpAddress $vmIp `
                              -Username  $username `
