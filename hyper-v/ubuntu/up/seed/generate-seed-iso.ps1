@@ -20,12 +20,11 @@
 #     network-config - the NoCloud "network config v1+" slot. We ship
 #                 the FULL static netplan here so cloud-init's
 #                 init-local stage brings the NIC up on first boot
-#                 (writes /etc/netplan/50-cloud-init.yaml, runs
-#                 netplan apply) BEFORE the config stage runs apt
-#                 for package_update / package install. Disabling
-#                 cloud-init networking entirely on first boot is
-#                 not viable: cc_package_update_upgrade_install
-#                 needs the NIC up and stalls the whole pipeline.
+#                 with the configured static IP (writes
+#                 /etc/netplan/50-cloud-init.yaml, runs netplan
+#                 apply). Without this slot cloud-init would fall
+#                 back to DHCP, briefly leaving the VM on a wrong IP
+#                 before runcmd's `netplan apply` takes over.
 #                 Subsequent-boot regressions are blocked instead
 #                 by the persistent disable flag landed via
 #                 write_files (see below) and by /etc/netplan/
@@ -79,8 +78,20 @@ local-hostname: $($Vm.vmName)
     # Specifying users: without 'default' in the list intentionally omits
     # the cloud image's built-in 'ubuntu' user; only our configured user
     # is created.
-    # package_upgrade is false to keep the first boot fast; operators can
-    # run upgrades afterwards.
+    # No packages / package_update / package_upgrade: openssh-server is
+    # already installed and enabled in the Ubuntu cloud image (see
+    # Invoke-BaseImagePatch.ps1 Patch 2), and we install no other
+    # packages during cloud-init. Emitting `package_update: true` would
+    # run `apt-get update` against Ubuntu mirrors - if the host's NAT
+    # does not cover the VM subnet (common: only one NetNat is allowed
+    # per host so a production NAT for a different subnet wins), DNS
+    # resolution fails and apt waits its full retry budget per source
+    # (~90s x 4 sources ~= 6 minutes) before giving up and falling
+    # back to cached lists. That wait was the entire cloud-init wait
+    # ~365s observed in earlier runs. Omitting these keys lets
+    # cloud-init's package_update_upgrade_install module short-circuit
+    # to a no-op, and removes the only piece of cloud-init that
+    # actually needed outbound internet.
     #
     # Values that may contain YAML-special characters (colon, hash, quote)
     # are wrapped in YAML double-quoted strings. Backslashes and double
@@ -143,12 +154,6 @@ users:
     groups: [adm, cdrom, dip, plugdev, lxd]
 
 ssh_pwauth: true
-
-packages:
-  - openssh-server
-
-package_update: true
-package_upgrade: false
 
 write_files:
   - path: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg

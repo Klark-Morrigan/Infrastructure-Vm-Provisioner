@@ -140,12 +140,22 @@ Describe 'Invoke-SeedIsoGeneration' {
             }
         }
 
-        It 'includes openssh-server in the package list' {
+        It 'omits packages / package_update / package_upgrade so cloud-init does not need internet' {
+            # openssh-server is already in the Ubuntu cloud image (see
+            # Invoke-BaseImagePatch.ps1 Patch 2) and we install no other
+            # packages. Emitting any of these keys re-activates the
+            # cc_package_update_upgrade_install module, which runs
+            # apt-get update against Ubuntu mirrors - DNS resolution
+            # there fails when the host NAT does not cover the VM
+            # subnet, and apt waits its full retry budget (~6 minutes)
+            # before falling back to cached lists.
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-SeedIsoGeneration -Vm (New-TestVm)
             Should -Invoke New-SeedIso -ParameterFilter {
-                $Files['user-data'] -match 'openssh-server'
+                $Files['user-data'] -notmatch '(?m)^packages:'        -and
+                $Files['user-data'] -notmatch '(?m)^package_update:'  -and
+                $Files['user-data'] -notmatch '(?m)^package_upgrade:'
             }
         }
     }
@@ -270,11 +280,9 @@ Describe 'Invoke-SeedIsoGeneration' {
         It 'ships network-config equal to New-StaticNetplanYaml output' {
             # Same template as the write_files entry, so first-boot
             # (network-config -> 50-cloud-init.yaml) and on-disk
-            # (write_files -> 99-static.yaml) cannot drift. Disabling
-            # cloud-init networking entirely on first boot is not viable
-            # because cc_package_update_upgrade_install needs the NIC
-            # up - so cloud-init owns first-boot bring-up via this slot,
-            # and the write_files disable flag handles subsequent boots.
+            # (write_files -> 99-static.yaml) cannot drift. Cloud-init
+            # owns first-boot bring-up via this slot; the write_files
+            # disable flag handles subsequent boots.
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             $vm       = New-TestVm
