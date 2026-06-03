@@ -74,7 +74,9 @@ BeforeAll {
     # these by name; the real implementations are covered by:
     #   - Tests/common/config/Read-VmProvisionerConfig.Tests.ps1
     #   - Infrastructure-HyperV/Tests/Start-VmIfStopped.Tests.ps1
-    function Read-VmProvisionerConfig { }
+    # SecretSuffix declared on the stub so Pester's ParameterFilter
+    # can bind it when asserting the forwarded value.
+    function Read-VmProvisionerConfig { param([string] $SecretSuffix) }
     function Start-VmIfStopped { param([string] $VmName) }
 
     # SSH / file-server cmdlets the no-side-effect contract forbids the
@@ -85,12 +87,18 @@ BeforeAll {
     function Invoke-SshClientCommand { }
     function Wait-VmSshReady        { }
 
+    # Suffix passed to the shim on every invocation. The script's
+    # mandatory -SecretSuffix is forwarded to Read-VmProvisionerConfig,
+    # which is mocked here, so the literal value does not matter to the
+    # behavioural assertions - it just needs to satisfy the param block.
+    $script:TestSuffix = 'Test'
+
     function Invoke-StartVms {
         # The shimmed script emits the chosen exit code to the pipeline
         # (regex-replaced from the original `exit (...)` line). Capture
         # it so the test can inspect the code without the host process
         # being terminated.
-        $script:exitCode = & $script:shimPath
+        $script:exitCode = & $script:shimPath -SecretSuffix $script:TestSuffix
     }
 }
 
@@ -301,6 +309,22 @@ Describe 'start-vms.ps1 - orchestration' {
 
         It 'exits with code 0' {
             $script:exitCode | Should -Be 0
+        }
+    }
+
+    Context 'SecretSuffix is forwarded to Read-VmProvisionerConfig' {
+
+        # Pins the wiring added in commit 0874c5d. A regression that
+        # drops the -SecretSuffix forward (or hard-codes a default
+        # value) would silently route every invocation at the same
+        # vault entry, defeating the per-lifecycle isolation that
+        # justifies the mandatory param.
+
+        It 'passes the script-level -SecretSuffix through to the helper' {
+            Mock Read-VmProvisionerConfig { ,@() }
+            Invoke-StartVms
+            Should -Invoke Read-VmProvisionerConfig -Times 1 -Exactly `
+                -ParameterFilter { $SecretSuffix -eq $script:TestSuffix }
         }
     }
 
