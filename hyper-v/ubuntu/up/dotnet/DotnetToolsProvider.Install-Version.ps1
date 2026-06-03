@@ -81,8 +81,18 @@ function Install-DotnetToolVersion {
     # Use the same Add-VmFileServerFile + curl pattern Expand-VmTarball
     # uses internally; we cannot reuse Expand-VmTarball itself because it
     # pipes into `tar -xzf -` and the .nupkg is a zip, not a gzip tarball.
-    $nupkgUrl  = Add-VmFileServerFile -Server $Server -LocalPath $nupkgPath
-    $nupkgLeaf = Split-Path -Path $nupkgPath -Leaf
+    #
+    # The staged file is written under NuGet's V2 flat-layout filename -
+    # '{idLower}.{version}.nupkg' - rather than the host-cache filename
+    # ('dotnet-tool-{id}-{version}.nupkg'). The local-source enumerator
+    # in SDK 8.0.x matches packages by parsing the filename against
+    # `{id}.{version}.nupkg`; a file that does not match that pattern
+    # is invisible to the resolver and surfaces as
+    # "<id>::[<version>, ) is not found in NuGet feeds <stagingDir>".
+    # The host cache filename is left alone (its convention is its own
+    # cache key); the rename is local to the staging copy.
+    $nupkgUrl       = Add-VmFileServerFile -Server $Server -LocalPath $nupkgPath
+    $stagedNupkgLeaf = "$($id.ToLowerInvariant()).$version.nupkg"
 
     # Bash heredoc delimiter is quoted ('NUGETCONFIG') so the VM-side
     # shell does NOT expand $stagingDir or backticks while writing the
@@ -92,7 +102,7 @@ function Install-DotnetToolVersion {
 set -euo pipefail
 sudo mkdir -p '$stagingDir'
 sudo chmod 0755 '$stagingDir'
-curl -fsSL '$nupkgUrl' | sudo tee '$stagingDir/$nupkgLeaf' >/dev/null
+curl -fsSL '$nupkgUrl' | sudo tee '$stagingDir/$stagedNupkgLeaf' >/dev/null
 sudo tee '$nugetConfigPath' >/dev/null <<'NUGETCONFIG'
 <?xml version="1.0" encoding="utf-8"?>
 <configuration>

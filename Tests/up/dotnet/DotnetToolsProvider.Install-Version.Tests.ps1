@@ -99,6 +99,22 @@ Describe 'Install-DotnetToolVersion' {
             }
         }
 
+        It 'writes the staged .nupkg under the canonical {idLower}.{version}.nupkg filename' {
+            Install-DotnetToolVersion `
+                -SshClient $script:FakeSshClient `
+                -Server    $script:FakeServer `
+                -Spec      (New-ToolSpec)
+
+            # NuGet's local-source enumerator matches files by parsing
+            # '{id}.{version}.nupkg'; the host-cache filename
+            # ('dotnet-tool-{id}-{version}.nupkg') does not match and the
+            # resolver would otherwise report "not found in NuGet feeds
+            # <stagingDir>" despite the file being present.
+            Should -Invoke Invoke-SshClientCommand -ParameterFilter {
+                $Command -match "tee '/var/lib/infra-provisioner/staging/dotnet-tools/dotnet-reportgenerator-globaltool@5\.4\.4/dotnet-reportgenerator-globaltool\.5\.4\.4\.nupkg'"
+            }
+        }
+
         It 'runs dotnet tool install with the expected argument vector' {
             Install-DotnetToolVersion `
                 -SshClient $script:FakeSshClient `
