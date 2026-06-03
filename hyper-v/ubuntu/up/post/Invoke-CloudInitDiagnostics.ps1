@@ -66,13 +66,26 @@ function Invoke-CloudInitDiagnostics {
         [object] $SshClient,
 
         [Parameter(Mandatory)]
-        [string] $VmConfigPath
+        [string] $VmConfigPath,
+
+        [Parameter(Mandatory)]
+        [string] $VmName
     )
 
-    $diagDir = Join-Path $VmConfigPath 'diagnostics'
+    # diagnostics/<vmName>/<timestamp>/ so:
+    #   - VmConfigPath is shared across VMs (per the seed ISO convention)
+    #     without per-VM dumps colliding
+    #   - re-provisioning the same VM (reconcile path) does not overwrite
+    #     the headline first-boot capture - idle re-runs land in a new
+    #     timestamped folder
+    $timestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
+    $diagDir   = Join-Path $VmConfigPath 'diagnostics'
+    $diagDir   = Join-Path $diagDir      $VmName
+    $diagDir   = Join-Path $diagDir      $timestamp
     if (-not (Test-Path -Path $diagDir -PathType Container)) {
         New-Item -ItemType Directory -Path $diagDir -Force | Out-Null
     }
+    Write-Host "  [diag] writing under $diagDir"
 
     # Ordered so the headline "blame" outputs land first in the log and
     # the most expensive / largest outputs land last. Each value is run
