@@ -159,6 +159,14 @@ BeforeAll {
         param($Parent, $Name, $ElapsedMs, [switch] $Failed)
     }
 
+    # TODO(diagnostic, remove): stub for the diagnostic helper captured by
+    # the orchestrator via ${function:Invoke-CloudInitDiagnostics}. Same
+    # null-capture failure mode as the timer stubs above. No-op here -
+    # the dispatch tests do not assert anything about diagnostic capture.
+    function global:Invoke-CloudInitDiagnostics {
+        param($SshClient, $VmConfigPath, $VmName, $Timestamp)
+    }
+
     function global:Copy-VmFilesByPattern {
         param($SshClient, $Server, $Pattern, $TargetDir,
               [switch]$Recurse, [switch]$PreserveRelativePath)
