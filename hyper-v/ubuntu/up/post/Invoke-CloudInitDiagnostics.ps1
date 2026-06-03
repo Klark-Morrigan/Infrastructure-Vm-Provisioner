@@ -250,7 +250,6 @@ function Invoke-CloudInitDiagnostics {
 
     foreach ($entry in $diagCommands.GetEnumerator()) {
         $outPath = Join-Path $diagDir $entry.Key
-        Write-Host "  [diag] $($entry.Value) -> $outPath"
         $remoteCmd = "sh -c " + "'" + ($entry.Value -replace "'", "'\''") + " 2>&1'"
         $result = Invoke-SshClientCommand -SshClient $SshClient -Command $remoteCmd
         Set-Content -Path $outPath -Value $result.Output -Encoding UTF8

@@ -68,7 +68,6 @@ function New-DiagnosticSshClientWrapper {
         New-Item -ItemType Directory -Path $diagDir -Force | Out-Null
     }
     $logPath = Join-Path $diagDir 'ssh.log'
-    Write-Host "  [diag] teeing SSH commands to $logPath"
 
     $wrapper = [PSCustomObject]@{
         _real    = $RealClient
