@@ -30,7 +30,17 @@
 #>
 
 [CmdletBinding()]
-param()
+param(
+    # Required. The vault read targets `VmProvisionerConfig-<Suffix>`.
+    # Operator invocations pass `Production`; ephemeral fixtures
+    # (parallel workflows, test harnesses, multi-tenant deployments)
+    # pass their own label. Mandatory so a caller cannot silently fall
+    # through to a default name and collide with another lifecycle's
+    # data.
+    [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
+    [string] $SecretSuffix
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -99,7 +109,7 @@ $ErrorActionPreference = 'Stop'
 #    validation - keeping this script focused on the provisioning pipeline.
 # ---------------------------------------------------------------------------
 
-$vmDefs = Read-VmProvisionerConfig
+$vmDefs = Read-VmProvisionerConfig -SecretSuffix $SecretSuffix
 
 # ---------------------------------------------------------------------------
 # 3. Idempotency and safety checks

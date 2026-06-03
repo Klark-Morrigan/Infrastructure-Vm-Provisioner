@@ -36,7 +36,15 @@ param(
     [string] $ConfigFile,
 
     [Parameter()]
-    [switch] $RequireVaultPassword
+    [switch] $RequireVaultPassword,
+
+    # Required. The secret is written as `VmProvisionerConfig-<Suffix>`.
+    # Operator runs pass `Production`; ephemeral fixtures (test
+    # harnesses, parallel workflows) pass their own label so each
+    # lifecycle has an isolated secret.
+    [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
+    [string] $SecretSuffix
 )
 
 Set-StrictMode -Version Latest
@@ -52,10 +60,19 @@ $ErrorActionPreference = 'Stop'
 # load time, so this ordering is safe.
 . "$PSScriptRoot\common\config\ConvertFrom-VmConfigJson.ps1"
 
+# Forward the secret-store cmdlet only the params it knows about; Suffix
+# is consumed locally to build SecretName and must not be splatted.
+$initParams = @{}
+foreach ($k in 'ConfigJson','ConfigFile','RequireVaultPassword') {
+    if ($PSBoundParameters.ContainsKey($k)) {
+        $initParams[$k] = $PSBoundParameters[$k]
+    }
+}
+
 Initialize-MicrosoftPowerShellSecretStoreVault `
     -VaultName           'VmProvisioner' `
-    -SecretName          'VmProvisionerConfig' `
-    @PSBoundParameters `
+    -SecretName          "VmProvisionerConfig-$SecretSuffix" `
+    @initParams `
     -Validate {
         param($json)
         $defs = ConvertTo-Array (ConvertFrom-VmConfigJson -Json $json)

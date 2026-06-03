@@ -34,7 +34,12 @@
 #>
 
 [CmdletBinding()]
-param()
+param(
+    # Required. See provision.ps1 for the suffix contract.
+    [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
+    [string] $SecretSuffix
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -52,7 +57,7 @@ $ErrorActionPreference = 'Stop'
 #    validation - keeping this script focused on the deprovisioning pipeline.
 # ---------------------------------------------------------------------------
 
-$vmDefs = Read-VmProvisionerConfig
+$vmDefs = Read-VmProvisionerConfig -SecretSuffix $SecretSuffix
 
 # ---------------------------------------------------------------------------
 # 2. Validate gateway consistency
