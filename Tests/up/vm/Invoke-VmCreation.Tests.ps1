@@ -21,6 +21,21 @@ BeforeAll {
         & $Action
     }
 
+    # Serial-console capture stubs. The real cmdlets live in
+    # Invoke-SerialConsoleCapture.ps1 and attach a named-pipe reader job
+    # before Start-VM; here they are no-ops so the creation tests stay
+    # focused on the Hyper-V dispatch and the finally-block cleanup. The
+    # Start stub returns $null so the function-scoped $consoleCapture
+    # variable carries a benign value into the wait-for-SSH sub-step's
+    # finally, which then forwards it to Stop-SerialConsoleCapture.
+    function Start-SerialConsoleCapture {
+        param($VmName, $VmConfigPath, $Timestamp)
+        $null
+    }
+    function Stop-SerialConsoleCapture {
+        param($Capture)
+    }
+
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\vm\create-vm.ps1"
 
     # Standard VM object satisfying all Invoke-VmCreation requirements.
@@ -66,19 +81,21 @@ BeforeAll {
     # Makes the SSH polling loop body never execute by returning a deadline in
     # the past relative to what Get-Date returns on the loop-condition check.
     #
-    # The source sets the deadline as:
-    #   $deadline = (Get-Date).AddMinutes($timeoutMinutes)   <- call 1
-    # and then checks:
-    #   while ((Get-Date) -lt $deadline)                     <- call 2+
+    # The source's Get-Date sequence is:
+    #   call 1: Get-Date -Format ...        (per-run _diagTimestamp)
+    #   call 2: (Get-Date).AddMinutes(10)   (deadline)
+    #   call 3+: while ((Get-Date) -lt $deadline)   (loop condition)
     #
-    # If all calls return the same instant T, the condition T < T+10min is
-    # true and the loop body runs. To prevent that, the first call returns T
-    # and every subsequent call returns T+11min (after the deadline).
+    # If the deadline call and the loop-condition call both see the same
+    # instant T, the condition T < T+10min is true and the loop runs. To
+    # prevent that, the first two calls return T (timestamp is irrelevant
+    # to the test; deadline becomes T+10min) and every subsequent call
+    # returns T+1hr (past the deadline, so the loop exits immediately).
     function Set-ExpiredDeadline {
         $script:_deadlineCallCount = 0
         Mock Get-Date {
             $script:_deadlineCallCount++
-            if ($script:_deadlineCallCount -le 1) { [datetime]'2020-01-01' }
+            if ($script:_deadlineCallCount -le 2) { [datetime]'2020-01-01' }
             else                                  { [datetime]'2020-01-01 01:00:00' }
         }
     }
