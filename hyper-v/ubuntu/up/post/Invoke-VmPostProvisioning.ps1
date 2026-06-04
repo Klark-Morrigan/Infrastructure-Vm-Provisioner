@@ -71,7 +71,12 @@ function Invoke-VmPostProvisioning {
     $password = $Vm.password
     $vmRef    = $Vm
     # TODO(diagnostic, remove): see Invoke-CloudInitDiagnostics.ps1 header.
-    $vmConfigPath               = $Vm.vmConfigPath
+    # PSObject.Properties guard because the reconcile path on an existing
+    # VM (and unit tests that build a minimal VM object) may not populate
+    # vmConfigPath; StrictMode turns bare access into PropertyNotFound.
+    $vmConfigPath               = if ($Vm.PSObject.Properties['vmConfigPath']) {
+        $Vm.vmConfigPath
+    } else { $null }
     $invokeCloudInitDiagnostics = ${function:Invoke-CloudInitDiagnostics}
 
     # Capture the per-step functions as scriptblock locals so the closure
