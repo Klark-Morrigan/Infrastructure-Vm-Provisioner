@@ -1,24 +1,22 @@
 <#
 .NOTES
-    TODO(diagnostic, remove): one-shot capture for attributing the
-    ~363s cloud-init wait to specific modules / systemd units AND for
-    diagnosing post-change regressions where cloud-init never reports
-    done. Read-only on the VM; outputs land host-side under
-    <VmConfigPath>/diagnostics/ so they survive VM teardown. Remove
-    this file, its dot-source line in provision.ps1, and the call in
-    Invoke-VmPostProvisioning.ps1 once the numbers have been gathered
-    and a real optimisation picked.
+    Per-VM diagnostic capture. Read-only on the VM; outputs land
+    host-side under <VmConfigPath>/diagnostics/<vmName>/<timestamp>/
+    so they survive VM teardown and so successful and failed runs
+    can be compared after the fact. Paired with
+    Invoke-SerialConsoleCapture (pre-SSH boot transcript) and
+    New-DiagnosticSshClientWrapper (live tee of every SSH command
+    during post-provisioning).
 
     Do not run this file directly. Dot-sourced by provision.ps1.
 
-    NOTE on hung boots: this function only runs after the post-
+    Coverage gap: this function only runs after the post-
     provisioning SSH session opens, which is gated by
     `wait for SSH` succeeding in Invoke-VmCreation. If sshd never
     binds port 22 (e.g. cloud-config.service stalls and patch 2
     from Invoke-BaseImagePatch.ps1 keeps sshd held off), the
-    function never runs. For that case run these commands manually
-    against the stuck VM once it eventually comes up, or via the
-    Hyper-V console.
+    function never runs. console.log from Invoke-SerialConsoleCapture
+    is the fallback for that case.
 #>
 
 # ---------------------------------------------------------------------------

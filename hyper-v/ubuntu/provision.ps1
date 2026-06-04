@@ -85,9 +85,10 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\reconciler\Invoke-ToolchainReconciliation.ps1"
 . "$PSScriptRoot\up\reconciler\Get-Providers.ps1"
 . "$PSScriptRoot\up\post\Set-EnvironmentVariables.ps1"
-# TODO(diagnostic, remove): see Invoke-CloudInitDiagnostics.ps1 +
-# Invoke-SerialConsoleCapture.ps1 + New-DiagnosticSshClientWrapper.ps1
-# headers. Paired diagnostic helpers.
+# Per-VM diagnostic helpers. See each file's NOTES block for the
+# specific data it captures and where outputs land. All three write
+# under <vmConfigPath>\diagnostics\<vmName>\<timestamp>\ so a single
+# provisioning run produces one self-contained folder.
 . "$PSScriptRoot\up\post\Invoke-CloudInitDiagnostics.ps1"
 . "$PSScriptRoot\up\post\Invoke-SerialConsoleCapture.ps1"
 . "$PSScriptRoot\up\post\New-DiagnosticSshClientWrapper.ps1"

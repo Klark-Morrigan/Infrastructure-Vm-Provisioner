@@ -36,10 +36,10 @@ function Invoke-VmCreation {
     Write-Host ""
     Write-Host "--- Creating VM: $($Vm.vmName) ---" -ForegroundColor Cyan
 
-    # TODO(diagnostic, remove): pre-SSH serial-console capture. Declared
-    # at function scope so the wait-for-SSH finally block can call
-    # Stop-SerialConsoleCapture even when Start-VM threw or the
-    # 'create + start' sub-step fails. See Invoke-SerialConsoleCapture.ps1.
+    # Serial-console capture handle. Declared at function scope so the
+    # wait-for-SSH finally block can call Stop-SerialConsoleCapture even
+    # when Start-VM threw or the 'create + start' sub-step fails. See
+    # Invoke-SerialConsoleCapture.ps1.
     $consoleCapture = $null
 
     # Phase split: 'create + start' covers everything up to and including
@@ -118,13 +118,13 @@ function Invoke-VmCreation {
                              -Name       'Network Adapter' `
                              -SwitchName $SwitchName
 
-    # TODO(diagnostic, remove): attach the named-pipe serial reader BEFORE
-    # Start-VM so we do not miss the early kernel / cloud-init lines. The
-    # reader job sits on Connect() until Hyper-V publishes the pipe (which
-    # happens as the VM starts).
+    # Attach the named-pipe serial reader BEFORE Start-VM so we do not
+    # miss the early kernel / cloud-init lines. The reader job sits on
+    # Connect() until Hyper-V publishes the pipe (which happens as the
+    # VM starts).
     #
-    # _diagTimestamp is set here so Invoke-CloudInitDiagnostics (which runs
-    # ~6 minutes later in post-provisioning) writes into the SAME
+    # _diagTimestamp is set here so Invoke-CloudInitDiagnostics (which
+    # runs later in post-provisioning) writes into the SAME
     # diagnostics/<vmName>/<timestamp>/ folder as console.log. Both
     # diagnostic functions read this field.
     $diagTimestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
@@ -209,10 +209,10 @@ function Invoke-VmCreation {
         Write-Host "  [OK] SSH reachable on $($Vm.vmName)." -ForegroundColor Green
     }
     finally {
-        # TODO(diagnostic, remove): stop the serial-console reader. Safe
-        # to call with $null (Start may have thrown). The reader normally
-        # exits on its own when the VM stops; this is the belt-and-braces
-        # for the orchestrator-tears-down-first case.
+        # Stop the serial-console reader. Safe to call with $null (Start
+        # may have thrown). The reader normally exits on its own when the
+        # VM stops; this is belt-and-braces for the orchestrator-tears-
+        # down-first case.
         Stop-SerialConsoleCapture -Capture $consoleCapture
 
         # Remove-VMDvdDrive detaches before Remove-Item deletes - deleting a

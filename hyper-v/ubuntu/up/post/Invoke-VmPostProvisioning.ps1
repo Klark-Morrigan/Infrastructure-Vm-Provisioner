@@ -50,11 +50,12 @@ function Invoke-VmPostProvisioning {
     Write-Host ""
     Write-Host "--- Post-provisioning: $($Vm.vmName) ---" -ForegroundColor Cyan
 
-    # TODO(diagnostic, remove): ensure $Vm._diagTimestamp is set. Normally
-    # populated by Invoke-VmCreation alongside the serial-console capture,
-    # but the reconcile path on an existing VM skips creation entirely, so
-    # we fall back to Get-Date here. Either way Invoke-CloudInitDiagnostics
-    # below uses the same value.
+    # Ensure $Vm._diagTimestamp is set. Normally populated by
+    # Invoke-VmCreation alongside the serial-console capture, but the
+    # reconcile path on an existing VM skips creation entirely, so we
+    # fall back to Get-Date here. Either way Invoke-CloudInitDiagnostics
+    # below uses the same value, keeping the diag dump and console.log
+    # for any given provisioning run under one folder.
     if (-not $Vm.PSObject.Properties['_diagTimestamp']) {
         Add-Member -InputObject $Vm -MemberType NoteProperty `
                    -Name '_diagTimestamp' `
@@ -70,10 +71,10 @@ function Invoke-VmPostProvisioning {
     $username = $Vm.username
     $password = $Vm.password
     $vmRef    = $Vm
-    # TODO(diagnostic, remove): see Invoke-CloudInitDiagnostics.ps1 header.
-    # PSObject.Properties guard because the reconcile path on an existing
-    # VM (and unit tests that build a minimal VM object) may not populate
-    # vmConfigPath; StrictMode turns bare access into PropertyNotFound.
+    # vmConfigPath is the diagnostic-output root. PSObject.Properties
+    # guard because the reconcile path on an existing VM (and unit
+    # tests that build a minimal VM object) may not populate it;
+    # StrictMode turns bare access into PropertyNotFound.
     $vmConfigPath               = if ($Vm.PSObject.Properties['vmConfigPath']) {
         $Vm.vmConfigPath
     } else { $null }
@@ -103,9 +104,8 @@ function Invoke-VmPostProvisioning {
     # each sub-step's wall-clock across every VM in the per-VM loop.
     $invokeWithSubStepTimer  = ${function:Invoke-WithSubStepTimer}
     $addSubStepDuration      = ${function:Add-SubStepDuration}
-    # TODO(diagnostic, remove): wrap real SshClient with a tee-to-file
-    # logger covering the whole post-provisioning phase. See
-    # New-DiagnosticSshClientWrapper.ps1 for rationale.
+    # Wraps the real SshClient with a tee-to-file logger covering the
+    # whole post-provisioning phase. See New-DiagnosticSshClientWrapper.ps1.
     $newDiagSshWrapper       = ${function:New-DiagnosticSshClientWrapper}
 
     $postBlock = {
@@ -137,13 +137,13 @@ function Invoke-VmPostProvisioning {
                              -Password  $password `
                              -Timeout   ([TimeSpan]::FromMinutes(10))
 
-            # TODO(diagnostic, remove): replace $sshClient with a duck-type-
-            # compatible wrapper that tees every RunCommand to ssh.log under
-            # the per-run diag folder. Every downstream consumer (cloud-init
-            # wait, files copy, reconciler, env vars) sees the wrapper via
-            # this exact variable, so no other call site needs to change.
-            # The wrapper forwards Disconnect/Dispose so the finally block
-            # below tears the real client down correctly.
+            # Replace $sshClient with a duck-type-compatible wrapper that
+            # tees every RunCommand to ssh.log under the per-run diag
+            # folder. Every downstream consumer (cloud-init wait, files
+            # copy, reconciler, env vars) sees the wrapper via this exact
+            # variable, so no other call site needs to change. The wrapper
+            # forwards Disconnect/Dispose so the finally block below tears
+            # the real client down correctly.
             $sshClient = & $newDiagSshWrapper `
                               -RealClient    $sshClient `
                               -VmConfigPath  $vmConfigPath `
@@ -179,11 +179,12 @@ function Invoke-VmPostProvisioning {
                     }
                 }
 
-            # TODO(diagnostic, remove): see Invoke-CloudInitDiagnostics.ps1
-            # header. Same closure-capture rationale as the other per-step
-            # functions above. $vmRef._diagTimestamp was set in
-            # Invoke-VmCreation so console.log + the dumps below land in
-            # the same per-run folder.
+            # Capture cloud-init / systemd / network state immediately
+            # after cloud-init reports done. Same closure-capture rationale
+            # as the other per-step functions above. $vmRef._diagTimestamp
+            # was set in Invoke-VmCreation so console.log + the dumps below
+            # land in the same per-run folder. See
+            # Invoke-CloudInitDiagnostics.ps1 for the full output list.
             & $invokeCloudInitDiagnostics `
                 -SshClient     $sshClient `
                 -VmConfigPath  $vmConfigPath `

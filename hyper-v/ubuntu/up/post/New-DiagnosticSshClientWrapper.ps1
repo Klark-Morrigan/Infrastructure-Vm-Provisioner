@@ -1,24 +1,19 @@
 <#
 .NOTES
-    TODO(diagnostic, remove): SSH command/output tee. Wraps a real
-    SSH.NET client with a PSCustomObject whose RunCommand ScriptMethod
-    appends each command, its stdout, stderr, exit status, and elapsed
-    time to a host-side log file before returning the result to the
-    caller. The wrapper is duck-type-compatible with the real client -
-    Invoke-SshClientCommand uses [object] $SshClient and only touches
-    .RunCommand, so providers and other consumers see no behavioural
-    difference.
+    SSH command/output tee. Wraps a real SSH.NET client with a
+    PSCustomObject whose RunCommand ScriptMethod appends each command,
+    its stdout, stderr, exit status, and elapsed time to a host-side
+    log file before returning the result to the caller. The wrapper
+    is duck-type-compatible with the real client - Invoke-SshClientCommand
+    uses [object] $SshClient and only touches .RunCommand, so providers
+    and other consumers see no behavioural difference.
 
     Used by Invoke-VmPostProvisioning to capture every SSH command run
     during the post-provisioning phase (cloud-init wait, files copy,
     reconcile, env vars) into <diagDir>/ssh.log alongside the other
     diagnostic outputs. The headline value is for the reconcile sub-
-    steps, which previously left no trace on disk beyond a one-line
-    Write-Host per provider.
-
-    Remove this file, its dot-source line in provision.ps1, and the
-    wrapper hook in Invoke-VmPostProvisioning.ps1 once the diagnostic
-    push is over.
+    steps, which would otherwise leave no trace on disk beyond a
+    one-line Write-Host per provider.
 
     Do not run this file directly. Dot-sourced by provision.ps1.
 #>

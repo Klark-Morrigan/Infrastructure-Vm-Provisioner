@@ -1,7 +1,7 @@
 <#
 .NOTES
-    TODO(diagnostic, remove): pre-SSH serial-console capture. Paired
-    with Invoke-CloudInitDiagnostics.ps1 - that script captures state
+    Pre-SSH serial-console capture. Paired with
+    Invoke-CloudInitDiagnostics.ps1 - that script captures state
     AFTER cloud-init reports done; this one captures the live console
     feed from VM power-on through cloud-init's modules, so we still
     have data when sshd never comes up (cloud-config hangs, kernel
@@ -10,10 +10,6 @@
     Outputs land host-side under the same per-VM-per-run subdirectory
     convention:
         <VmConfigPath>\diagnostics\<vmName>\<timestamp>\console.log
-
-    Remove this file, its dot-source line in provision.ps1, and the
-    Start/Stop calls in create-vm.ps1 once the pre-SSH unknowns have
-    been resolved.
 
     Do not run this file directly. Dot-sourced by provision.ps1.
 #>
