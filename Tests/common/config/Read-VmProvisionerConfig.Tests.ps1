@@ -51,6 +51,13 @@ BeforeAll {
     }
 
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\common\config\Read-VmProvisionerConfig.ps1"
+
+    # Suffix used by every happy-path call. Keeping it in one place means
+    # a future rename of the suffix contract only touches one literal in
+    # the test file; the asserted secret name and Write-Host text both
+    # interpolate this value.
+    $script:TestSuffix     = 'Production'
+    $script:TestSecretName = "VmProvisionerConfig-$script:TestSuffix"
 }
 
 Describe 'Read-VmProvisionerConfig' {
@@ -77,7 +84,7 @@ Describe 'Read-VmProvisionerConfig' {
                 $ListAvailable -and
                 $Name -eq 'Microsoft.PowerShell.SecretManagement'
             }
-            { Read-VmProvisionerConfig } | Should -Throw `
+            { Read-VmProvisionerConfig -SecretSuffix $script:TestSuffix } | Should -Throw `
                 "Module 'Microsoft.PowerShell.SecretManagement' is not installed. Run setup-secrets.ps1 first."
         }
 
@@ -86,7 +93,7 @@ Describe 'Read-VmProvisionerConfig' {
                 $ListAvailable -and
                 $Name -eq 'Microsoft.PowerShell.SecretStore'
             }
-            { Read-VmProvisionerConfig } | Should -Throw `
+            { Read-VmProvisionerConfig -SecretSuffix $script:TestSuffix } | Should -Throw `
                 "Module 'Microsoft.PowerShell.SecretStore' is not installed. Run setup-secrets.ps1 first."
         }
     }
@@ -96,7 +103,7 @@ Describe 'Read-VmProvisionerConfig' {
     # ------------------------------------------------------------------
 
         It 'imports each provider module exactly once with -ErrorAction Stop' {
-            Read-VmProvisionerConfig | Out-Null
+            Read-VmProvisionerConfig -SecretSuffix $script:TestSuffix | Out-Null
             Should -Invoke Import-Module -Times 1 -Exactly -ParameterFilter {
                 $Name -eq 'Microsoft.PowerShell.SecretManagement' -and
                 $ErrorAction -eq 'Stop'
@@ -114,13 +121,13 @@ Describe 'Read-VmProvisionerConfig' {
 
         It 'throws the literal message when the vault does not exist' {
             Mock Get-SecretVault { $null }
-            { Read-VmProvisionerConfig } | Should -Throw `
+            { Read-VmProvisionerConfig -SecretSuffix $script:TestSuffix } | Should -Throw `
                 "Vault 'VmProvisioner' not found. Run setup-secrets.ps1 first."
         }
 
         It 'does not call Get-Secret when the vault is missing' {
             Mock Get-SecretVault { $null }
-            { Read-VmProvisionerConfig } | Should -Throw
+            { Read-VmProvisionerConfig -SecretSuffix $script:TestSuffix } | Should -Throw
             Should -Invoke Get-Secret -Times 0 -Exactly
         }
     }
@@ -130,11 +137,12 @@ Describe 'Read-VmProvisionerConfig' {
     # ------------------------------------------------------------------
 
         It 'reads the secret with the expected parameters exactly once' {
-            Read-VmProvisionerConfig | Out-Null
+            Read-VmProvisionerConfig -SecretSuffix $script:TestSuffix | Out-Null
+            $expectedName = $script:TestSecretName
             Should -Invoke Get-Secret -Times 1 -Exactly -ParameterFilter {
-                $Vault       -eq 'VmProvisioner'        -and
-                $Name        -eq 'VmProvisionerConfig'  -and
-                $AsPlainText                            -and
+                $Vault       -eq 'VmProvisioner' -and
+                $Name        -eq $expectedName   -and
+                $AsPlainText                     -and
                 $ErrorAction -eq 'Stop'
             }
         }
@@ -145,7 +153,7 @@ Describe 'Read-VmProvisionerConfig' {
     # ------------------------------------------------------------------
 
         It 'returns the validated VM definitions as an array' {
-            $result = Read-VmProvisionerConfig
+            $result = Read-VmProvisionerConfig -SecretSuffix $script:TestSuffix
             # GetType().IsArray rather than -BeOfType, because Should pipes
             # unroll the array before the type check.
             $result.GetType().IsArray | Should -BeTrue
@@ -158,22 +166,62 @@ Describe 'Read-VmProvisionerConfig' {
             Mock ConvertFrom-VmConfigJson {
                 [PSCustomObject]@{ vmName = 'only-one' }
             }
-            $result = Read-VmProvisionerConfig
+            $result = Read-VmProvisionerConfig -SecretSuffix $script:TestSuffix
             $result.GetType().IsArray | Should -BeTrue
             $result.Count             | Should -Be 1
         }
 
-        It 'emits the "Reading ..." status line' {
-            Read-VmProvisionerConfig | Out-Null
+        It 'emits the "Reading ..." status line with the suffixed secret name' {
+            Read-VmProvisionerConfig -SecretSuffix $script:TestSuffix | Out-Null
+            $expectedLine = "Reading '$script:TestSecretName' from vault 'VmProvisioner' ..."
             Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter {
-                $Object -eq "Reading 'VmProvisionerConfig' from vault 'VmProvisioner' ..."
+                $Object -eq $expectedLine
             }
         }
 
         It 'emits the "[OK] Config validated" line with the VM count' {
-            Read-VmProvisionerConfig | Out-Null
+            Read-VmProvisionerConfig -SecretSuffix $script:TestSuffix | Out-Null
             Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter {
                 $Object -eq '[OK] Config validated - 1 VM definition(s) found.'
+            }
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'SecretSuffix parameter contract' {
+    # ------------------------------------------------------------------
+
+        # Pins the param attributes added in commit 0874c5d. Operator
+        # invocations pass 'Production'; ephemeral fixtures pass their
+        # own label. The mandatory + ValidateNotNullOrEmpty combination
+        # is the safety guard that prevents a caller from silently
+        # falling through to a default name and colliding with another
+        # lifecycle's secret.
+
+        It 'rejects missing -SecretSuffix with a ParameterBinding error' {
+            { Read-VmProvisionerConfig } | Should -Throw `
+                -ExpectedMessage '*SecretSuffix*'
+        }
+
+        It 'rejects an empty -SecretSuffix value (ValidateNotNullOrEmpty)' {
+            { Read-VmProvisionerConfig -SecretSuffix '' } | Should -Throw
+        }
+
+        It 'rejects a $null -SecretSuffix value' {
+            { Read-VmProvisionerConfig -SecretSuffix $null } | Should -Throw
+        }
+
+        It 'interpolates the suffix into the Get-Secret Name parameter' {
+            Read-VmProvisionerConfig -SecretSuffix 'CI-42' | Out-Null
+            Should -Invoke Get-Secret -Times 1 -Exactly -ParameterFilter {
+                $Name -eq 'VmProvisionerConfig-CI-42'
+            }
+        }
+
+        It 'interpolates the suffix into the "Reading ..." status line' {
+            Read-VmProvisionerConfig -SecretSuffix 'CI-42' | Out-Null
+            Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter {
+                $Object -eq "Reading 'VmProvisionerConfig-CI-42' from vault 'VmProvisioner' ..."
             }
         }
     }
@@ -186,7 +234,7 @@ Describe 'Read-VmProvisionerConfig' {
             Mock ConvertFrom-VmConfigJson {
                 throw 'Invalid JSON: oops'
             }
-            { Read-VmProvisionerConfig } | Should -Throw 'Invalid JSON: oops'
+            { Read-VmProvisionerConfig -SecretSuffix $script:TestSuffix } | Should -Throw 'Invalid JSON: oops'
         }
     }
 }

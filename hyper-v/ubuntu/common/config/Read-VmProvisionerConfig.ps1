@@ -13,21 +13,28 @@
 # ---------------------------------------------------------------------------
 # Read-VmProvisionerConfig
 #   Ensures the SecretManagement provider modules are loaded, reads the
-#   VmProvisionerConfig secret from the local VmProvisioner vault, then
-#   parses and validates it via ConvertFrom-VmConfigJson.
+#   VmProvisionerConfig-<Suffix> secret from the local VmProvisioner
+#   vault, then parses and validates it via ConvertFrom-VmConfigJson.
 #
 #   Returns the validated VM-definitions array, already collected via
 #   ConvertTo-Array so callers always receive an array regardless of the
 #   single-VM unwrap behaviour of ConvertFrom-Json.
-#
-#   The vault name (VmProvisioner) and secret name (VmProvisionerConfig)
-#   are constants today; the function is parameterless to avoid
-#   speculative surface for callers that do not exist.
 # ---------------------------------------------------------------------------
 
 function Read-VmProvisionerConfig {
     [CmdletBinding()]
-    param()
+    param(
+        # Required. The secret read is `VmProvisionerConfig-<SecretSuffix>`.
+        # The suffix is the lifecycle / environment label - operator
+        # invocations pass `Production`; ephemeral fixtures (parallel
+        # workflows, test harnesses, multi-tenant deployments) pass
+        # their own label. Mandatory so a caller cannot silently fall
+        # through to a default name and collide with another lifecycle's
+        # data.
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $SecretSuffix
+    )
 
     # SecretStore vault provider modules. setup-secrets.ps1 installs them;
     # the bootstrap path here is import-only and fails fast if either is
@@ -43,7 +50,7 @@ function Read-VmProvisionerConfig {
     }
 
     $vaultName  = 'VmProvisioner'
-    $secretName = 'VmProvisionerConfig'
+    $secretName = "VmProvisionerConfig-$SecretSuffix"
 
     Write-Host "Reading '$secretName' from vault '$vaultName' ..." -ForegroundColor Cyan
 

@@ -40,7 +40,12 @@
 #>
 
 [CmdletBinding()]
-param()
+param(
+    # Required. See provision.ps1 for the suffix contract.
+    [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
+    [string] $SecretSuffix
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -65,7 +70,7 @@ $ErrorActionPreference = 'Stop'
 #    message regardless of which entry-point the operator invoked.
 # ---------------------------------------------------------------------------
 
-$vmDefs = Read-VmProvisionerConfig
+$vmDefs = Read-VmProvisionerConfig -SecretSuffix $SecretSuffix
 
 # ---------------------------------------------------------------------------
 # 3. Per-VM power-on

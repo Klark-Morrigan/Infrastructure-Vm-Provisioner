@@ -36,6 +36,12 @@ function Invoke-VmCreation {
     Write-Host ""
     Write-Host "--- Creating VM: $($Vm.vmName) ---" -ForegroundColor Cyan
 
+    # Serial-console capture handle. Declared at function scope so the
+    # wait-for-SSH finally block can call Stop-SerialConsoleCapture even
+    # when Start-VM threw or the 'create + start' sub-step fails. See
+    # Invoke-SerialConsoleCapture.ps1.
+    $consoleCapture = $null
+
     # Phase split: 'create + start' covers everything up to and including
     # Start-VM (Hyper-V API work, typically sub-second). 'wait for SSH'
     # covers the subsequent polling loop, which is guest-boot dominated
@@ -112,6 +118,24 @@ function Invoke-VmCreation {
                              -Name       'Network Adapter' `
                              -SwitchName $SwitchName
 
+    # Attach the named-pipe serial reader BEFORE Start-VM so we do not
+    # miss the early kernel / cloud-init lines. The reader job sits on
+    # Connect() until Hyper-V publishes the pipe (which happens as the
+    # VM starts).
+    #
+    # _diagTimestamp is set here so Invoke-CloudInitDiagnostics (which
+    # runs later in post-provisioning) writes into the SAME
+    # diagnostics/<vmName>/<timestamp>/ folder as console.log. Both
+    # diagnostic functions read this field.
+    $diagTimestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
+    Add-Member -InputObject $Vm -MemberType NoteProperty `
+               -Name '_diagTimestamp' -Value $diagTimestamp -Force
+
+    $consoleCapture = Start-SerialConsoleCapture `
+                          -VmName       $Vm.vmName `
+                          -VmConfigPath $Vm.vmConfigPath `
+                          -Timestamp    $diagTimestamp
+
     Write-Host "  Starting VM ..."
     Start-VM -VMName $Vm.vmName
     Write-Host "  [OK] VM started." -ForegroundColor Green
@@ -185,6 +209,12 @@ function Invoke-VmCreation {
         Write-Host "  [OK] SSH reachable on $($Vm.vmName)." -ForegroundColor Green
     }
     finally {
+        # Stop the serial-console reader. Safe to call with $null (Start
+        # may have thrown). The reader normally exits on its own when the
+        # VM stops; this is belt-and-braces for the orchestrator-tears-
+        # down-first case.
+        Stop-SerialConsoleCapture -Capture $consoleCapture
+
         # Remove-VMDvdDrive detaches before Remove-Item deletes - deleting a
         # file still attached leaves a broken DVD drive reference in the VM.
         $dvdDrive = Get-VMDvdDrive -VMName $Vm.vmName |

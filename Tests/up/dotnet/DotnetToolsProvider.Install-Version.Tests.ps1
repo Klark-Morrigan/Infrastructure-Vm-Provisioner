@@ -99,18 +99,57 @@ Describe 'Install-DotnetToolVersion' {
             }
         }
 
+        It 'writes the staged .nupkg under the canonical {idLower}.{version}.nupkg filename' {
+            Install-DotnetToolVersion `
+                -SshClient $script:FakeSshClient `
+                -Server    $script:FakeServer `
+                -Spec      (New-ToolSpec)
+
+            # NuGet's local-source enumerator matches files by parsing
+            # '{id}.{version}.nupkg'; the host-cache filename
+            # ('dotnet-tool-{id}-{version}.nupkg') does not match and the
+            # resolver would otherwise report "not found in NuGet feeds
+            # <stagingDir>" despite the file being present.
+            Should -Invoke Invoke-SshClientCommand -ParameterFilter {
+                $Command -match "tee '/var/lib/infra-provisioner/staging/dotnet-tools/dotnet-reportgenerator-globaltool@5\.4\.4/dotnet-reportgenerator-globaltool\.5\.4\.4\.nupkg'"
+            }
+        }
+
         It 'runs dotnet tool install with the expected argument vector' {
             Install-DotnetToolVersion `
                 -SshClient $script:FakeSshClient `
                 -Server    $script:FakeServer `
                 -Spec      (New-ToolSpec)
 
+            # --configfile pins the resolver to the staging-dir NuGet.Config
+            # (which has <clear /> + the staging dir), so neither
+            # --add-source nor --ignore-failed-sources are needed; their
+            # absence is what stops the resolver from probing api.nuget.org.
             Should -Invoke Invoke-SshClientCommand -ParameterFilter {
                 $Command -match "dotnet tool install 'dotnet-reportgenerator-globaltool'" -and
                 $Command -match "--tool-path '/usr/local/share/dotnet/tools'" -and
-                $Command -match "--add-source '/var/lib/infra-provisioner/staging/dotnet-tools/dotnet-reportgenerator-globaltool@5\.4\.4'" -and
+                $Command -match "--configfile '/var/lib/infra-provisioner/staging/dotnet-tools/dotnet-reportgenerator-globaltool@5\.4\.4/NuGet\.Config'" -and
                 $Command -match "--version '5\.4\.4'" -and
-                $Command -match '--ignore-failed-sources'
+                $Command -notmatch '--add-source' -and
+                $Command -notmatch '--ignore-failed-sources'
+            }
+        }
+
+        It 'writes a NuGet.Config pinning the staging dir as the sole package source' {
+            Install-DotnetToolVersion `
+                -SshClient $script:FakeSshClient `
+                -Server    $script:FakeServer `
+                -Spec      (New-ToolSpec)
+
+            # The staging script tees a NuGet.Config into the staging dir.
+            # <clear /> drops ambient nuget.org; the single <add /> entry
+            # points at the same staging dir the .nupkg was just written
+            # to. Together these two lines are what keeps the VM install
+            # offline.
+            Should -Invoke Invoke-SshClientCommand -ParameterFilter {
+                $Command -match "tee '/var/lib/infra-provisioner/staging/dotnet-tools/dotnet-reportgenerator-globaltool@5\.4\.4/NuGet\.Config'" -and
+                $Command -match '<clear />' -and
+                $Command -match 'value="/var/lib/infra-provisioner/staging/dotnet-tools/dotnet-reportgenerator-globaltool@5\.4\.4"'
             }
         }
 

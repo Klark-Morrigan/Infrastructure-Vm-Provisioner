@@ -50,6 +50,18 @@ function Invoke-VmPostProvisioning {
     Write-Host ""
     Write-Host "--- Post-provisioning: $($Vm.vmName) ---" -ForegroundColor Cyan
 
+    # Ensure $Vm._diagTimestamp is set. Normally populated by
+    # Invoke-VmCreation alongside the serial-console capture, but the
+    # reconcile path on an existing VM skips creation entirely, so we
+    # fall back to Get-Date here. Either way Invoke-CloudInitDiagnostics
+    # below uses the same value, keeping the diag dump and console.log
+    # for any given provisioning run under one folder.
+    if (-not $Vm.PSObject.Properties['_diagTimestamp']) {
+        Add-Member -InputObject $Vm -MemberType NoteProperty `
+                   -Name '_diagTimestamp' `
+                   -Value (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss') -Force
+    }
+
     # Capture VM fields explicitly into locals so the closure scriptblock
     # below sees them when invoked from another module (Invoke-WithVmFileServer
     # lives in Infrastructure.HyperV - function-scoped variables are not in
@@ -59,6 +71,14 @@ function Invoke-VmPostProvisioning {
     $username = $Vm.username
     $password = $Vm.password
     $vmRef    = $Vm
+    # vmConfigPath is the diagnostic-output root. PSObject.Properties
+    # guard because the reconcile path on an existing VM (and unit
+    # tests that build a minimal VM object) may not populate it;
+    # StrictMode turns bare access into PropertyNotFound.
+    $vmConfigPath               = if ($Vm.PSObject.Properties['vmConfigPath']) {
+        $Vm.vmConfigPath
+    } else { $null }
+    $invokeCloudInitDiagnostics = ${function:Invoke-CloudInitDiagnostics}
 
     # Capture the per-step functions as scriptblock locals so the closure
     # below can invoke them via the call operator. Name-based command
@@ -84,16 +104,51 @@ function Invoke-VmPostProvisioning {
     # each sub-step's wall-clock across every VM in the per-VM loop.
     $invokeWithSubStepTimer  = ${function:Invoke-WithSubStepTimer}
     $addSubStepDuration      = ${function:Add-SubStepDuration}
+    # Wraps the real SshClient with a tee-to-file logger covering the
+    # whole post-provisioning phase. See New-DiagnosticSshClientWrapper.ps1.
+    $newDiagSshWrapper       = ${function:New-DiagnosticSshClientWrapper}
 
     $postBlock = {
         param($server)
 
         $sshClient = $null
         try {
+            # Generous Timeout because ssh.socket binds port 22 early via
+            # socket activation, so the upstream 'wait for SSH' TCP probe
+            # returns true before ssh.service has actually started. The
+            # client connect after port 22 opens blocks while systemd
+            # activates ssh.service, which is held off by patch 2's
+            # After=cloud-config.service ordering until cloud-config
+            # completes. Worst observed cloud-config duration so far is
+            # ~7.5 minutes when apt's noble mirror is DNS-flapping; 10 min
+            # matches the upstream 'wait for SSH' budget in Invoke-VmCreation
+            # and gives ~30% headroom over the worst observed run.
+            #
+            # Connect is synchronous with no progress output. The leading
+            # Write-Host below tells the operator the silence is expected,
+            # so a multi-minute wait does not read like a hang.
+            Write-Host (
+                "  Connecting to $vmIp (this may take several minutes " +
+                "while cloud-init finishes) ..."
+            )
             $sshClient = New-VmSshClient `
                              -IpAddress $vmIp `
                              -Username  $username `
-                             -Password  $password
+                             -Password  $password `
+                             -Timeout   ([TimeSpan]::FromMinutes(10))
+
+            # Replace $sshClient with a duck-type-compatible wrapper that
+            # tees every RunCommand to ssh.log under the per-run diag
+            # folder. Every downstream consumer (cloud-init wait, files
+            # copy, reconciler, env vars) sees the wrapper via this exact
+            # variable, so no other call site needs to change. The wrapper
+            # forwards Disconnect/Dispose so the finally block below tears
+            # the real client down correctly.
+            $sshClient = & $newDiagSshWrapper `
+                              -RealClient    $sshClient `
+                              -VmConfigPath  $vmConfigPath `
+                              -VmName        $vmName `
+                              -Timestamp     $vmRef._diagTimestamp
 
             # cloud-init may still be running its later modules (apt holding
             # the dpkg lock, runcmd not yet started). Wait once, here, so no
@@ -123,6 +178,18 @@ function Invoke-VmPostProvisioning {
                             "with post-provisioning steps.")
                     }
                 }
+
+            # Capture cloud-init / systemd / network state immediately
+            # after cloud-init reports done. Same closure-capture rationale
+            # as the other per-step functions above. $vmRef._diagTimestamp
+            # was set in Invoke-VmCreation so console.log + the dumps below
+            # land in the same per-run folder. See
+            # Invoke-CloudInitDiagnostics.ps1 for the full output list.
+            & $invokeCloudInitDiagnostics `
+                -SshClient     $sshClient `
+                -VmConfigPath  $vmConfigPath `
+                -VmName        $vmName `
+                -Timestamp     $vmRef._diagTimestamp
 
             # Manifest store init runs unconditionally near the top of
             # the per-VM loop: it costs one cheap mkdir + chown + chmod

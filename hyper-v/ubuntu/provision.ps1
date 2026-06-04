@@ -30,7 +30,17 @@
 #>
 
 [CmdletBinding()]
-param()
+param(
+    # Required. The vault read targets `VmProvisionerConfig-<Suffix>`.
+    # Operator invocations pass `Production`; ephemeral fixtures
+    # (parallel workflows, test harnesses, multi-tenant deployments)
+    # pass their own label. Mandatory so a caller cannot silently fall
+    # through to a default name and collide with another lifecycle's
+    # data.
+    [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
+    [string] $SecretSuffix
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -75,6 +85,13 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\reconciler\Invoke-ToolchainReconciliation.ps1"
 . "$PSScriptRoot\up\reconciler\Get-Providers.ps1"
 . "$PSScriptRoot\up\post\Set-EnvironmentVariables.ps1"
+# Per-VM diagnostic helpers. See each file's NOTES block for the
+# specific data it captures and where outputs land. All three write
+# under <vmConfigPath>\diagnostics\<vmName>\<timestamp>\ so a single
+# provisioning run produces one self-contained folder.
+. "$PSScriptRoot\up\post\Invoke-CloudInitDiagnostics.ps1"
+. "$PSScriptRoot\up\post\Invoke-SerialConsoleCapture.ps1"
+. "$PSScriptRoot\up\post\New-DiagnosticSshClientWrapper.ps1"
 . "$PSScriptRoot\up\post\Invoke-VmPostProvisioning.ps1"
 . "$PSScriptRoot\up\seed\New-StaticNetplanYaml.ps1"
 . "$PSScriptRoot\up\seed\generate-seed-iso.ps1"
@@ -99,7 +116,7 @@ $ErrorActionPreference = 'Stop'
 #    validation - keeping this script focused on the provisioning pipeline.
 # ---------------------------------------------------------------------------
 
-$vmDefs = Read-VmProvisionerConfig
+$vmDefs = Read-VmProvisionerConfig -SecretSuffix $SecretSuffix
 
 # ---------------------------------------------------------------------------
 # 3. Idempotency and safety checks

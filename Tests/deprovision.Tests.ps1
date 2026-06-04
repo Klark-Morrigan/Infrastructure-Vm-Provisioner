@@ -80,6 +80,41 @@ Describe 'deprovision.ps1 - bootstrap wiring (Read-VmProvisionerConfig)' {
         @($calls).Count | Should -Be 0 `
             -Because 'SecretManagement / SecretStore imports moved into Read-VmProvisionerConfig'
     }
+
+    # See provision.Tests.ps1 for the suffix-forwarding rationale.
+
+    It 'declares -SecretSuffix as a mandatory script parameter' {
+        $param = $script:ast.ParamBlock.Parameters |
+            Where-Object { $_.Name.VariablePath.UserPath -eq 'SecretSuffix' } |
+            Select-Object -First 1
+        $param | Should -Not -BeNullOrEmpty
+        $hasMandatory = $param.Attributes | Where-Object {
+            $_.TypeName.Name -eq 'Parameter' -and
+            ($_.NamedArguments | Where-Object {
+                $_.ArgumentName -eq 'Mandatory'
+            })
+        }
+        $hasMandatory | Should -Not -BeNullOrEmpty
+    }
+
+    It 'forwards the script-level $SecretSuffix to Read-VmProvisionerConfig' {
+        $call = $script:commands |
+            Where-Object { $_.GetCommandName() -eq 'Read-VmProvisionerConfig' } |
+            Select-Object -First 1
+        $forwarded = $false
+        for ($i = 1; $i -lt $call.CommandElements.Count - 1; $i++) {
+            $cur  = $call.CommandElements[$i]
+            $next = $call.CommandElements[$i + 1]
+            if ($cur -is [System.Management.Automation.Language.CommandParameterAst] -and
+                $cur.ParameterName -eq 'SecretSuffix' -and
+                $next -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $next.VariablePath.UserPath -eq 'SecretSuffix') {
+                $forwarded = $true
+                break
+            }
+        }
+        $forwarded | Should -BeTrue
+    }
 }
 
 Describe 'deprovision.ps1 - teardown wiring' {

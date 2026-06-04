@@ -80,10 +80,13 @@ BeforeAll {
 
     # PSSA's plain-text password warning is suppressed for the same reason
     # it is on the real cmdlet - SSH.NET requires a plain string.
+    # -Timeout added to mirror the real cmdlet's public surface
+    # (Infrastructure.HyperV 0.10.0+); tests do not assert on it so the
+    # stub accepts and ignores it.
     function global:New-VmSshClient {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
             'PSAvoidUsingPlainTextForPassword', 'Password')]
-        param($IpAddress, $Username, $Password)
+        param($IpAddress, $Username, $Password, $Timeout)
         $global:_PostProv_Calls['New-VmSshClient'] += @{
             IpAddress = $IpAddress
             Username  = $Username
@@ -157,6 +160,19 @@ BeforeAll {
     }
     function global:Add-SubStepDuration {
         param($Parent, $Name, $ElapsedMs, [switch] $Failed)
+    }
+
+    # Stubs for the diagnostic helpers captured by the orchestrator via
+    # ${function:...}. Same null-capture failure mode as the timer stubs
+    # above. The SSH wrapper stub passes the real client straight through
+    # so the orchestrator's downstream consumers still observe the fake
+    # SshClient the tests injected.
+    function global:Invoke-CloudInitDiagnostics {
+        param($SshClient, $VmConfigPath, $VmName, $Timestamp)
+    }
+    function global:New-DiagnosticSshClientWrapper {
+        param($RealClient, $VmConfigPath, $VmName, $Timestamp)
+        return $RealClient
     }
 
     function global:Copy-VmFilesByPattern {

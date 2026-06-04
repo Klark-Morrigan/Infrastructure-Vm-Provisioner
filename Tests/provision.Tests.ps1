@@ -113,6 +113,56 @@ Describe 'provision.ps1 - bootstrap wiring (Read-VmProvisionerConfig)' {
         @($calls).Count | Should -Be 0 `
             -Because 'secret retrieval moved into Read-VmProvisionerConfig'
     }
+
+    # The mandatory -SecretSuffix added in commit 0874c5d gives each
+    # lifecycle its own VmProvisionerConfig-<Suffix> entry. A regression
+    # that drops the forwarding (or substitutes a literal) would silently
+    # route every invocation at the same vault key, defeating the
+    # isolation. These two AST checks pin the contract end-to-end:
+    # script accepts the param, and forwards the same variable through
+    # to the helper.
+
+    It 'declares -SecretSuffix as a mandatory script parameter' {
+        $param = $script:ast.ParamBlock.Parameters |
+            Where-Object { $_.Name.VariablePath.UserPath -eq 'SecretSuffix' } |
+            Select-Object -First 1
+        $param | Should -Not -BeNullOrEmpty `
+            -Because 'provision.ps1 must surface SecretSuffix to the operator'
+        $hasMandatory = $param.Attributes | Where-Object {
+            $_.TypeName.Name -eq 'Parameter' -and
+            ($_.NamedArguments | Where-Object {
+                $_.ArgumentName -eq 'Mandatory'
+            })
+        }
+        $hasMandatory | Should -Not -BeNullOrEmpty `
+            -Because 'SecretSuffix must be mandatory so the caller cannot fall through to a default'
+    }
+
+    It 'forwards the script-level $SecretSuffix to Read-VmProvisionerConfig' {
+        $call = $script:commands |
+            Where-Object { $_.GetCommandName() -eq 'Read-VmProvisionerConfig' } |
+            Select-Object -First 1
+
+        # Walk the CommandElements in pairs looking for a
+        #   -SecretSuffix $SecretSuffix
+        # neighbour. CommandElements[0] is the command name, elements
+        # alternate between CommandParameterAst (-Name) and the value
+        # expression that follows.
+        $forwarded = $false
+        for ($i = 1; $i -lt $call.CommandElements.Count - 1; $i++) {
+            $cur  = $call.CommandElements[$i]
+            $next = $call.CommandElements[$i + 1]
+            if ($cur -is [System.Management.Automation.Language.CommandParameterAst] -and
+                $cur.ParameterName -eq 'SecretSuffix' -and
+                $next -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $next.VariablePath.UserPath -eq 'SecretSuffix') {
+                $forwarded = $true
+                break
+            }
+        }
+        $forwarded | Should -BeTrue `
+            -Because 'a regression that hard-codes the suffix would silently collide lifecycles'
+    }
 }
 
 Describe 'provision.ps1 - acquisition wiring (Step 4)' {
