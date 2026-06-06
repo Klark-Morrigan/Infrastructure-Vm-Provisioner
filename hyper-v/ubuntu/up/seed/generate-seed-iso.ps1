@@ -168,30 +168,10 @@ runcmd:
   - netplan apply
 "@
 
-    # ------------------------------------------------------------------
-    # network-config (NoCloud v1+ slot)
-    # Ships the full static netplan so cloud-init's init-local stage
-    # brings the NIC up on first boot before the config stage runs
-    # apt. Same template New-StaticNetplanYaml emits for write_files,
-    # so the two sources cannot drift. The disable-network leg of the
-    # design happens via write_files (see above) and applies to
-    # SUBSEQUENT boots only. See the file header for the full reason.
-    # ------------------------------------------------------------------
-    $networkConfig = $netplanYaml
-
-    $seedIsoPath = Join-Path $Vm.vmConfigPath "$($Vm.vmName)-seed.iso"
-    Write-Host "  Writing: $seedIsoPath"
-
-    New-SeedIso -OutputPath $seedIsoPath -Files @{
-        'meta-data'      = $metaData
-        'user-data'      = $userData
-        'network-config' = $networkConfig
-    }
-
-    Write-Host "  [OK] Seed ISO ready: $seedIsoPath" -ForegroundColor Green
-
-    # Store the ISO path on the VM object so Invoke-VmCreation can
-    # attach and clean it up without recomputing the path.
-    Add-Member -InputObject $Vm -MemberType NoteProperty `
-               -Name '_seedIsoPath' -Value $seedIsoPath -Force
+    # network-config (NoCloud v1+ slot) carries the same netplan so
+    # first-boot bring-up and on-disk owner cannot drift.
+    Write-VmSeedIso -Vm $Vm `
+                    -MetaData      $metaData `
+                    -UserData      $userData `
+                    -NetworkConfig $netplanYaml
 }
