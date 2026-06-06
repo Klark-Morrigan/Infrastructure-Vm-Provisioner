@@ -1,0 +1,235 @@
+<#
+.NOTES
+    Do not run this file directly. It is intended to be dot-sourced by
+    provision.ps1 after iso.ps1, Get-RouterNicStaticMac.ps1, and the
+    shared seed helpers (Initialize-SeedConfigDirectory,
+    New-CloudInitMetaData, New-CloudInitUserBlock,
+    New-CloudInitDisableNetworkConfigEntry, Format-CloudInitLiteralBlock,
+    Write-VmSeedIso, New-StaticNetplanYaml) have loaded.
+#>
+
+# ---------------------------------------------------------------------------
+# Invoke-RouterSeedIsoGeneration
+#   Sibling of Invoke-SeedIsoGeneration that builds the cloud-init seed
+#   ISO for a router VM (kind: router). The router VM is the dual-NIC
+#   gateway introduced in feature 53: one NIC on a host-bridged external
+#   switch (upstream), one on a per-environment Hyper-V Private switch
+#   (downstream). The seed lands:
+#
+#     - /etc/netplan/99-router.yaml : netplan v2 with one ethernet entry
+#         per NIC, each matched by MAC. set-name pins the kernel
+#         interface names to ext0 (upstream) and priv0 (downstream) so
+#         the nftables ruleset can hard-code interface names without
+#         depending on kernel naming heuristics.
+#     - /etc/sysctl.d/99-router.conf  : net.ipv4.ip_forward = 1
+#         Switches the kernel from "host" to "router" forwarding mode.
+#         Loaded by sysctl --system in runcmd.
+#     - /etc/nftables.conf            : MASQUERADE on ext0 (outbound
+#         egress) and a FORWARD chain that lets priv0 -> ext0 establish
+#         new connections while only allowing ext0 -> priv0 for already-
+#         established / related traffic. Loaded by nftables.service.
+#     - /etc/dnsmasq.d/router.conf    : dnsmasq bound to the private NIC
+#         IP, no-resolv so it doesn't trip over systemd-resolved on the
+#         router itself, with the VM's upstream DNS server as the
+#         forwarder. Loaded by dnsmasq.service.
+#
+#   MACs: each NIC needs a stable MAC so netplan's match-by-MAC block
+#   can pin per-NIC config. The MAC is derived deterministically here
+#   and stashed on the VM object as _externalMac / _privateMac so
+#   create-vm.ps1 can pin the same MAC at VM-creation time.
+#
+#   Netplan composition: New-StaticNetplanYaml is called twice with
+#   -NoWrapper (one per NIC), each emitting a wrapper-less ethernet
+#   entry. The router code wraps the concatenation once so both NICs
+#   live in a single netplan document - a single document is what the
+#   network-config slot can ship and what netplan parses as one unit.
+#
+#   runcmd order (load-bearing):
+#     1. sysctl --system           - turn on forwarding before any
+#                                     packet hits the FORWARD chain.
+#     2. systemctl enable --now nftables - install the ruleset.
+#     3. systemctl enable --now dnsmasq  - bind the resolver to priv0.
+#     4. netplan apply             - idempotent re-apply (init-local
+#                                     already applied network-config,
+#                                     this is the same belt-and-braces
+#                                     line the workload path uses).
+#
+#   SECURITY mirrors the workload path: user-data carries Vm.password in
+#   plaintext for cloud-init's plain_text_passwd, and the seed ISO is
+#   removed by Invoke-VmCreation's finally block after first boot.
+# ---------------------------------------------------------------------------
+function Invoke-RouterSeedIsoGeneration {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object] $Vm
+    )
+
+    Write-Host ""
+    Write-Host "--- Router cloud-init ISO: $($Vm.vmName) ---" -ForegroundColor Cyan
+
+    Initialize-SeedConfigDirectory -Path $Vm.vmConfigPath
+
+    # ------------------------------------------------------------------
+    # Deterministic MACs - generated here and stashed on the VM object so
+    # create-vm.ps1 can pin the same address. See Get-RouterNicStaticMac
+    # for why deterministic-from-vmName rather than letting Hyper-V auto-
+    # assign.
+    # ------------------------------------------------------------------
+    $extMac  = Get-RouterNicStaticMac -VmName $Vm.vmName -Role 'external'
+    $privMac = Get-RouterNicStaticMac -VmName $Vm.vmName -Role 'private'
+
+    Add-Member -InputObject $Vm -MemberType NoteProperty `
+               -Name '_externalMac' -Value $extMac.HyperV -Force
+    Add-Member -InputObject $Vm -MemberType NoteProperty `
+               -Name '_privateMac'  -Value $privMac.HyperV -Force
+
+    $metaData = New-CloudInitMetaData -VmName $Vm.vmName
+
+    # ------------------------------------------------------------------
+    # Netplan: two ethernet entries in one document. New-StaticNetplanYaml
+    # owns the entry shape (match block / dhcp4 / addresses / optional
+    # routes and nameservers); the wrapper is composed here so both
+    # entries share one `network: / version: 2 / ethernets:` header.
+    # The external NIC carries gateway + DNS (upstream egress); the
+    # private NIC carries neither (it IS the gateway and resolver for
+    # downstream VMs, so an upstream gateway here would create a routing
+    # loop).
+    # ------------------------------------------------------------------
+    $extEntry = New-StaticNetplanYaml `
+        -Key        'ext0' `
+        -MacAddress $extMac.Netplan `
+        -SetName    'ext0' `
+        -IpAddress  $Vm.ipAddress `
+        -SubnetMask $Vm.subnetMask `
+        -Gateway    $Vm.gateway `
+        -Dns        $Vm.dns `
+        -NoWrapper
+
+    $privEntry = New-StaticNetplanYaml `
+        -Key        'priv0' `
+        -MacAddress $privMac.Netplan `
+        -SetName    'priv0' `
+        -IpAddress  $Vm.privateIpAddress `
+        -SubnetMask $Vm.subnetMask `
+        -NoWrapper
+
+    $netplanYaml = @"
+network:
+  version: 2
+  ethernets:
+$extEntry
+$privEntry
+"@
+
+    # ------------------------------------------------------------------
+    # nftables ruleset. Static interface names (ext0 / priv0) are stable
+    # because the netplan above pins them via set-name. Policy on FORWARD
+    # is drop so anything that is not in the two explicit accept rules
+    # is rejected; policy on INPUT/OUTPUT is accept because the router's
+    # own traffic is not the concern of this feature.
+    # ------------------------------------------------------------------
+    $nftablesConf = @'
+#!/usr/sbin/nft -f
+
+flush ruleset
+
+table inet filter {
+    chain input {
+        type filter hook input priority filter; policy accept;
+    }
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        iifname "priv0" oifname "ext0" accept
+        iifname "ext0" oifname "priv0" ct state established,related accept
+    }
+    chain output {
+        type filter hook output priority filter; policy accept;
+    }
+}
+
+table ip nat {
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname "ext0" masquerade
+    }
+}
+'@
+
+    # ------------------------------------------------------------------
+    # dnsmasq config. bind-interfaces restricts the listener to the
+    # specified address only (default: bind to wildcard, accept queries
+    # on any interface) so a downstream-side resolver can't accidentally
+    # serve queries from the upstream side. no-resolv stops dnsmasq from
+    # reading /etc/resolv.conf for upstream resolvers - the upstream is
+    # whatever the operator configured on the VM (Vm.dns), full stop.
+    # ------------------------------------------------------------------
+    $dnsmasqConf = @"
+no-resolv
+interface=priv0
+bind-interfaces
+listen-address=$($Vm.privateIpAddress)
+server=$($Vm.dns)
+"@
+
+    # sysctl: forwarding flag. Loaded by sysctl --system in runcmd.
+    $sysctlConf = 'net.ipv4.ip_forward = 1'
+
+    # ------------------------------------------------------------------
+    # user-data. The structure mirrors Invoke-SeedIsoGeneration (users,
+    # ssh_pwauth, write_files, runcmd) with one extra `packages:` block
+    # for nftables and dnsmasq. Packages installation is feasible here
+    # but not on workload VMs because the router VM has a real upstream
+    # NIC with internet egress from first boot, while workload VMs have
+    # to wait for the router to come up before apt can resolve mirrors.
+    # ------------------------------------------------------------------
+    $userBlock        = New-CloudInitUserBlock -Username $Vm.username -Password $Vm.password
+    $disableEntry     = New-CloudInitDisableNetworkConfigEntry
+    $netplanIndented  = Format-CloudInitLiteralBlock -Body $netplanYaml
+    $sysctlIndented   = Format-CloudInitLiteralBlock -Body $sysctlConf
+    $nftablesIndented = Format-CloudInitLiteralBlock -Body $nftablesConf
+    $dnsmasqIndented  = Format-CloudInitLiteralBlock -Body $dnsmasqConf
+
+    $userData = @"
+#cloud-config
+
+$userBlock
+
+packages:
+  - nftables
+  - dnsmasq
+
+write_files:
+$disableEntry
+  - path: /etc/netplan/99-router.yaml
+    permissions: '0600'
+    content: |
+$netplanIndented
+  - path: /etc/sysctl.d/99-router.conf
+    permissions: '0644'
+    content: |
+$sysctlIndented
+  - path: /etc/nftables.conf
+    permissions: '0755'
+    content: |
+$nftablesIndented
+  - path: /etc/dnsmasq.d/router.conf
+    permissions: '0644'
+    content: |
+$dnsmasqIndented
+
+runcmd:
+  - sysctl --system
+  - systemctl enable --now nftables.service
+  - systemctl enable --now dnsmasq.service
+  - netplan apply
+"@
+
+    # network-config ships the same netplan so cloud-init's init-local
+    # stage brings both NICs up on first boot before the config stage
+    # runs apt. Identical content to /etc/netplan/99-router.yaml above.
+    Write-VmSeedIso -Vm $Vm `
+                    -MetaData      $metaData `
+                    -UserData      $userData `
+                    -NetworkConfig $netplanYaml
+}

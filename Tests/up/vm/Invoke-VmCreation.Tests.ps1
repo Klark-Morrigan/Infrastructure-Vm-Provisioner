@@ -6,6 +6,8 @@ BeforeAll {
     function Set-VMFirmware           { param($VMName, $EnableSecureBoot, $SecureBootTemplate, $FirstBootDevice) }
     function Add-VMDvdDrive           { param($VMName, $Path) }
     function Connect-VMNetworkAdapter { param($VMName, $Name, $SwitchName) }
+    function Set-VMNetworkAdapter     { param($VMName, $Name, $StaticMacAddress) }
+    function Add-VMNetworkAdapter     { param($VMName, $Name, $SwitchName, $StaticMacAddress) }
     function Start-VM                 { param($VMName) }
     function Get-VM                   { param($Name) }
     function Get-VMDvdDrive           { param($VMName) }
@@ -52,6 +54,27 @@ BeforeAll {
         }
     }
 
+    # Router VM object - extra fields exercised by the dual-NIC branch.
+    # Pester 5 only hoists function defs from BeforeAll (not Context),
+    # so this lives at top-level alongside New-TestVm.
+    function New-RouterTestVm {
+        [PSCustomObject]@{
+            vmName              = 'router-01'
+            vmConfigPath        = 'C:\a_VMs\Hyper-V\Config'
+            username            = 'admin'
+            ipAddress           = '192.168.1.10'
+            cpuCount            = 2
+            ramGB               = 4
+            _vhdxPath           = 'C:\VMs\router-01\router-01.vhdx'
+            _seedIsoPath        = 'C:\VMs\router-01\router-01-seed.iso'
+            kind                = 'router'
+            externalSwitchName  = 'ExtSwitch'
+            privateSwitchName   = 'PrivSwitch-prod'
+            _externalMac        = '02aabbccdd00'
+            _privateMac         = '02aabbccdd01'
+        }
+    }
+
     # Standard DVD drive object returned by Get-VMDvdDrive.
     function New-TestDvdDrive {
         [PSCustomObject]@{
@@ -70,6 +93,8 @@ BeforeAll {
         Mock Set-VMFirmware      { }
         Mock Add-VMDvdDrive      { }
         Mock Connect-VMNetworkAdapter { }
+        Mock Set-VMNetworkAdapter     { }
+        Mock Add-VMNetworkAdapter     { }
         Mock Start-VM            { }
         # Return Off state by default so the post-creation guard passes.
         Mock Get-VM              { [PSCustomObject]@{ State = 'Off' } }
@@ -190,6 +215,73 @@ Describe 'Invoke-VmCreation' {
             Should -Invoke Connect-VMNetworkAdapter -Times 1 -Exactly -ParameterFilter {
                 $VMName     -eq 'node-01' -and
                 $SwitchName -eq 'VmLAN'
+            }
+        }
+
+        It 'does not pin a static MAC for a workload VM' {
+            # Workload VMs let Hyper-V auto-assign MACs; the static-MAC
+            # path is router-specific.
+            Initialize-HyperVMocks
+            Set-ExpiredDeadline
+
+            { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
+                Should -Throw
+
+            Should -Invoke Set-VMNetworkAdapter -Times 0
+            Should -Invoke Add-VMNetworkAdapter -Times 0
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'router VM dual-NIC attachment' {
+    # ------------------------------------------------------------------
+        # Router VMs (kind: router) get two NICs: the default Hyper-V
+        # adapter connected to the external switch with its MAC pinned
+        # to _externalMac, and a second adapter named 'Private' on the
+        # privateSwitchName with its MAC pinned to _privateMac. The
+        # seed ISO (Invoke-RouterSeedIsoGeneration) embeds these same
+        # MACs in netplan's match blocks so the in-guest interfaces
+        # come up against the right NIC.
+
+        It 'connects the default NIC to the external switch (passed via -SwitchName)' {
+            Initialize-HyperVMocks
+            Set-ExpiredDeadline
+
+            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExtSwitch' } |
+                Should -Throw
+
+            Should -Invoke Connect-VMNetworkAdapter -Times 1 -Exactly -ParameterFilter {
+                $VMName     -eq 'router-01' -and
+                $SwitchName -eq 'ExtSwitch'
+            }
+        }
+
+        It 'pins the external NIC MAC via Set-VMNetworkAdapter' {
+            Initialize-HyperVMocks
+            Set-ExpiredDeadline
+
+            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExtSwitch' } |
+                Should -Throw
+
+            Should -Invoke Set-VMNetworkAdapter -Times 1 -Exactly -ParameterFilter {
+                $VMName           -eq 'router-01' -and
+                $Name             -eq 'Network Adapter' -and
+                $StaticMacAddress -eq '02aabbccdd00'
+            }
+        }
+
+        It 'adds a second NIC named Private on privateSwitchName with the private MAC' {
+            Initialize-HyperVMocks
+            Set-ExpiredDeadline
+
+            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExtSwitch' } |
+                Should -Throw
+
+            Should -Invoke Add-VMNetworkAdapter -Times 1 -Exactly -ParameterFilter {
+                $VMName           -eq 'router-01' -and
+                $Name             -eq 'Private' -and
+                $SwitchName       -eq 'PrivSwitch-prod' -and
+                $StaticMacAddress -eq '02aabbccdd01'
             }
         }
     }

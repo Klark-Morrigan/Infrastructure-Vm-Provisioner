@@ -94,7 +94,19 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\post\New-DiagnosticSshClientWrapper.ps1"
 . "$PSScriptRoot\up\post\Invoke-VmPostProvisioning.ps1"
 . "$PSScriptRoot\up\seed\New-StaticNetplanYaml.ps1"
+. "$PSScriptRoot\up\seed\Get-RouterNicStaticMac.ps1"
+# Shared cloud-init helpers - the workload and router seed generators
+# both call these so the meta-data / users / write_files / disable-flag
+# / literal-block-indent / seed-ISO-write paths have one owner.
+. "$PSScriptRoot\up\seed\Initialize-SeedConfigDirectory.ps1"
+. "$PSScriptRoot\up\seed\New-CloudInitMetaData.ps1"
+. "$PSScriptRoot\up\seed\New-CloudInitUserBlock.ps1"
+. "$PSScriptRoot\up\seed\New-CloudInitDisableNetworkConfigEntry.ps1"
+. "$PSScriptRoot\up\seed\Format-CloudInitLiteralBlock.ps1"
+. "$PSScriptRoot\up\seed\Write-VmSeedIso.ps1"
 . "$PSScriptRoot\up\seed\generate-seed-iso.ps1"
+. "$PSScriptRoot\up\seed\Invoke-RouterSeedIsoGeneration.ps1"
+. "$PSScriptRoot\up\network\Ensure-PrivateSwitch.ps1"
 . "$PSScriptRoot\up\network\setup-network.ps1"
 . "$PSScriptRoot\up\vm\create-vm.ps1"
 . "$PSScriptRoot\up\timing\Initialize-PhaseTimings.ps1"
@@ -260,35 +272,71 @@ try {
 
     Invoke-WithPhaseTimer -Name 'Cloud-init seed ISO' -Action {
         foreach ($vm in $newVms) {
-            Invoke-SeedIsoGeneration -Vm $vm
+            # Branch on kind so router VMs get the dual-NIC seed
+            # (Invoke-RouterSeedIsoGeneration) and workload VMs keep
+            # the single-NIC seed they have always had. Schema defaults
+            # 'kind' to 'workload', so this comparison is total.
+            if ($vm.kind -eq 'router') {
+                Invoke-RouterSeedIsoGeneration -Vm $vm
+            }
+            else {
+                Invoke-SeedIsoGeneration -Vm $vm
+            }
         }
     }
 
     # -----------------------------------------------------------------------
     # 7. Virtual switch and NAT setup
-    #    Switch and NAT names come from the config (default: VmLAN / VmLAN-NAT).
-    #    Idempotent - safe to re-run. Always runs so a rebuilt host gets the
-    #    network re-applied around already-existing VMs.
+    #    Workload VMs share one Internal switch + NetNat via
+    #    Invoke-NetworkSetup (the legacy host-as-NAT path - replaced
+    #    end-to-end by step 2 of feature 53). Router VMs each ensure
+    #    their per-environment Private switch exists; their external
+    #    switch is assumed pre-existing on the host.
+    #    Both branches are idempotent - safe to re-run.
     # -----------------------------------------------------------------------
 
-    $switchName = $vmsToProcess[0].switchName
-    $natName    = $vmsToProcess[0].natName
+    $workloadVms = ConvertTo-Array (
+        $vmsToProcess | Where-Object { $_.kind -ne 'router' })
+    $routerVms = ConvertTo-Array (
+        $vmsToProcess | Where-Object { $_.kind -eq 'router' })
 
     Invoke-WithPhaseTimer -Name 'Virtual switch + NAT' -Action {
-        Invoke-NetworkSetup -VmsToProvision $vmsToProcess `
-                            -SwitchName     $switchName `
-                            -NatName        $natName
+        # Skip the legacy switch/NAT path when no workload VM needs it:
+        # creating VmLAN + VmLAN-NAT for a router-only batch would be
+        # dead infrastructure on the host and would also clash with the
+        # production NAT slot the router VM is specifically meant to
+        # free up.
+        if ($workloadVms.Count -gt 0) {
+            $switchName = $workloadVms[0].switchName
+            $natName    = $workloadVms[0].natName
+            Invoke-NetworkSetup -VmsToProvision $workloadVms `
+                                -SwitchName     $switchName `
+                                -NatName        $natName
+        }
+
+        foreach ($vm in $routerVms) {
+            Ensure-PrivateSwitch -Name $vm.privateSwitchName
+        }
     }
 
     # -----------------------------------------------------------------------
     # 8. VM creation (new VMs only)
     #    Creates, configures, boots each VM, and waits for SSH readiness.
+    #    Workload VMs get one NIC on the shared switchName; router VMs
+    #    get their externalSwitchName as the primary NIC switch and
+    #    Invoke-VmCreation adds the second (private) NIC internally.
     #    Skipped for existing VMs.
     # -----------------------------------------------------------------------
 
     Invoke-WithPhaseTimer -Name 'VM creation' -Action {
         foreach ($vm in $newVms) {
-            Invoke-VmCreation -Vm $vm -SwitchName $switchName
+            $primarySwitch = if ($vm.kind -eq 'router') {
+                $vm.externalSwitchName
+            }
+            else {
+                $vm.switchName
+            }
+            Invoke-VmCreation -Vm $vm -SwitchName $primarySwitch
         }
     }
 

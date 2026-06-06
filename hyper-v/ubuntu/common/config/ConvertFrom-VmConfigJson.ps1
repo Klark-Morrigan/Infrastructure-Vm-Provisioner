@@ -12,6 +12,12 @@
 . "$PSScriptRoot\Assert-JavaDevKitField.ps1"
 . "$PSScriptRoot\Assert-DotnetSdkField.ps1"
 . "$PSScriptRoot\Assert-DotnetToolsField.ps1"
+. "$PSScriptRoot\Assert-RouterVmField.ps1"
+
+# Allowed values for the 'kind' field. 'workload' is the default and
+# carries the historical schema; 'router' selects the dual-NIC NAT/DNS
+# gateway path added in feature 53.
+$script:AllowedVmKinds = @('workload', 'router')
 
 # ---------------------------------------------------------------------------
 # ConvertFrom-VmConfigJson
@@ -63,6 +69,20 @@ function ConvertFrom-VmConfigJson {
             -Properties  $requiredFields `
             -Context     "VM '$(if ($vm.PSObject.Properties['vmName']) { $vm.vmName } else { '(unknown)' })'"`
 
+        # 'kind' selects the provisioning path. Validated up front so
+        # later validators run against a known kind. The allow-list is
+        # closed - an unknown value is a typo, not a "future kind".
+        $vmName = if ($vm.PSObject.Properties['vmName']) { $vm.vmName } else { '(unknown)' }
+        if ($vm.PSObject.Properties['kind']) {
+            if ($vm.kind -notin $script:AllowedVmKinds) {
+                throw (
+                    "VM '$vmName': kind '$($vm.kind)' is not recognised. " +
+                    "Allowed: $($script:AllowedVmKinds -join ', ')."
+                )
+            }
+        }
+        $kind = if ($vm.PSObject.Properties['kind']) { $vm.kind } else { 'workload' }
+
         # Optional-field validators. Each one is a no-op when its field is
         # absent and throws with a descriptive message when present-but-malformed.
         # Assert-VmFilesField and Assert-VmEnvVarsField are shared validators
@@ -88,9 +108,20 @@ function ConvertFrom-VmConfigJson {
             -PostEntryValidator $null
         Assert-VmEnvVarsField -Vm $vm
 
+        # Router-specific schema rules run after the toolchain validators
+        # so a router VM declaring (e.g.) javaDevKit fails the router
+        # rejection rule with a clear message instead of being rejected
+        # first by the javaDevKit shape check.
+        if ($kind -eq 'router') {
+            Assert-RouterVmField -Vm $vm
+        }
+
         # Apply defaults for optional fields. Using Add-Member rather than
         # property assignment so the field is added when absent without
         # overwriting an explicitly supplied value.
+        if (-not $vm.PSObject.Properties['kind']) {
+            $vm | Add-Member -MemberType NoteProperty -Name kind -Value 'workload'
+        }
         if (-not $vm.PSObject.Properties['switchName']) {
             $vm | Add-Member -MemberType NoteProperty -Name switchName -Value 'VmLAN'
         }

@@ -16,6 +16,7 @@
   - [Optional: copy files to the VM](#optional-copy-files-to-the-vm)
     - [Bulk entries](#bulk-entries)
   - [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables)
+  - [Router VM (kind: router)](#router-vm-kind-router)
 - [provision.ps1](#provisionps1)
 - [start-vms.ps1](#start-vmsps1)
 - [deprovision.ps1](#deprovisionps1)
@@ -123,9 +124,13 @@ All fields are required. After first boot, connect via `ssh username@ipAddress`.
 | `dns`           | string | DNS server IP                                      |
 | `vmConfigPath`  | string | Windows path where seed ISO is written             |
 | `vhdPath`       | string | Windows path where VHDX files are stored           |
-| `switchName`    | string | Hyper-V Internal switch name. Default: `VmLAN`     |
-| `natName`       | string | Windows NAT rule name. Default: `VmLAN-NAT`        |
-| `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. See [Optional: install a JDK](#optional-install-a-jdk). |
+| `switchName`    | string | Hyper-V Internal switch name. Default: `VmLAN` (workload VMs only) |
+| `natName`       | string | Windows NAT rule name. Default: `VmLAN-NAT` (workload VMs only)    |
+| `kind`          | string? | Optional. `"workload"` (default) or `"router"`. See [Router VM](#router-vm-kind-router). |
+| `externalSwitchName` | string | Required when `kind: router`. Existing host-bridged Hyper-V switch the router's upstream NIC attaches to. |
+| `privateSwitchName`  | string | Required when `kind: router`. Per-environment Hyper-V Private switch the router's downstream NIC attaches to; created on demand. |
+| `privateIpAddress`   | string | Required when `kind: router`. IP the router carries on its private-side NIC; downstream VMs use it as their default gateway and DNS server. |
+| `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. Not supported on `kind: router`. See [Optional: install a JDK](#optional-install-a-jdk). |
 | `dotnetSdk`     | object? | Optional. Installs a .NET SDK system-wide on first boot. See [Optional: install a .NET SDK](#optional-install-a-net-sdk). |
 | `dotnetTools`   | array?  | Optional. Installs .NET global tools system-wide on first boot. Requires `dotnetSdk` on the same VM. See [Optional: install .NET global tools](#optional-install-net-global-tools). |
 | `files`         | array?  | Optional. Copies arbitrary host files onto the VM. See [Optional: copy files to the VM](#optional-copy-files-to-the-vm). |
@@ -500,6 +505,82 @@ The transport is delegated to `Infrastructure.HyperV`'s
 see its notes for the exact managed-block, atomic-write, and
 skip-unchanged semantics.
 
+### Router VM (kind: router)
+
+Set `"kind": "router"` on a VM entry to provision a dual-NIC Linux
+gateway instead of a single-NIC workload VM. A router VM replaces the
+host's single `New-NetNat` slot (Windows allows only one NetNat to
+carry traffic out to the upstream LAN) with a per-environment VM that
+MASQUERADEs outbound and forwards DNS, so multiple isolated
+environments can each have a real egress without competing for the
+host's NAT slot. Background: see
+[docs/dev/implementation/53 - nat router vm/problem.md](docs/dev/implementation/53%20-%20nat%20router%20vm/problem.md).
+
+```jsonc
+{
+  "vmName":             "router-prod",
+  "cpuCount":           1,
+  "ramGB":              1,
+  "diskGB":             20,
+  "ubuntuVersion":      "24.04",
+  "username":           "admin",
+  "password":           "...",
+  "ipAddress":          "192.168.1.10",
+  "subnetMask":         "24",
+  "gateway":            "192.168.1.1",
+  "dns":                "8.8.8.8",
+  "vmConfigPath":       "E:\\a_VMs\\Hyper-V\\Config",
+  "vhdPath":            "E:\\a_VMs\\Hyper-V\\Disks",
+  "kind":               "router",
+  "externalSwitchName": "ExtSwitch",
+  "privateSwitchName":  "PrivSwitch-prod",
+  "privateIpAddress":   "10.10.0.1"
+}
+```
+
+**NIC layout.** Two adapters, both with statically pinned MACs so the
+cloud-init netplan's match-by-MAC blocks find their NIC across reboots
+and kernel-naming changes:
+
+| Adapter            | Hyper-V switch                  | Guest name (via `set-name`) | Addresses                                 | Role                                           |
+|--------------------|---------------------------------|------------------------------|-------------------------------------------|------------------------------------------------|
+| `Network Adapter`  | `externalSwitchName` (existing) | `ext0`                       | `ipAddress/subnetMask`, default via `gateway`, DNS = `dns` | Upstream egress; MASQUERADE source.            |
+| `Private`          | `privateSwitchName` (created)   | `priv0`                      | `privateIpAddress/subnetMask`             | Downstream gateway / DNS for environment VMs.  |
+
+**Cloud-init payload.** The router seed ISO lands:
+
+- `/etc/netplan/99-router.yaml` — both NICs, match-by-MAC, with
+  `set-name: ext0 / priv0`.
+- `/etc/sysctl.d/99-router.conf` — `net.ipv4.ip_forward = 1`.
+- `/etc/nftables.conf` — `inet filter forward` chain allowing
+  `priv0 -> ext0` (new connections) and `ext0 -> priv0`
+  (established/related only), plus `ip nat postrouting` with
+  `oifname "ext0" masquerade`.
+- `/etc/dnsmasq.d/router.conf` — dnsmasq bound to `priv0` and the
+  configured `privateIpAddress`, `no-resolv`, upstream resolver =
+  the VM's own `dns`.
+- `packages: nftables, dnsmasq` — installed via `apt` on first boot
+  (the router has real upstream egress as soon as `netplan apply`
+  runs, so `apt-get update` works).
+- `runcmd:` `sysctl --system` → `systemctl enable --now nftables.service` →
+  `systemctl enable --now dnsmasq.service` → `netplan apply`. Order
+  matters: forwarding must be on before traffic is matched, and the
+  nftables ruleset must be in effect before dnsmasq starts answering.
+
+**Idempotency.**
+
+- The private switch is ensured (created if absent, reused if a
+  `Private`-type switch with that name already exists, rejected if
+  the existing switch is `Internal` or `External`).
+- Re-running `provision.ps1` against an already-provisioned router VM
+  takes the normal "existing VM" path — no destructive re-creation.
+
+**Restrictions.** Router VMs do not accept `javaDevKit`, `dotnetSdk`, or
+`dotnetTools` blocks. The router is intentionally minimal — its only
+software is `nftables` and `dnsmasq`. Surfacing the rejection at
+schema-time keeps a stray toolchain entry from silently flowing
+through reconcile and installing a JDK on the gateway.
+
 ---
 
 ## provision.ps1
@@ -575,16 +656,28 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
    activates the config during first boot. Netplan - not cloud-init -
    owns the on-disk file for the life of the VM, so reboots and
    cloud-init re-evaluations cannot revert the static config to DHCP.
-7. **(always)** Creates a Hyper-V Internal switch named `VmLAN` (if
-   absent), assigns the `gateway` IP to the host-side virtual NIC, and
-   adds a `New-NetNat` rule for the subnet so VMs can reach the internet
-   through the host. Idempotent; runs even when only existing VMs are
-   being reconciled so a rebuilt host gets the network re-applied.
+   Router VMs (`kind: router`) take the router-seed path instead - see
+   [Router VM](#router-vm-kind-router) for the dual-NIC netplan and
+   the nftables / dnsmasq / sysctl payload it lands.
+7. **(always)** For batches containing workload VMs, creates a Hyper-V
+   Internal switch named `VmLAN` (if absent), assigns the `gateway`
+   IP to the host-side virtual NIC, and adds a `New-NetNat` rule for
+   the subnet so VMs can reach the internet through the host. For
+   each router VM in the batch, ensures the per-environment Private
+   switch named in `privateSwitchName` exists. Both branches are
+   idempotent; they run even when only existing VMs are being
+   reconciled so a rebuilt host gets the network re-applied. A
+   router-only batch skips the legacy `VmLAN` / `VmLAN-NAT` creation
+   entirely - the whole point of the router VM is to free that host
+   NAT slot, so creating it here would be dead infrastructure.
 8. **(new VMs only)** Creates each VM (Gen 2, static RAM, VHDX from
    step 4), sets Secure Boot to `MicrosoftUEFICertificateAuthority`
-   (required for Ubuntu), attaches the seed ISO, connects to `VmLAN`,
-   and starts the VM. Polls port 22 until cloud-init finishes, then
-   detaches and deletes the seed ISO.
+   (required for Ubuntu), attaches the seed ISO, connects to `VmLAN`
+   (or `externalSwitchName` for router VMs), and starts the VM.
+   Router VMs additionally get a second NIC on `privateSwitchName`,
+   and both NICs are pinned to deterministic MACs that match the
+   seed's netplan blocks. Polls port 22 until cloud-init finishes,
+   then detaches and deletes the seed ISO.
 9. **(new AND existing VMs)** Runs post-provisioning. Opens one host file server and
     one SSH session per VM, waits once for cloud-init to finish, then
     dispatches each enabled step:

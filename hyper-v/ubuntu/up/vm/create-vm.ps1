@@ -113,10 +113,34 @@ function Invoke-VmCreation {
 
     # ------------------------------------------------------------------
     # Network
+    #
+    # Workload VMs get one NIC on $SwitchName (caller's choice). Router
+    # VMs (kind: router) get a second NIC on their privateSwitchName
+    # and both NICs are pinned to deterministic MACs so the cloud-init
+    # netplan's match-by-MAC blocks find their NIC. See feature 53.
     # ------------------------------------------------------------------
     Connect-VMNetworkAdapter -VMName     $Vm.vmName `
                              -Name       'Network Adapter' `
                              -SwitchName $SwitchName
+
+    $kind = if ($Vm.PSObject.Properties['kind']) { $Vm.kind } else { 'workload' }
+    if ($kind -eq 'router') {
+        # Pin the default NIC's MAC to the same value the router seed
+        # embedded in its netplan match block. Without this Hyper-V's
+        # dynamic-MAC pool would hand the guest a different MAC each
+        # boot and netplan would never bring the interface up.
+        Set-VMNetworkAdapter -VMName           $Vm.vmName `
+                             -Name             'Network Adapter' `
+                             -StaticMacAddress $Vm._externalMac
+
+        # Add the private-side NIC. Name 'Private' is chosen so Get-
+        # VMNetworkAdapter / operator inspection at the Hyper-V layer
+        # immediately distinguishes the two adapters.
+        Add-VMNetworkAdapter -VMName           $Vm.vmName `
+                             -Name             'Private' `
+                             -SwitchName       $Vm.privateSwitchName `
+                             -StaticMacAddress $Vm._privateMac
+    }
 
     # Attach the named-pipe serial reader BEFORE Start-VM so we do not
     # miss the early kernel / cloud-init lines. The reader job sits on
