@@ -106,6 +106,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\seed\Write-VmSeedIso.ps1"
 . "$PSScriptRoot\up\seed\generate-seed-iso.ps1"
 . "$PSScriptRoot\up\seed\Invoke-RouterSeedIsoGeneration.ps1"
+. "$PSScriptRoot\up\network\Ensure-ExternalSwitch.ps1"
 . "$PSScriptRoot\up\network\Ensure-PrivateSwitch.ps1"
 . "$PSScriptRoot\up\network\setup-network.ps1"
 . "$PSScriptRoot\up\vm\create-vm.ps1"
@@ -315,6 +316,10 @@ try {
         }
 
         foreach ($vm in $routerVms) {
+            # External switch first - if it cannot be created, there is
+            # no point creating the private switch that depends on it.
+            Ensure-ExternalSwitch -Name           $vm.externalSwitchName `
+                                  -NetAdapterName $vm.externalAdapterName
             Ensure-PrivateSwitch -Name $vm.privateSwitchName
         }
     }

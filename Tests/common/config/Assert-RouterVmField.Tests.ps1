@@ -6,10 +6,11 @@ BeforeAll {
     # specific rules.
     function New-RouterVm {
         [PSCustomObject]@{
-            vmName              = 'router-prod'
-            externalSwitchName  = 'ExtSwitch'
-            privateSwitchName   = 'PrivSwitch-prod'
-            privateIpAddress    = '10.10.0.1'
+            vmName               = 'router-prod'
+            externalSwitchName   = 'ExtSwitch'
+            externalAdapterName  = 'Ethernet'
+            privateSwitchName    = 'PrivSwitch-prod'
+            privateIpAddress     = '10.10.0.1'
         }
     }
 }
@@ -29,6 +30,13 @@ Describe 'Assert-RouterVmField' {
             $vm.PSObject.Properties.Remove('externalSwitchName')
             { Assert-RouterVmField -Vm $vm } |
                 Should -Throw -ExpectedMessage "*externalSwitchName*"
+        }
+
+        It 'throws when externalAdapterName is missing' {
+            $vm = New-RouterVm
+            $vm.PSObject.Properties.Remove('externalAdapterName')
+            { Assert-RouterVmField -Vm $vm } |
+                Should -Throw -ExpectedMessage "*externalAdapterName*"
         }
 
         It 'throws when privateSwitchName is missing' {

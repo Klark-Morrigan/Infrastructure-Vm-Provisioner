@@ -127,7 +127,8 @@ All fields are required. After first boot, connect via `ssh username@ipAddress`.
 | `switchName`    | string | Hyper-V Internal switch name. Default: `VmLAN` (workload VMs only) |
 | `natName`       | string | Windows NAT rule name. Default: `VmLAN-NAT` (workload VMs only)    |
 | `kind`          | string? | Optional. `"workload"` (default) or `"router"`. See [Router VM](#router-vm-kind-router). |
-| `externalSwitchName` | string | Required when `kind: router`. Existing host-bridged Hyper-V switch the router's upstream NIC attaches to. |
+| `externalSwitchName` | string | Required when `kind: router`. Host-bridged Hyper-V switch the router's upstream NIC attaches to; created on demand if absent (see `externalAdapterName`). |
+| `externalAdapterName`| string | Required when `kind: router`. Physical NIC the External switch binds to when `Ensure-ExternalSwitch` needs to create it. Ignored at runtime if the switch already exists. Find the name with `Get-NetAdapter`. |
 | `privateSwitchName`  | string | Required when `kind: router`. Per-environment Hyper-V Private switch the router's downstream NIC attaches to; created on demand. |
 | `privateIpAddress`   | string | Required when `kind: router`. IP the router carries on its private-side NIC; downstream VMs use it as their default gateway and DNS server. |
 | `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. Not supported on `kind: router`. See [Optional: install a JDK](#optional-install-a-jdk). |
@@ -531,12 +532,19 @@ host's NAT slot. Background: see
   "dns":                "8.8.8.8",
   "vmConfigPath":       "E:\\a_VMs\\Hyper-V\\Config",
   "vhdPath":            "E:\\a_VMs\\Hyper-V\\Disks",
-  "kind":               "router",
-  "externalSwitchName": "ExtSwitch",
-  "privateSwitchName":  "PrivSwitch-prod",
-  "privateIpAddress":   "10.10.0.1"
+  "kind":                "router",
+  "externalSwitchName":  "ExtSwitch",
+  "externalAdapterName": "Ethernet",
+  "privateSwitchName":   "PrivSwitch-prod",
+  "privateIpAddress":    "10.10.0.1"
 }
 ```
+
+`externalAdapterName` is the host's physical NIC the External switch
+will bind to when `Ensure-ExternalSwitch` needs to create it. Run
+`Get-NetAdapter` to see the available names on the host. If the
+External switch with the configured `externalSwitchName` already
+exists, this field is ignored at runtime.
 
 **NIC layout.** Two adapters, both with statically pinned MACs so the
 cloud-init netplan's match-by-MAC blocks find their NIC across reboots
@@ -569,6 +577,11 @@ and kernel-naming changes:
 
 **Idempotency.**
 
+- The external switch is ensured (created on demand bound to
+  `externalAdapterName` with `-AllowManagementOS:$true` so the host
+  keeps its connection; reused if an `External`-type switch with
+  that name already exists; rejected if the existing switch is
+  `Internal` or `Private`).
 - The private switch is ensured (created if absent, reused if a
   `Private`-type switch with that name already exists, rejected if
   the existing switch is `Internal` or `External`).
@@ -663,8 +676,10 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
    Internal switch named `VmLAN` (if absent), assigns the `gateway`
    IP to the host-side virtual NIC, and adds a `New-NetNat` rule for
    the subnet so VMs can reach the internet through the host. For
-   each router VM in the batch, ensures the per-environment Private
-   switch named in `privateSwitchName` exists. Both branches are
+   each router VM in the batch, ensures the External switch named in
+   `externalSwitchName` exists (created on demand bound to
+   `externalAdapterName`) and the per-environment Private switch
+   named in `privateSwitchName` exists. Both branches are
    idempotent; they run even when only existing VMs are being
    reconciled so a rebuilt host gets the network re-applied. A
    router-only batch skips the legacy `VmLAN` / `VmLAN-NAT` creation
