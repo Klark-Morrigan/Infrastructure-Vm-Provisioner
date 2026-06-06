@@ -419,15 +419,15 @@ Describe 'ConvertFrom-VmConfigJson' {
         It 'accepts a router kind with all router fields present' {
             $core = (New-ValidVmJson 'router-prod') -replace '\}\s*$', ''
             $extras = ', "kind": "router"' +
-                      ', "externalSwitchName": "ExtSwitch"' +
+                      ', "externalSwitchName": "ExternalSwitch-Shared"' +
                       ', "externalAdapterName": "Ethernet"' +
-                      ', "privateSwitchName": "PrivSwitch-prod"' +
+                      ', "privateSwitchName": "PrivateSwitch-Production"' +
                       ', "privateIpAddress": "10.10.0.1"'
             $result = @(ConvertFrom-VmConfigJson -Json "[$core$extras }]")
             $result[0].kind                | Should -Be 'router'
-            $result[0].externalSwitchName  | Should -Be 'ExtSwitch'
+            $result[0].externalSwitchName  | Should -Be 'ExternalSwitch-Shared'
             $result[0].externalAdapterName | Should -Be 'Ethernet'
-            $result[0].privateSwitchName   | Should -Be 'PrivSwitch-prod'
+            $result[0].privateSwitchName   | Should -Be 'PrivateSwitch-Production'
             $result[0].privateIpAddress    | Should -Be '10.10.0.1'
         }
 
@@ -449,9 +449,9 @@ Describe 'ConvertFrom-VmConfigJson' {
             Mock Assert-RouterVmField {}
             $core = (New-ValidVmJson 'router-prod') -replace '\}\s*$', ''
             $extras = ', "kind": "router"' +
-                      ', "externalSwitchName": "ExtSwitch"' +
+                      ', "externalSwitchName": "ExternalSwitch-Shared"' +
                       ', "externalAdapterName": "Ethernet"' +
-                      ', "privateSwitchName": "PrivSwitch-prod"' +
+                      ', "privateSwitchName": "PrivateSwitch-Production"' +
                       ', "privateIpAddress": "10.10.0.1"'
             @(ConvertFrom-VmConfigJson -Json "[$core$extras }]")
             Should -Invoke Assert-RouterVmField -Times 1 -Exactly -ParameterFilter {
@@ -465,9 +465,9 @@ Describe 'ConvertFrom-VmConfigJson' {
             }
             $core = (New-ValidVmJson 'router-prod') -replace '\}\s*$', ''
             $extras = ', "kind": "router"' +
-                      ', "externalSwitchName": "ExtSwitch"' +
+                      ', "externalSwitchName": "ExternalSwitch-Shared"' +
                       ', "externalAdapterName": "Ethernet"' +
-                      ', "privateSwitchName": "PrivSwitch-prod"' +
+                      ', "privateSwitchName": "PrivateSwitch-Production"' +
                       ', "privateIpAddress": "10.10.0.1"'
             { ConvertFrom-VmConfigJson -Json "[$core$extras }]" } |
                 Should -Throw -ExpectedMessage "*privateSwitchName*"
@@ -480,7 +480,7 @@ Describe 'ConvertFrom-VmConfigJson' {
             # unambiguously about the missing privateSwitchName.
             $core = (New-ValidVmJson 'router-prod') -replace '\}\s*$', ''
             $extras = ', "kind": "router"' +
-                      ', "externalSwitchName": "ExtSwitch"' +
+                      ', "externalSwitchName": "ExternalSwitch-Shared"' +
                       ', "externalAdapterName": "Ethernet"' +
                       ', "privateIpAddress": "10.10.0.1"'
             { ConvertFrom-VmConfigJson -Json "[$core$extras }]" } |

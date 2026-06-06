@@ -23,10 +23,10 @@ Describe 'Ensure-ExternalSwitch' {
             Mock Get-NetAdapter { New-TestAdapter }
             Mock New-VMSwitch   { }
 
-            Ensure-ExternalSwitch -Name 'ExtSwitch' -NetAdapterName 'Ethernet'
+            Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet'
 
             Should -Invoke New-VMSwitch -Times 1 -Exactly -ParameterFilter {
-                $Name              -eq 'ExtSwitch' -and
+                $Name              -eq 'ExternalSwitch-Shared' -and
                 $NetAdapterName    -eq 'Ethernet'  -and
                 $AllowManagementOS -eq $true
             }
@@ -39,7 +39,7 @@ Describe 'Ensure-ExternalSwitch' {
             Mock Get-NetAdapter { }
             Mock New-VMSwitch   { }
 
-            { Ensure-ExternalSwitch -Name 'ExtSwitch' -NetAdapterName 'Ethernet' } |
+            { Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet' } |
                 Should -Throw -ExpectedMessage "*Get-NetAdapter*"
 
             Should -Invoke New-VMSwitch -Times 0
@@ -49,7 +49,7 @@ Describe 'Ensure-ExternalSwitch' {
             Mock Get-VMSwitch   { }
             Mock Get-NetAdapter { }
 
-            { Ensure-ExternalSwitch -Name 'ExtSwitch' -NetAdapterName 'WiFi-Custom' } |
+            { Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'WiFi-Custom' } |
                 Should -Throw -ExpectedMessage "*WiFi-Custom*"
         }
     }
@@ -63,7 +63,7 @@ Describe 'Ensure-ExternalSwitch' {
             Mock Get-NetAdapter { New-TestAdapter }
             Mock New-VMSwitch   { }
 
-            Ensure-ExternalSwitch -Name 'ExtSwitch' -NetAdapterName 'Ethernet'
+            Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet'
 
             Should -Invoke New-VMSwitch -Times 0
         }
@@ -75,7 +75,7 @@ Describe 'Ensure-ExternalSwitch' {
             Mock Get-NetAdapter { }
             Mock New-VMSwitch   { }
 
-            { Ensure-ExternalSwitch -Name 'ExtSwitch' -NetAdapterName 'AnythingReally' } |
+            { Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'AnythingReally' } |
                 Should -Not -Throw
 
             Should -Invoke Get-NetAdapter -Times 0
@@ -93,7 +93,7 @@ Describe 'Ensure-ExternalSwitch' {
             Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'Internal' } }
             Mock New-VMSwitch { }
 
-            { Ensure-ExternalSwitch -Name 'ExtSwitch' -NetAdapterName 'Ethernet' } |
+            { Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet' } |
                 Should -Throw -ExpectedMessage "*Internal*"
 
             Should -Invoke New-VMSwitch -Times 0
@@ -103,7 +103,7 @@ Describe 'Ensure-ExternalSwitch' {
             Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'Private' } }
             Mock New-VMSwitch { }
 
-            { Ensure-ExternalSwitch -Name 'ExtSwitch' -NetAdapterName 'Ethernet' } |
+            { Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet' } |
                 Should -Throw -ExpectedMessage "*Private*"
 
             Should -Invoke New-VMSwitch -Times 0
@@ -112,8 +112,8 @@ Describe 'Ensure-ExternalSwitch' {
         It 'includes the requested switch name in the error message' {
             Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'Internal' } }
 
-            { Ensure-ExternalSwitch -Name 'ExtSwitch-prod' -NetAdapterName 'Ethernet' } |
-                Should -Throw -ExpectedMessage "*ExtSwitch-prod*"
+            { Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared-prod' -NetAdapterName 'Ethernet' } |
+                Should -Throw -ExpectedMessage "*ExternalSwitch-Shared-prod*"
         }
     }
 }

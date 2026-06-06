@@ -27,8 +27,8 @@ BeforeAll {
             gateway             = '192.168.1.1'
             dns                 = '8.8.8.8'
             kind                = 'router'
-            externalSwitchName  = 'ExtSwitch'
-            privateSwitchName   = 'PrivSwitch-prod'
+            externalSwitchName  = 'ExternalSwitch-Shared'
+            privateSwitchName   = 'PrivateSwitch-Production'
             privateIpAddress    = '10.10.0.1'
         }
     }

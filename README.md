@@ -533,9 +533,9 @@ host's NAT slot. Background: see
   "vmConfigPath":       "E:\\a_VMs\\Hyper-V\\Config",
   "vhdPath":            "E:\\a_VMs\\Hyper-V\\Disks",
   "kind":                "router",
-  "externalSwitchName":  "ExtSwitch",
+  "externalSwitchName":  "ExternalSwitch-Shared",
   "externalAdapterName": "Ethernet",
-  "privateSwitchName":   "PrivSwitch-prod",
+  "privateSwitchName":   "PrivateSwitch-Production",
   "privateIpAddress":    "10.10.0.1"
 }
 ```

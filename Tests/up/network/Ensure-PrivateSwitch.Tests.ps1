@@ -17,10 +17,10 @@ Describe 'Ensure-PrivateSwitch' {
             Mock Get-VMSwitch { }
             Mock New-VMSwitch { }
 
-            Ensure-PrivateSwitch -Name 'PrivSwitch-prod'
+            Ensure-PrivateSwitch -Name 'PrivateSwitch-Production'
 
             Should -Invoke New-VMSwitch -Times 1 -Exactly -ParameterFilter {
-                $Name -eq 'PrivSwitch-prod' -and $SwitchType -eq 'Private'
+                $Name -eq 'PrivateSwitch-Production' -and $SwitchType -eq 'Private'
             }
         }
     }
@@ -33,7 +33,7 @@ Describe 'Ensure-PrivateSwitch' {
             Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'Private' } }
             Mock New-VMSwitch { }
 
-            Ensure-PrivateSwitch -Name 'PrivSwitch-prod'
+            Ensure-PrivateSwitch -Name 'PrivateSwitch-Production'
 
             Should -Invoke New-VMSwitch -Times 0
         }
@@ -50,7 +50,7 @@ Describe 'Ensure-PrivateSwitch' {
             Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'Internal' } }
             Mock New-VMSwitch { }
 
-            { Ensure-PrivateSwitch -Name 'PrivSwitch-prod' } |
+            { Ensure-PrivateSwitch -Name 'PrivateSwitch-Production' } |
                 Should -Throw -ExpectedMessage "*Internal*"
 
             Should -Invoke New-VMSwitch -Times 0
@@ -60,7 +60,7 @@ Describe 'Ensure-PrivateSwitch' {
             Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'External' } }
             Mock New-VMSwitch { }
 
-            { Ensure-PrivateSwitch -Name 'PrivSwitch-prod' } |
+            { Ensure-PrivateSwitch -Name 'PrivateSwitch-Production' } |
                 Should -Throw -ExpectedMessage "*External*"
 
             Should -Invoke New-VMSwitch -Times 0
@@ -69,8 +69,8 @@ Describe 'Ensure-PrivateSwitch' {
         It 'includes the requested switch name in the error message' {
             Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'Internal' } }
 
-            { Ensure-PrivateSwitch -Name 'PrivSwitch-prod' } |
-                Should -Throw -ExpectedMessage "*PrivSwitch-prod*"
+            { Ensure-PrivateSwitch -Name 'PrivateSwitch-Production' } |
+                Should -Throw -ExpectedMessage "*PrivateSwitch-Production*"
         }
     }
 }

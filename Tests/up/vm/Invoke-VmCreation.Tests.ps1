@@ -68,8 +68,8 @@ BeforeAll {
             _vhdxPath           = 'C:\VMs\router-01\router-01.vhdx'
             _seedIsoPath        = 'C:\VMs\router-01\router-01-seed.iso'
             kind                = 'router'
-            externalSwitchName  = 'ExtSwitch'
-            privateSwitchName   = 'PrivSwitch-prod'
+            externalSwitchName  = 'ExternalSwitch-Shared'
+            privateSwitchName   = 'PrivateSwitch-Production'
             _externalMac        = '02aabbccdd00'
             _privateMac         = '02aabbccdd01'
         }
@@ -247,12 +247,12 @@ Describe 'Invoke-VmCreation' {
             Initialize-HyperVMocks
             Set-ExpiredDeadline
 
-            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExtSwitch' } |
+            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExternalSwitch-Shared' } |
                 Should -Throw
 
             Should -Invoke Connect-VMNetworkAdapter -Times 1 -Exactly -ParameterFilter {
                 $VMName     -eq 'router-01' -and
-                $SwitchName -eq 'ExtSwitch'
+                $SwitchName -eq 'ExternalSwitch-Shared'
             }
         }
 
@@ -260,7 +260,7 @@ Describe 'Invoke-VmCreation' {
             Initialize-HyperVMocks
             Set-ExpiredDeadline
 
-            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExtSwitch' } |
+            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExternalSwitch-Shared' } |
                 Should -Throw
 
             Should -Invoke Set-VMNetworkAdapter -Times 1 -Exactly -ParameterFilter {
@@ -274,13 +274,13 @@ Describe 'Invoke-VmCreation' {
             Initialize-HyperVMocks
             Set-ExpiredDeadline
 
-            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExtSwitch' } |
+            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExternalSwitch-Shared' } |
                 Should -Throw
 
             Should -Invoke Add-VMNetworkAdapter -Times 1 -Exactly -ParameterFilter {
                 $VMName           -eq 'router-01' -and
                 $Name             -eq 'Private' -and
-                $SwitchName       -eq 'PrivSwitch-prod' -and
+                $SwitchName       -eq 'PrivateSwitch-Production' -and
                 $StaticMacAddress -eq '02aabbccdd01'
             }
         }

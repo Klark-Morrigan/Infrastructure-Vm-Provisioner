@@ -7,9 +7,9 @@ BeforeAll {
     function New-RouterVm {
         [PSCustomObject]@{
             vmName               = 'router-prod'
-            externalSwitchName   = 'ExtSwitch'
+            externalSwitchName   = 'ExternalSwitch-Shared'
             externalAdapterName  = 'Ethernet'
-            privateSwitchName    = 'PrivSwitch-prod'
+            privateSwitchName    = 'PrivateSwitch-Production'
             privateIpAddress     = '10.10.0.1'
         }
     }
