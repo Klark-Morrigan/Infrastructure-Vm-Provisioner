@@ -4,6 +4,12 @@
     provision.ps1.
 #>
 
+# Assert-EnvironmentConsistency lives in its own file alongside the other
+# Assert-* sibling validators (Assert-RouterVmField, Assert-JavaDevKitField,
+# ...). Dot-sourced here so this script remains the single entry point
+# operators dot-source from provision.ps1.
+. "$PSScriptRoot\Assert-EnvironmentConsistency.ps1"
+
 # ---------------------------------------------------------------------------
 # Select-VmsForProvisioning
 #   Runs pre-flight checks on each VM definition and outputs only those that
@@ -37,6 +43,8 @@ function Select-VmsForProvisioning {
         [Parameter(Mandatory)]
         [object[]] $VmDefs
     )
+
+    Assert-EnvironmentConsistency -VmDefs $VmDefs
 
     foreach ($vm in $VmDefs) {
         Write-Host ""

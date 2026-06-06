@@ -5,8 +5,9 @@
 
 .DESCRIPTION
     Reads the VmProvisionerConfig secret, validates each VM definition, stops
-    and removes each VM with its associated files, then tears down the shared
-    VmLAN network when no VMs remain on it.
+    and removes each VM with its associated files, then per environment tears
+    down the Private switch (when no VMs remain attached) and any leftover
+    singleton-NAT state at the environment's gateway IP.
 
     Run setup-secrets.ps1 once first to populate the vault before running
     this script.
@@ -23,10 +24,11 @@
     - If a VM in the config is not found in Hyper-V, its Hyper-V teardown is
       skipped and only file cleanup is attempted. Re-running after a partial
       failure retries the outstanding file deletions.
-    - If the shared network objects (NAT rule, host vNIC IP, switch) are
-      already absent, each is silently skipped.
-    - If VMs outside the config are still attached to VmLAN, the network
-      teardown is skipped to avoid cutting their connectivity.
+    - Per-environment network teardown is idempotent: NetNat / host vNIC IP
+      / Private switch removals each silently skip when the object is
+      already absent.
+    - If VMs outside the config are still attached to a Private switch, that
+      switch's removal is skipped to avoid cutting their connectivity.
 
     SECURITY
     - No secrets are passed as command-line arguments or written to disk.
@@ -46,8 +48,9 @@ $ErrorActionPreference = 'Stop'
 
 . "$PSScriptRoot\common\config\ConvertFrom-VmConfigJson.ps1"
 . "$PSScriptRoot\common\config\Get-SanitizedVmDisplay.ps1"
+. "$PSScriptRoot\common\config\Group-VmsByEnvironment.ps1"
 . "$PSScriptRoot\common\config\Read-VmProvisionerConfig.ps1"
-. "$PSScriptRoot\down\config\Assert-GatewayConsistency.ps1"
+. "$PSScriptRoot\common\network\Remove-LegacySingletonNat.ps1"
 . "$PSScriptRoot\down\vm\remove-vm.ps1"
 . "$PSScriptRoot\down\network\teardown-network.ps1"
 
@@ -60,19 +63,7 @@ $ErrorActionPreference = 'Stop'
 $vmDefs = Read-VmProvisionerConfig -SecretSuffix $SecretSuffix
 
 # ---------------------------------------------------------------------------
-# 2. Validate gateway consistency
-#    All VMs must share the same gateway - they are all attached to the same
-#    Internal switch during provisioning. The gateway is needed to call
-#    Invoke-NetworkTeardown, so this check runs here rather than inside that
-#    function (which does not receive the full VM list).
-# ---------------------------------------------------------------------------
-
-$gatewayIp  = Assert-GatewayConsistency -VmDefs $vmDefs
-$switchName = $vmDefs[0].switchName
-$natName    = $vmDefs[0].natName
-
-# ---------------------------------------------------------------------------
-# 3. Per-VM removal
+# 2. Per-VM removal
 #    Each VM is stopped and removed from Hyper-V, then its VHDX, seed ISO,
 #    and config directory are deleted. If a VM is already absent from Hyper-V
 #    (re-run after partial failure), only the file cleanup is attempted.
@@ -83,16 +74,29 @@ foreach ($vm in $vmDefs) {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Shared network teardown
-#    Invoke-NetworkTeardown checks internally whether any VMs are still
-#    attached to VmLAN before removing network objects. VMs outside the
-#    config that remain on the switch will cause teardown to be skipped,
-#    preserving their connectivity.
+# 3. Per-environment network teardown
+#    Group-VmsByEnvironment yields one record per private switch in the
+#    config. Within each environment the gateway IP is taken from the
+#    router VM's privateIpAddress when present (the post-feature-53
+#    layout); otherwise it falls back to the first workload VM's gateway
+#    (covers configs that predate the router VM but still describe the
+#    singleton-NAT topology).
+#
+#    Invoke-NetworkTeardown is idempotent and self-guards against attached
+#    VMs, so it is safe to call once per environment regardless of whether
+#    the switch was actually created by this tooling or by something else.
 # ---------------------------------------------------------------------------
 
-Invoke-NetworkTeardown -SwitchName $switchName `
-                       -Gateway    $gatewayIp `
-                       -NatName    $natName
+foreach ($env in (Group-VmsByEnvironment -VmDefs $vmDefs)) {
+    $gatewayIp = if ($env.RouterVms.Count -gt 0) {
+        $env.RouterVms[0].privateIpAddress
+    }
+    else {
+        $env.WorkloadVms[0].gateway
+    }
+    Invoke-NetworkTeardown -PrivateSwitchName $env.Name `
+                           -GatewayIp         $gatewayIp
+}
 
 Write-Host ""
 Write-Host "Deprovisioning complete." -ForegroundColor Green

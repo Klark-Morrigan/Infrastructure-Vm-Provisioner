@@ -7,6 +7,7 @@
 - [Overview](#overview)
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
+- [Networking](#networking)
 - [setup-secrets.ps1](#setup-secretsps1)
   - [Optional: install a JDK](#optional-install-a-jdk)
   - [Removing a JDK](#removing-a-jdk)
@@ -68,6 +69,78 @@ PSGallery automatically on first run.
 
 ---
 
+## Networking
+
+VMs are organised into **environments**. An environment is one Hyper-V
+Private switch (`privateSwitchName`) plus exactly one router VM whose
+private NIC carries the environment's gateway IP. Every workload VM in
+the environment attaches its only NIC to the same Private switch and
+routes its egress through the router VM. Multiple environments can
+coexist on one host - each owns an independent subnet and an
+independent router VM that MASQUERADEs out the host's shared External
+switch.
+
+```mermaid
+flowchart LR
+  subgraph Host[Hyper-V host]
+    direction LR
+    EXT[External vSwitch<br/>host-bridged]
+    subgraph PROD[Production environment]
+      direction LR
+      PR[Router VM<br/>prod]
+      P1[Workload VM] & P2[Workload VM]
+      PSW[Private vSwitch<br/>prod]
+      PR --- PSW
+      PSW --- P1
+      PSW --- P2
+    end
+    subgraph E2E[E2E environment]
+      direction LR
+      ER[Router VM<br/>e2e]
+      E1[Workload VM] & E2[Workload VM]
+      ESW[Private vSwitch<br/>e2e]
+      ER --- ESW
+      ESW --- E1
+      ESW --- E2
+    end
+    PR --- EXT
+    ER --- EXT
+  end
+  EXT --- LAN[(Upstream LAN / internet)]
+```
+
+The host itself is not the gateway anymore. `provision.ps1` no longer
+creates a singleton Internal switch, no longer assigns a host vNIC IP,
+and no longer registers a `New-NetNat` rule. The host's only role in
+the data plane is the External switch the router VMs share. See the
+[problem statement](docs/dev/implementation/53%20-%20nat%20router%20vm/problem.md)
+for why this matters (Windows allows only one `New-NetNat` to carry
+real egress, and production owns that slot).
+
+**Per-environment invariants** (preflight enforces every one):
+
+- Every VM in the JSON declares `privateSwitchName`. VMs sharing a
+  value are in the same environment.
+- Every environment with workload VMs has **exactly one** router VM in
+  the JSON. A router-only batch is allowed (bootstrap path); a
+  workload-only batch is rejected.
+- Within an environment, all VMs share the same `gateway` and
+  `subnetMask`. The workloads' `gateway` equals the router VM's
+  `privateIpAddress`.
+
+**Migration from the legacy singleton-NAT topology.** Hosts originally
+provisioned under the pre-feature-53 layout had a `VmLAN` Internal
+switch with `VmLAN-NAT` registered against it. Both `provision.ps1`
+(via `Invoke-NetworkSetup`) and `deprovision.ps1` (via
+`Invoke-NetworkTeardown`) idempotently clean up that state: any
+`New-NetNat` whose prefix covers an environment's gateway IP is
+removed, and any host vNIC carrying the gateway IP is unassigned. The
+legacy `VmLAN` switch itself is not torn down by either flow - it is
+free to remove with `Remove-VMSwitch VmLAN -Force` once no VMs are
+attached.
+
+---
+
 ## setup-secrets.ps1
 
 Run once per machine before `provision.ps1`.
@@ -90,22 +163,49 @@ Re-running safely updates the stored config.
 ```jsonc
 [
   {
-    "vmName":        "ubuntu-01-ci",
-    "cpuCount":      2,
-    "ramGB":         4,
-    "diskGB":        40,
-    "ubuntuVersion": "24.04",
-    "username":      "u-01-admin",
-    "password":      "...",
-    "ipAddress":     "192.168.1.101",
-    "subnetMask":    "24",
-    "gateway":       "192.168.1.1",
-    "dns":           "8.8.8.8",
-    "vmConfigPath":  "E:\\a_VMs\\Hyper-V\\Config",
-    "vhdPath":       "E:\\a_VMs\\Hyper-V\\Disks"
+    "vmName":            "ubuntu-01-ci",
+    "cpuCount":          2,
+    "ramGB":             4,
+    "diskGB":            40,
+    "ubuntuVersion":     "24.04",
+    "username":          "u-01-admin",
+    "password":          "...",
+    "ipAddress":         "192.168.1.101",
+    "subnetMask":        "24",
+    "gateway":           "10.10.0.1",
+    "dns":               "8.8.8.8",
+    "vmConfigPath":      "E:\\a_VMs\\Hyper-V\\Config",
+    "vhdPath":           "E:\\a_VMs\\Hyper-V\\Disks",
+    "privateSwitchName": "PrivateSwitch-Production"
+  },
+  {
+    "vmName":             "router-prod",
+    "cpuCount":           1,
+    "ramGB":              1,
+    "diskGB":             20,
+    "ubuntuVersion":      "24.04",
+    "username":           "admin",
+    "password":           "...",
+    "ipAddress":          "192.168.1.10",
+    "subnetMask":         "24",
+    "gateway":            "192.168.1.1",
+    "dns":                "8.8.8.8",
+    "vmConfigPath":       "E:\\a_VMs\\Hyper-V\\Config",
+    "vhdPath":            "E:\\a_VMs\\Hyper-V\\Disks",
+    "privateSwitchName":  "PrivateSwitch-Production",
+    "kind":               "router",
+    "externalSwitchName":  "ExternalSwitch-Shared",
+    "externalAdapterName": "Ethernet",
+    "privateIpAddress":    "10.10.0.1"
   }
 ]
 ```
+
+A workload VM's `gateway` must equal **its environment's router VM's**
+`privateIpAddress` - the workload's egress traffic flows through that
+router. The two VMs sit on the same `privateSwitchName`. See
+[Networking](#networking) for the full topology and
+[Router VM](#router-vm-kind-router) for the router-specific fields.
 
 All fields are required. After first boot, connect via `ssh username@ipAddress`.
 
@@ -120,16 +220,14 @@ All fields are required. After first boot, connect via `ssh username@ipAddress`.
 | `password`      | string | Password for that user (plain text in vault only)  |
 | `ipAddress`     | string | Static IPv4 address assigned inside the VM         |
 | `subnetMask`    | string | CIDR prefix length, e.g. `"24"`                    |
-| `gateway`       | string | Default gateway — also assigned to the host vNIC   |
+| `gateway`       | string | Default gateway for the VM. For workload VMs this **must equal** the matching router VM's `privateIpAddress` (preflight enforced). For router VMs this is the upstream gateway on the external NIC. |
 | `dns`           | string | DNS server IP                                      |
 | `vmConfigPath`  | string | Windows path where seed ISO is written             |
 | `vhdPath`       | string | Windows path where VHDX files are stored           |
-| `switchName`    | string | Hyper-V Internal switch name. Default: `VmLAN` (workload VMs only) |
-| `natName`       | string | Windows NAT rule name. Default: `VmLAN-NAT` (workload VMs only)    |
+| `privateSwitchName`  | string  | Per-environment Hyper-V Private switch this VM attaches to. Required on both VM kinds (workloads attach their only NIC to it; router VMs attach their downstream NIC to it). Created on demand by `Ensure-PrivateSwitch` when absent. |
 | `kind`          | string? | Optional. `"workload"` (default) or `"router"`. See [Router VM](#router-vm-kind-router). |
 | `externalSwitchName` | string | Required when `kind: router`. Host-bridged Hyper-V switch the router's upstream NIC attaches to; created on demand if absent (see `externalAdapterName`). |
 | `externalAdapterName`| string | Required when `kind: router`. Physical NIC the External switch binds to when `Ensure-ExternalSwitch` needs to create it. Ignored at runtime if the switch already exists. Find the name with `Get-NetAdapter`. |
-| `privateSwitchName`  | string | Required when `kind: router`. Per-environment Hyper-V Private switch the router's downstream NIC attaches to; created on demand. |
 | `privateIpAddress`   | string | Required when `kind: router`. IP the router carries on its private-side NIC; downstream VMs use it as their default gateway and DNS server. |
 | `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. Not supported on `kind: router`. See [Optional: install a JDK](#optional-install-a-jdk). |
 | `dotnetSdk`     | object? | Optional. Installs a .NET SDK system-wide on first boot. See [Optional: install a .NET SDK](#optional-install-a-net-sdk). |
@@ -672,27 +770,27 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
    Router VMs (`kind: router`) take the router-seed path instead - see
    [Router VM](#router-vm-kind-router) for the dual-NIC netplan and
    the nftables / dnsmasq / sysctl payload it lands.
-7. **(always)** For batches containing workload VMs, creates a Hyper-V
-   Internal switch named `VmLAN` (if absent), assigns the `gateway`
-   IP to the host-side virtual NIC, and adds a `New-NetNat` rule for
-   the subnet so VMs can reach the internet through the host. For
-   each router VM in the batch, ensures the External switch named in
+7. **(always)** Per-environment network setup. For each router VM in
+   the batch, ensures the External switch named in
    `externalSwitchName` exists (created on demand bound to
    `externalAdapterName`) and the per-environment Private switch
-   named in `privateSwitchName` exists. Both branches are
-   idempotent; they run even when only existing VMs are being
-   reconciled so a rebuilt host gets the network re-applied. A
-   router-only batch skips the legacy `VmLAN` / `VmLAN-NAT` creation
-   entirely - the whole point of the router VM is to free that host
-   NAT slot, so creating it here would be dead infrastructure.
+   named in `privateSwitchName` exists. Then runs an idempotent
+   cleanup of any legacy singleton-NAT state for the environment's
+   gateway IP - any `New-NetNat` whose prefix covers the gateway,
+   and any host vNIC carrying that IP, are removed. Safe to re-run
+   against a partially-migrated host. The whole step is idempotent,
+   so it runs even when only existing VMs are being reconciled so
+   a rebuilt host gets the network re-applied. See
+   [Networking](#networking) for the resulting topology.
 8. **(new VMs only)** Creates each VM (Gen 2, static RAM, VHDX from
    step 4), sets Secure Boot to `MicrosoftUEFICertificateAuthority`
-   (required for Ubuntu), attaches the seed ISO, connects to `VmLAN`
-   (or `externalSwitchName` for router VMs), and starts the VM.
-   Router VMs additionally get a second NIC on `privateSwitchName`,
-   and both NICs are pinned to deterministic MACs that match the
-   seed's netplan blocks. Polls port 22 until cloud-init finishes,
-   then detaches and deletes the seed ISO.
+   (required for Ubuntu), attaches the seed ISO, connects to its
+   `privateSwitchName` (workload VMs) or `externalSwitchName`
+   (router VMs), and starts the VM. Router VMs additionally get a
+   second NIC on `privateSwitchName`, and both NICs are pinned to
+   deterministic MACs that match the seed's netplan blocks. Polls
+   port 22 until cloud-init finishes, then detaches and deletes the
+   seed ISO.
 9. **(new AND existing VMs)** Runs post-provisioning. Opens one host file server and
     one SSH session per VM, waits once for cloud-init to finish, then
     dispatches each enabled step:
@@ -849,10 +947,23 @@ Reads the same `VmProvisionerConfig` from the vault and for each VM definition:
 
 After all VMs are processed:
 
-6. Removes the `VmLAN-NAT` NAT rule, the gateway IP from the host vNIC, and
-   the `VmLAN` Internal switch — but only when no VMs remain connected to the
-   switch. If VMs outside the config are still attached (e.g. provisioned
-   separately), the network teardown is skipped to preserve their connectivity.
+6. Per environment (one group per unique `privateSwitchName` in the
+   config), tears down the network state owned by that environment:
+   - Any `New-NetNat` rule whose prefix covers the environment's gateway
+     IP is removed (idempotent legacy cleanup carried over from
+     feature 53 step 2).
+   - Any host vNIC carrying the gateway IP is unassigned (same legacy
+     migration story).
+   - The Private switch is removed **only when no VMs remain attached**.
+     If VMs outside the config are still connected (e.g. provisioned by
+     another lifecycle), that switch's removal is skipped and the
+     other VMs keep their network.
+
+   The environment's gateway IP is taken from the router VM's
+   `privateIpAddress` when one is in the config; otherwise it falls
+   back to the first workload VM's `gateway` (covers configs that
+   predate the router VM but still describe the singleton-NAT
+   topology).
 
 **The base Ubuntu image is not deleted.** It is shared across all VMs of the
 same Ubuntu version and is not specific to any single config entry. Delete it
@@ -889,14 +1000,18 @@ Infrastructure-VM-Provisioner/
 |     |- deprovision.ps1     # Entry point - reverses provision.ps1
 |     |- setup-secrets.ps1   # One-time vault setup
 |     |- common/
-|     |  `- config/
-|     |     |- ConvertFrom-VmConfigJson.ps1  # JSON parsing and validation; delegates the optional 'files' array to Infrastructure.HyperV's Assert-VmFilesField
-|     |     |- Assert-JavaDevKitField.ps1    # Validates optional javaDevKit field
-|     |     |- Get-SanitizedVmDisplay.ps1    # Masks password in diagnostic output
-|     |     `- Read-VmProvisionerConfig.ps1  # Shared bootstrap helper: vault read + schema validation, reused by provision / start-vms / deprovision
+|     |  |- config/
+|     |  |  |- ConvertFrom-VmConfigJson.ps1  # JSON parsing and validation; delegates the optional 'files' array to Infrastructure.HyperV's Assert-VmFilesField
+|     |  |  |- Assert-JavaDevKitField.ps1    # Validates optional javaDevKit field
+|     |  |  |- Get-SanitizedVmDisplay.ps1    # Masks password in diagnostic output
+|     |  |  |- Group-VmsByEnvironment.ps1    # Per-environment view: groups VM defs by privateSwitchName and partitions each group into RouterVms / WorkloadVms. Single source of truth shared by preflight, provision step 7, and deprovision teardown.
+|     |  |  `- Read-VmProvisionerConfig.ps1  # Shared bootstrap helper: vault read + schema validation, reused by provision / start-vms / deprovision
+|     |  `- network/
+|     |     `- Remove-LegacySingletonNat.ps1 # Idempotent NetNat + host vNIC cleanup at a given gateway IP. Shared by Invoke-NetworkSetup (provision) and Invoke-NetworkTeardown (deprovision); also exports Test-IpInPrefix.
 |     |- up/
 |     |  |- config/
-|     |  |  `- Select-VmsForProvisioning.ps1 # Pre-flight VM-existence and IP-conflict checks
+|     |  |  |- Assert-EnvironmentConsistency.ps1 # Per-env preflight: shared gateway/subnet, exactly-one router per env, gateway = router's privateIpAddress. Built on Group-VmsByEnvironment.
+|     |  |  `- Select-VmsForProvisioning.ps1     # Pre-flight VM-existence and IP-conflict checks; dispatches the per-env preflight to Assert-EnvironmentConsistency before any per-VM classification
 |     |  |- disk/
 |     |  |  |- Invoke-DiskImageAcquisition.ps1  # Downloads, converts, caches base VHDX
 |     |  |  `- Invoke-BaseImagePatch.ps1        # Patches cloud-init datasource via WSL2
@@ -931,7 +1046,7 @@ Infrastructure-VM-Provisioner/
 |     |  |  |- Invoke-VmPostProvisioning.ps1    # Per-VM transport orchestrator (file server + SSH + cloud-init wait), dispatches steps; calls Infrastructure.HyperV's Copy-VmFiles for the 'files' step
 |     |  |  `- Set-EnvironmentVariables.ps1     # Step: writes a managed block of NAME="VALUE" lines into /etc/environment via Infrastructure.HyperV's Set-VmEnvironmentVariables
 |     |  |- network/
-|     |  |  `- setup-network.ps1               # Creates VmLAN switch, host IP, NAT rule
+|     |  |  `- setup-network.ps1               # Per-env wrapper around Remove-LegacySingletonNat; switch creation lives in Ensure-PrivateSwitch / Ensure-ExternalSwitch
 |     |  |- seed/
 |     |  |  |- generate-seed-iso.ps1           # Builds cloud-init seed ISO
 |     |  |  |- New-StaticNetplanYaml.ps1       # Builds netplan v2 YAML for the VM's static NIC (embedded in user-data write_files)
@@ -939,14 +1054,14 @@ Infrastructure-VM-Provisioner/
 |     |  `- vm/
 |     |     `- create-vm.ps1                   # Creates, boots, and polls each VM
 |     `- down/
-|        |- config/
-|        |  `- Assert-GatewayConsistency.ps1 # Validates all VMs share one gateway
 |        |- network/
-|        |  `- teardown-network.ps1         # Removes NAT rule, host IP, and switch
+|        |  `- teardown-network.ps1         # Per-env teardown: delegates legacy NetNat + host IP cleanup to Remove-LegacySingletonNat, then removes the Private switch when empty
 |        `- vm/
 |           `- remove-vm.ps1               # Stops, removes VM, deletes VHDX and config dir
 |- Tests/
-|  |- common/config/         # Unit tests for common/config helpers
+|  |- common/
+|  |  |- config/             # Unit tests for common/config helpers
+|  |  `- network/            # Unit tests for common/network helpers
 |  |- up/
 |  |  |- config/             # Unit tests for up/config helpers
 |  |  |- disk/               # Unit tests for up/disk
@@ -955,7 +1070,6 @@ Infrastructure-VM-Provisioner/
 |  |  |- seed/               # Unit tests for up/seed
 |  |  `- vm/                 # Unit tests for up/vm
 |  `- down/
-|     |- config/             # Unit tests for down/config helpers
 |     |- network/            # Unit tests for down/network
 |     `- vm/                 # Unit tests for down/vm
 |- Run-Tests.ps1             # Runs Pester tests (called by ci-powershell.yml)

@@ -12,7 +12,8 @@
 #   ConvertFrom-VmConfigJson is just a kind-check + a call here.
 #
 #   Required (in addition to the base required-field set, which is
-#   already enforced by ConvertFrom-VmConfigJson):
+#   already enforced by ConvertFrom-VmConfigJson - 'privateSwitchName'
+#   lives there because workload VMs also need it):
 #     - externalSwitchName  : Hyper-V switch the router's upstream NIC
 #                             attaches to. Created on demand by
 #                             Ensure-ExternalSwitch when absent; reused
@@ -23,12 +24,9 @@
 #                             config layer cannot tell whether the
 #                             switch already exists; if it does, the
 #                             field is ignored at runtime.
-#     - privateSwitchName   : Hyper-V Private switch the router's
-#                             downstream NIC attaches to. Created on
-#                             demand by Ensure-PrivateSwitch.
 #     - privateIpAddress    : IP the router carries on its private-side
-#                             NIC. Downstream VMs (step 2) use it as
-#                             their default gateway and DNS server.
+#                             NIC. Downstream VMs use it as their
+#                             default gateway and DNS server.
 #
 #   Rejected:
 #     - javaDevKit, dotnetSdk, dotnetTools - a router VM is intentionally
@@ -47,7 +45,7 @@ function Assert-RouterVmField {
     $vmName = if ($Vm.PSObject.Properties['vmName']) { $Vm.vmName } else { '(unknown)' }
     $ctx    = "VM '$vmName' (kind 'router')"
 
-    foreach ($field in @('externalSwitchName', 'externalAdapterName', 'privateSwitchName', 'privateIpAddress')) {
+    foreach ($field in @('externalSwitchName', 'externalAdapterName', 'privateIpAddress')) {
         if (-not $Vm.PSObject.Properties[$field]) {
             throw "${ctx} is missing required field '$field'."
         }

@@ -39,13 +39,6 @@ Describe 'Assert-RouterVmField' {
                 Should -Throw -ExpectedMessage "*externalAdapterName*"
         }
 
-        It 'throws when privateSwitchName is missing' {
-            $vm = New-RouterVm
-            $vm.PSObject.Properties.Remove('privateSwitchName')
-            { Assert-RouterVmField -Vm $vm } |
-                Should -Throw -ExpectedMessage "*privateSwitchName*"
-        }
-
         It 'throws when privateIpAddress is missing' {
             $vm = New-RouterVm
             $vm.PSObject.Properties.Remove('privateIpAddress')
@@ -62,14 +55,14 @@ Describe 'Assert-RouterVmField' {
 
         It 'throws when a required field is whitespace-only' {
             $vm = New-RouterVm
-            $vm.privateSwitchName = '   '
+            $vm.privateIpAddress = '   '
             { Assert-RouterVmField -Vm $vm } |
                 Should -Throw -ExpectedMessage "*non-empty*"
         }
 
         It 'includes the vmName in the error context' {
             $vm = New-RouterVm
-            $vm.PSObject.Properties.Remove('privateSwitchName')
+            $vm.PSObject.Properties.Remove('privateIpAddress')
             { Assert-RouterVmField -Vm $vm } |
                 Should -Throw -ExpectedMessage "*router-prod*"
         }
@@ -77,7 +70,7 @@ Describe 'Assert-RouterVmField' {
         It 'falls back to (unknown) when vmName is absent' {
             $vm = New-RouterVm
             $vm.PSObject.Properties.Remove('vmName')
-            $vm.PSObject.Properties.Remove('privateSwitchName')
+            $vm.PSObject.Properties.Remove('privateIpAddress')
             { Assert-RouterVmField -Vm $vm } |
                 Should -Throw -ExpectedMessage "*(unknown)*"
         }

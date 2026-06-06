@@ -47,7 +47,9 @@ $ErrorActionPreference = 'Stop'
 
 . "$PSScriptRoot\common\config\ConvertFrom-VmConfigJson.ps1"
 . "$PSScriptRoot\common\config\Get-SanitizedVmDisplay.ps1"
+. "$PSScriptRoot\common\config\Group-VmsByEnvironment.ps1"
 . "$PSScriptRoot\common\config\Read-VmProvisionerConfig.ps1"
+. "$PSScriptRoot\common\network\Remove-LegacySingletonNat.ps1"
 . "$PSScriptRoot\up\config\Select-VmsForProvisioning.ps1"
 . "$PSScriptRoot\up\seed\iso.ps1"
 . "$PSScriptRoot\up\disk\Invoke-BaseImagePatch.ps1"
@@ -287,49 +289,46 @@ try {
     }
 
     # -----------------------------------------------------------------------
-    # 7. Virtual switch and NAT setup
-    #    Workload VMs share one Internal switch + NetNat via
-    #    Invoke-NetworkSetup (the legacy host-as-NAT path - replaced
-    #    end-to-end by step 2 of feature 53). Router VMs each ensure
-    #    their per-environment Private switch exists; their external
-    #    switch is assumed pre-existing on the host.
-    #    Both branches are idempotent - safe to re-run.
+    # 7. Per-environment network setup
+    #    Group-VmsByEnvironment is the single source of truth for the
+    #    per-environment view. For each environment in the batch:
+    #      - Ensure its router VM's External and Private switches exist.
+    #      - Idempotently clean up any leftover singleton-NAT state for
+    #        the environment's gateway (legacy NetNat + host vNIC IP).
+    #    Preflight (Select-VmsForProvisioning -> Assert-EnvironmentConsistency)
+    #    has already guaranteed every environment with workloads has a
+    #    matching router VM, so an env without a router here can only mean
+    #    the router was dropped during classification (IP conflict /
+    #    offline VM); that env is skipped with the router itself.
+    #    All operations are idempotent so a re-run against a partially-
+    #    migrated host converges on the router-VM topology.
     # -----------------------------------------------------------------------
 
-    $workloadVms = ConvertTo-Array (
-        $vmsToProcess | Where-Object { $_.kind -ne 'router' })
-    $routerVms = ConvertTo-Array (
-        $vmsToProcess | Where-Object { $_.kind -eq 'router' })
-
     Invoke-WithPhaseTimer -Name 'Virtual switch + NAT' -Action {
-        # Skip the legacy switch/NAT path when no workload VM needs it:
-        # creating VmLAN + VmLAN-NAT for a router-only batch would be
-        # dead infrastructure on the host and would also clash with the
-        # production NAT slot the router VM is specifically meant to
-        # free up.
-        if ($workloadVms.Count -gt 0) {
-            $switchName = $workloadVms[0].switchName
-            $natName    = $workloadVms[0].natName
-            Invoke-NetworkSetup -VmsToProvision $workloadVms `
-                                -SwitchName     $switchName `
-                                -NatName        $natName
-        }
+        foreach ($env in (Group-VmsByEnvironment -VmDefs $vmsToProcess)) {
+            if ($env.RouterVms.Count -eq 0) { continue }
+            $routerVm = $env.RouterVms[0]
 
-        foreach ($vm in $routerVms) {
             # External switch first - if it cannot be created, there is
             # no point creating the private switch that depends on it.
-            Ensure-ExternalSwitch -Name           $vm.externalSwitchName `
-                                  -NetAdapterName $vm.externalAdapterName
-            Ensure-PrivateSwitch -Name $vm.privateSwitchName
+            Ensure-ExternalSwitch -Name           $routerVm.externalSwitchName `
+                                  -NetAdapterName $routerVm.externalAdapterName
+            Ensure-PrivateSwitch -Name $routerVm.privateSwitchName
+
+            # Cleanup runs even for a router-only env so a stale host-
+            # side NetNat / vNIC IP gets cleaned up the first time the
+            # router VM is provisioned.
+            Invoke-NetworkSetup -RouterVm    $routerVm `
+                                -WorkloadVms $env.WorkloadVms
         }
     }
 
     # -----------------------------------------------------------------------
     # 8. VM creation (new VMs only)
     #    Creates, configures, boots each VM, and waits for SSH readiness.
-    #    Workload VMs get one NIC on the shared switchName; router VMs
-    #    get their externalSwitchName as the primary NIC switch and
-    #    Invoke-VmCreation adds the second (private) NIC internally.
+    #    Workload VMs get one NIC on their environment's privateSwitchName;
+    #    router VMs get their externalSwitchName as the primary NIC switch
+    #    and Invoke-VmCreation adds the second (private) NIC internally.
     #    Skipped for existing VMs.
     # -----------------------------------------------------------------------
 
@@ -339,7 +338,7 @@ try {
                 $vm.externalSwitchName
             }
             else {
-                $vm.switchName
+                $vm.privateSwitchName
             }
             Invoke-VmCreation -Vm $vm -SwitchName $primarySwitch
         }

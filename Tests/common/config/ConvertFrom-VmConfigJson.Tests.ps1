@@ -44,19 +44,20 @@ BeforeAll {
     function New-ValidVmJson([string] $vmName = 'node-01') {
         @"
 {
-    "vmName":        "$vmName",
-    "cpuCount":      2,
-    "ramGB":         4,
-    "diskGB":        40,
-    "ubuntuVersion": "24.04",
-    "username":      "admin",
-    "password":      "s3cr3t",
-    "ipAddress":     "10.0.0.10",
-    "subnetMask":    "255.255.255.0",
-    "gateway":       "10.0.0.1",
-    "dns":           "8.8.8.8",
-    "vmConfigPath":  "E:\\a_VMs\\Hyper-V\\Config",
-    "vhdPath":       "E:\\a_VMs\\Hyper-V\\Disks"
+    "vmName":            "$vmName",
+    "cpuCount":          2,
+    "ramGB":             4,
+    "diskGB":            40,
+    "ubuntuVersion":     "24.04",
+    "username":          "admin",
+    "password":          "s3cr3t",
+    "ipAddress":         "10.0.0.10",
+    "subnetMask":        "255.255.255.0",
+    "gateway":           "10.0.0.1",
+    "dns":               "8.8.8.8",
+    "vmConfigPath":      "E:\\a_VMs\\Hyper-V\\Config",
+    "vhdPath":           "E:\\a_VMs\\Hyper-V\\Disks",
+    "privateSwitchName": "PrivateSwitch-Production"
 }
 "@
     }
@@ -82,28 +83,9 @@ Describe 'ConvertFrom-VmConfigJson' {
             $result | Should -HaveCount 1
         }
 
-        It 'defaults switchName to VmLAN when absent' {
-            $result = @(ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]")
-            $result[0].switchName | Should -Be 'VmLAN'
-        }
-
-        It 'defaults natName to VmLAN-NAT when absent' {
-            $result = @(ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]")
-            $result[0].natName | Should -Be 'VmLAN-NAT'
-        }
-
         It 'defaults kind to workload when absent' {
             $result = @(ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]")
             $result[0].kind | Should -Be 'workload'
-        }
-
-        It 'preserves explicit switchName and natName values' {
-            $custom = (New-ValidVmJson | ConvertFrom-Json)
-            $custom | Add-Member -MemberType NoteProperty -Name switchName -Value 'E2E-VmLAN'
-            $custom | Add-Member -MemberType NoteProperty -Name natName    -Value 'E2E-VmLAN-NAT'
-            $result = @(ConvertFrom-VmConfigJson -Json "[$(ConvertTo-Json $custom -Compress)]")
-            $result[0].switchName | Should -Be 'E2E-VmLAN'
-            $result[0].natName    | Should -Be 'E2E-VmLAN-NAT'
         }
 
         It 'returns all VM objects for a multi-VM JSON array' {
@@ -342,7 +324,7 @@ Describe 'ConvertFrom-VmConfigJson' {
                 Should -Throw -ExpectedMessage "*envVars*"
         }
 
-        It 'runs validators before applying switchName / natName defaults' {
+        It 'runs validators before applying the kind default' {
             # If validation threw mid-way after a default had been applied,
             # a later consumer could observe a half-defaulted VM object.
             # Pinning the order here keeps defaults strictly post-validation.
@@ -350,8 +332,7 @@ Describe 'ConvertFrom-VmConfigJson' {
             $custom = (New-ValidVmJson | ConvertFrom-Json)
             { @(ConvertFrom-VmConfigJson -Json "[$(ConvertTo-Json $custom -Compress)]") } |
                 Should -Throw
-            $custom.PSObject.Properties['switchName'] | Should -BeNullOrEmpty
-            $custom.PSObject.Properties['natName']    | Should -BeNullOrEmpty
+            $custom.PSObject.Properties['kind'] | Should -BeNullOrEmpty
         }
     }
 
@@ -461,7 +442,7 @@ Describe 'ConvertFrom-VmConfigJson' {
 
         It 'propagates a throw from Assert-RouterVmField' {
             Mock Assert-RouterVmField {
-                throw "router-prod: missing required field 'privateSwitchName'"
+                throw "router-prod: missing required field 'privateIpAddress'"
             }
             $core = (New-ValidVmJson 'router-prod') -replace '\}\s*$', ''
             $extras = ', "kind": "router"' +
@@ -470,21 +451,23 @@ Describe 'ConvertFrom-VmConfigJson' {
                       ', "privateSwitchName": "PrivateSwitch-Production"' +
                       ', "privateIpAddress": "10.10.0.1"'
             { ConvertFrom-VmConfigJson -Json "[$core$extras }]" } |
-                Should -Throw -ExpectedMessage "*privateSwitchName*"
+                Should -Throw -ExpectedMessage "*privateIpAddress*"
         }
 
-        It 'throws end-to-end when a router VM omits privateSwitchName' {
+        It 'throws end-to-end when a router VM omits privateIpAddress' {
             # End-to-end through the real validator (no mock) so the
             # router rejection message reaches callers unchanged. Every
             # other router-required field is present so the throw is
-            # unambiguously about the missing privateSwitchName.
+            # unambiguously about the missing privateIpAddress.
+            # (privateSwitchName is now a base required field validated
+            # by Assert-RequiredProperties - not Assert-RouterVmField - so
+            # a different router-only field is omitted here.)
             $core = (New-ValidVmJson 'router-prod') -replace '\}\s*$', ''
             $extras = ', "kind": "router"' +
                       ', "externalSwitchName": "ExternalSwitch-Shared"' +
-                      ', "externalAdapterName": "Ethernet"' +
-                      ', "privateIpAddress": "10.10.0.1"'
+                      ', "externalAdapterName": "Ethernet"'
             { ConvertFrom-VmConfigJson -Json "[$core$extras }]" } |
-                Should -Throw -ExpectedMessage "*privateSwitchName*"
+                Should -Throw -ExpectedMessage "*privateIpAddress*"
         }
 
         It 'does not require router fields when kind is workload' {

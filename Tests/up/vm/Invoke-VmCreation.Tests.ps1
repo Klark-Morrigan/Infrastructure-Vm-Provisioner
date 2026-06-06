@@ -205,16 +205,21 @@ Describe 'Invoke-VmCreation' {
     Context 'network adapter connection' {
     # ------------------------------------------------------------------
 
-        It 'connects the network adapter to the specified switch' {
+        It "connects the workload VM's NIC to the per-environment private switch" {
+            # provision.ps1 now passes vm.privateSwitchName as -SwitchName
+            # for workload VMs (feature 53 step 2 - no more singleton
+            # VmLAN). Invoke-VmCreation itself is switch-name-agnostic;
+            # this test pins that the value handed in is what reaches
+            # Connect-VMNetworkAdapter.
             Initialize-HyperVMocks
             Set-ExpiredDeadline
 
-            { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
+            { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'PrivateSwitch-Production' } |
                 Should -Throw
 
             Should -Invoke Connect-VMNetworkAdapter -Times 1 -Exactly -ParameterFilter {
                 $VMName     -eq 'node-01' -and
-                $SwitchName -eq 'VmLAN'
+                $SwitchName -eq 'PrivateSwitch-Production'
             }
         }
 
@@ -224,7 +229,7 @@ Describe 'Invoke-VmCreation' {
             Initialize-HyperVMocks
             Set-ExpiredDeadline
 
-            { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
+            { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'PrivateSwitch-Production' } |
                 Should -Throw
 
             Should -Invoke Set-VMNetworkAdapter -Times 0

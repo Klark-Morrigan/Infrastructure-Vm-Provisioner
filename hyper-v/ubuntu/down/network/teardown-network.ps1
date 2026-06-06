@@ -1,104 +1,82 @@
 <#
 .NOTES
     Do not run this file directly. It is intended to be dot-sourced by
-    deprovision.ps1.
+    deprovision.ps1, which is responsible for also dot-sourcing
+    common/network/Remove-LegacySingletonNat.ps1 so the shared cleanup
+    helper is in scope when this function runs.
 #>
 
 # ---------------------------------------------------------------------------
 # Invoke-NetworkTeardown
-#   Removes the shared NAT rule, host vNIC IP, and Internal switch created by
-#   setup-network.ps1 - but only when no VMs remain connected to the switch.
+#   Per-environment idempotent teardown of the Hyper-V networking objects an
+#   environment owns: the per-environment Private switch and any leftover
+#   singleton-NAT state at the environment's gateway IP.
 #
-#   Steps performed:
-#     1. Count adapters still connected to the switch. If any remain, log and
-#        return - removing the switch while VMs use it would drop their network
-#        access. The caller is responsible for removing all VMs first.
-#     2. Remove the NAT rule. Absence is not an error - the operator may have
-#        removed it manually, or a previous partial run may have already deleted
-#        it.
-#     3. Remove the host vNIC IP assignment. Same absence tolerance.
-#     4. Remove the virtual switch. Removing it also deletes the
-#        'vEthernet ($SwitchName)' host adapter. Same absence tolerance.
+#   Composed of two pieces:
+#     1. Legacy singleton-NAT cleanup (NetNat + host vNIC IP) via the shared
+#        Remove-LegacySingletonNat helper. Same code path the provision
+#        side runs, so a deprovision / re-provision cycle leaves no
+#        legacy state behind.
+#     2. Private switch removal, guarded by an attached-VMs check. VMs
+#        outside the config that are still connected (e.g. provisioned by
+#        another lifecycle) keep their network; the teardown logs and
+#        leaves the switch in place.
 # ---------------------------------------------------------------------------
 function Invoke-NetworkTeardown {
     [CmdletBinding()]
     param(
+        # The environment's Hyper-V Private switch. Removed when no VMs are
+        # still attached. May not exist - absence is logged, not an error.
         [Parameter(Mandatory)]
-        [string] $SwitchName,
+        [string] $PrivateSwitchName,
 
-        # Gateway IP assigned to the host vNIC - the address to remove.
+        # The environment's gateway IP. In the new world this is the router
+        # VM's privateIpAddress; in the legacy world it was the host vNIC
+        # IP. Either way, any NetNat covering it and any host vNIC carrying
+        # it gets removed via the shared cleanup helper.
         [Parameter(Mandatory)]
-        [string] $Gateway,
-
-        [Parameter(Mandatory)]
-        [string] $NatName
+        [string] $GatewayIp
     )
 
     Write-Host ""
-    Write-Host "--- Network teardown: $SwitchName ---" -ForegroundColor Cyan
+    Write-Host "--- Network teardown: $PrivateSwitchName ($GatewayIp) ---" `
+        -ForegroundColor Cyan
+
+    Remove-LegacySingletonNat -GatewayIp $GatewayIp
 
     # ------------------------------------------------------------------
-    # Guard: do not remove shared network objects while VMs are still
-    # attached. Pipe Get-VM into Get-VMNetworkAdapter so only adapters
-    # belonging to currently existing VMs are considered. Get-VMNetworkAdapter
-    # -All is intentionally avoided here: VMMS deregisters adapters
-    # asynchronously after Remove-VM returns, so -All transiently reports
-    # adapters for VMs that have already been removed, causing teardown
-    # to be skipped incorrectly.
+    # Private switch removal (guarded by attached-VMs check)
+    # Pipe Get-VM into Get-VMNetworkAdapter so only adapters belonging to
+    # currently existing VMs are considered. Get-VMNetworkAdapter -All is
+    # intentionally avoided here: VMMS deregisters adapters asynchronously
+    # after Remove-VM returns, so -All transiently reports adapters for
+    # VMs that have already been removed, causing teardown to be skipped
+    # incorrectly.
     # ------------------------------------------------------------------
     $remainingAdapters = @(
         Get-VM -ErrorAction SilentlyContinue |
             Get-VMNetworkAdapter -ErrorAction SilentlyContinue |
-            Where-Object { $_.SwitchName -eq $SwitchName }
+            Where-Object { $_.SwitchName -eq $PrivateSwitchName }
     )
 
     if ($remainingAdapters.Count -gt 0) {
         Write-Host (
-            "  $($remainingAdapters.Count) VM(s) still connected to '$SwitchName' " +
-            "- skipping network teardown."
+            "  $($remainingAdapters.Count) VM(s) still connected to " +
+            "'$PrivateSwitchName' - skipping switch removal."
         ) -ForegroundColor Yellow
-        return
-    }
-
-    # ------------------------------------------------------------------
-    # NAT rule removal
-    # ------------------------------------------------------------------
-    $existingNat = Get-NetNat -Name $NatName -ErrorAction SilentlyContinue
-    if ($null -ne $existingNat) {
-        Write-Host "  Removing NAT rule '$NatName' ..."
-        Remove-NetNat -Name $NatName -Confirm:$false
-        Write-Host "  [OK] NAT rule removed." -ForegroundColor Green
     }
     else {
-        Write-Host "  NAT rule '$NatName' not found - skipping." -ForegroundColor Yellow
-    }
-
-    # ------------------------------------------------------------------
-    # Host vNIC IP removal
-    # ------------------------------------------------------------------
-    $existingIp = Get-NetIPAddress -IPAddress $Gateway -ErrorAction SilentlyContinue
-    if ($null -ne $existingIp) {
-        Write-Host "  Removing host vNIC IP $Gateway ..."
-        Remove-NetIPAddress -IPAddress $Gateway -Confirm:$false
-        Write-Host "  [OK] Host vNIC IP removed." -ForegroundColor Green
-    }
-    else {
-        Write-Host "  Host vNIC IP $Gateway not found - skipping." -ForegroundColor Yellow
-    }
-
-    # ------------------------------------------------------------------
-    # Virtual switch removal
-    # Removing the switch also deletes the vEthernet ($SwitchName) host
-    # adapter that was created alongside it.
-    # ------------------------------------------------------------------
-    $existingSwitch = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
-    if ($null -ne $existingSwitch) {
-        Write-Host "  Removing virtual switch '$SwitchName' ..."
-        Remove-VMSwitch -Name $SwitchName -Force
-        Write-Host "  [OK] Virtual switch removed." -ForegroundColor Green
-    }
-    else {
-        Write-Host "  Virtual switch '$SwitchName' not found - skipping." -ForegroundColor Yellow
+        $existingSwitch = Get-VMSwitch -Name $PrivateSwitchName `
+                                       -ErrorAction SilentlyContinue
+        if ($null -ne $existingSwitch) {
+            Write-Host "  Removing virtual switch '$PrivateSwitchName' ..."
+            Remove-VMSwitch -Name $PrivateSwitchName -Force
+            Write-Host "  [OK] Virtual switch removed." -ForegroundColor Green
+        }
+        else {
+            Write-Host "  Virtual switch '$PrivateSwitchName' not found - skipping." `
+                -ForegroundColor Yellow
+        }
     }
 
     Write-Host "  [OK] Network teardown complete." -ForegroundColor Green

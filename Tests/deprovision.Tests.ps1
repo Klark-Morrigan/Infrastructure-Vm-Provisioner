@@ -8,14 +8,11 @@
     pragmatic compromise these tests parse the file via AST and assert:
       - The vault-bootstrap is delegated to Read-VmProvisionerConfig
         (no direct SecretManagement calls).
-      - Gateway consistency is checked before network teardown so the
-        teardown call receives a validated gateway.
-      - Per-VM removal runs before shared network teardown so VMs are not
-        stranded without their host vNIC.
+      - Per-VM removal runs before per-environment network teardown so
+        VMs are not stranded by an early switch removal.
 
     Behavioural coverage of the called functions lives next to each one
     (Tests/common/config/Read-VmProvisionerConfig.Tests.ps1,
-    Tests/down/config/Assert-GatewayConsistency.Tests.ps1,
     Tests/down/vm/Invoke-VmRemoval.Tests.ps1,
     Tests/down/network/Invoke-NetworkTeardown.Tests.ps1).
 #>
@@ -119,11 +116,6 @@ Describe 'deprovision.ps1 - bootstrap wiring (Read-VmProvisionerConfig)' {
 
 Describe 'deprovision.ps1 - teardown wiring' {
 
-    It 'dot-sources Assert-GatewayConsistency.ps1' {
-        $text = Get-Content -Path $script:deprovisionPath -Raw
-        $text | Should -Match 'Assert-GatewayConsistency\.ps1'
-    }
-
     It 'dot-sources remove-vm.ps1 (Invoke-VmRemoval)' {
         $text = Get-Content -Path $script:deprovisionPath -Raw
         $text | Should -Match 'remove-vm\.ps1'
@@ -132,12 +124,6 @@ Describe 'deprovision.ps1 - teardown wiring' {
     It 'dot-sources teardown-network.ps1 (Invoke-NetworkTeardown)' {
         $text = Get-Content -Path $script:deprovisionPath -Raw
         $text | Should -Match 'teardown-network\.ps1'
-    }
-
-    It 'invokes Assert-GatewayConsistency exactly once' {
-        $calls = $script:commands |
-            Where-Object { $_.GetCommandName() -eq 'Assert-GatewayConsistency' }
-        @($calls).Count | Should -Be 1
     }
 
     It 'invokes Invoke-VmRemoval exactly once (inside a foreach loop)' {
@@ -156,54 +142,50 @@ Describe 'deprovision.ps1 - teardown wiring' {
             -Because 'Invoke-VmRemoval must run per-VM via a foreach'
     }
 
-    It 'invokes Invoke-NetworkTeardown exactly once' {
+    It 'invokes Invoke-NetworkTeardown inside a foreach loop' {
+        # Per-environment teardown: deprovision groups vmDefs by
+        # privateSwitchName and calls Invoke-NetworkTeardown once per
+        # group. A regression that flattens the loop would tear down
+        # only the first environment's network state.
         $calls = $script:commands |
             Where-Object { $_.GetCommandName() -eq 'Invoke-NetworkTeardown' }
         @($calls).Count | Should -Be 1
+
+        $node = $calls[0].Parent
+        while ($null -ne $node -and
+               -not ($node -is [System.Management.Automation.Language.ForEachStatementAst])) {
+            $node = $node.Parent
+        }
+        $node | Should -Not -BeNullOrEmpty `
+            -Because 'Invoke-NetworkTeardown must run per-environment via a foreach'
     }
 }
 
 Describe 'deprovision.ps1 - phase ordering' {
 
-    # Pins the source-order relationship between the four load-bearing
-    # phases. A regression that swaps any pair would either skip the
-    # validated gateway (teardown before assert), strand a VM without its
-    # host vNIC (teardown before removal), or attempt to read VM defs
-    # after the helper call moves below the loop.
+    # Pins the source-order relationship between the load-bearing
+    # phases. A regression that swaps either pair would either read VM
+    # defs after the per-VM loop, or remove the Private switch out from
+    # under a VM still being shut down.
 
-    It 'reads config before asserting gateway consistency' {
+    It 'reads config before removing any VM' {
         $byName = @{}
         foreach ($cmd in $script:commands) {
             $name = $cmd.GetCommandName()
-            if ($name -in 'Read-VmProvisionerConfig',
-                          'Assert-GatewayConsistency') {
+            if ($name -in 'Read-VmProvisionerConfig', 'Invoke-VmRemoval') {
                 if (-not $byName.ContainsKey($name)) {
                     $byName[$name] = $cmd.Extent.StartOffset
                 }
             }
         }
         $byName['Read-VmProvisionerConfig'] |
-            Should -BeLessThan $byName['Assert-GatewayConsistency']
-    }
-
-    It 'asserts gateway consistency before removing any VM' {
-        $byName = @{}
-        foreach ($cmd in $script:commands) {
-            $name = $cmd.GetCommandName()
-            if ($name -in 'Assert-GatewayConsistency', 'Invoke-VmRemoval') {
-                if (-not $byName.ContainsKey($name)) {
-                    $byName[$name] = $cmd.Extent.StartOffset
-                }
-            }
-        }
-        $byName['Assert-GatewayConsistency'] |
             Should -BeLessThan $byName['Invoke-VmRemoval']
     }
 
-    It 'removes every VM before tearing the shared network down' {
-        # Network teardown removes the host vNIC + NAT; running it before
-        # per-VM removal would cut connectivity to VMs that still need to
-        # be stopped/removed gracefully.
+    It 'removes every VM before tearing the per-environment network down' {
+        # Network teardown removes the Private switch when empty; running
+        # it before per-VM removal would cut connectivity to VMs that
+        # still need to be stopped/removed gracefully.
         $byName = @{}
         foreach ($cmd in $script:commands) {
             $name = $cmd.GetCommandName()

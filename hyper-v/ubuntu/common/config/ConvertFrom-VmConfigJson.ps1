@@ -55,11 +55,17 @@ function ConvertFrom-VmConfigJson {
     # Every VM definition must supply all of these fields. This list is the
     # authoritative schema - setup-secrets.ps1 and provision.ps1 both rely
     # on it via dot-source.
+    #
+    # 'privateSwitchName' is in the base list because both VM kinds need it:
+    # router VMs attach their downstream NIC to it; workload VMs attach their
+    # only NIC to it (and use the matching router VM's privateIpAddress as
+    # gateway). Feature 53 step 2.
     $requiredFields = @(
         'vmName', 'cpuCount', 'ramGB', 'diskGB', 'ubuntuVersion',
         'username', 'password',
         'ipAddress', 'subnetMask', 'gateway', 'dns',
-        'vmConfigPath', 'vhdPath'
+        'vmConfigPath', 'vhdPath',
+        'privateSwitchName'
     )
 
     foreach ($vm in $vmDefs) {
@@ -121,12 +127,6 @@ function ConvertFrom-VmConfigJson {
         # overwriting an explicitly supplied value.
         if (-not $vm.PSObject.Properties['kind']) {
             $vm | Add-Member -MemberType NoteProperty -Name kind -Value 'workload'
-        }
-        if (-not $vm.PSObject.Properties['switchName']) {
-            $vm | Add-Member -MemberType NoteProperty -Name switchName -Value 'VmLAN'
-        }
-        if (-not $vm.PSObject.Properties['natName']) {
-            $vm | Add-Member -MemberType NoteProperty -Name natName -Value 'VmLAN-NAT'
         }
 
         # Output each validated VM object individually to the pipeline.
