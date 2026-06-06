@@ -184,11 +184,15 @@ environment. The router VM:
 
 Once this exists:
 
-- **Production migrates** from the Windows host NAT to a router VM
-  on its private switch. The host NAT slot is freed. Teardown of
-  current production VMs during the migration window is acceptable
-  (they are not yet in active use), so the plan does not need a
-  parallel-run, blue-green, or zero-downtime cutover strategy.
+- **Production can migrate** from the Windows host NAT to a router
+  VM on its private switch, freeing the host NAT slot. This feature
+  delivers the prerequisite (router VM provisioning + downstream
+  routing + verified gateway behaviour); the production cutover
+  itself is a separate event and is not part of this feature's
+  plan. Teardown of current production VMs during that cutover is
+  acceptable (they are not yet in active use), so whenever it
+  happens it does not need a parallel-run or zero-downtime
+  strategy.
 - **End-to-end** stands up its own private switch + router VM,
   fully isolated from production, with the same NAT semantics.
 - Future environments are a configuration change, not a host-level
@@ -264,8 +268,9 @@ Infrastructure-VM-Ansible patterns. Reasons:
   production can be migrated without changing client-side
   assumptions.
 - **Migrating existing production VMs onto the new router VM.**
-  The migration of production is part of rolling this feature out
-  but the steps live in the plan, not the problem statement.
+  The cutover is enabled by this feature but not performed by it.
+  It happens as a separate operator-driven event once the focused
+  E2E confirms the gateway behaves correctly.
 - **Mainline E2E harness changes** beyond what this feature needs.
   The focused router-VM E2E (router + probe VM, gateway-behaviour
   assertions) **is** in scope - it is how we verify the router VM
