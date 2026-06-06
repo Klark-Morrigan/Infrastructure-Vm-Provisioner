@@ -31,8 +31,14 @@ yet; steps 2 and 3 wire consumers.
   new value `"router"`) to the VM JSON consumed by
   [`ConvertFrom-VmConfigJson.ps1`](../../../../hyper-v/ubuntu/common/config/ConvertFrom-VmConfigJson.ps1).
   Router VMs require:
-  - `externalSwitchName` - existing host-bridged switch this
-    feature does not create. Assumed to already exist on the host.
+  - `externalSwitchName` - host-bridged Hyper-V switch the router's
+    upstream NIC attaches to. Created on demand by
+    `Ensure-ExternalSwitch` when absent; reused when present.
+  - `externalAdapterName` - physical NIC on the host that the
+    External switch binds to. Required at schema time because the
+    config-load layer does not know whether the switch already
+    exists; if it does, the field is ignored at runtime.
+    `Get-NetAdapter` on the host shows the available names.
   - `privateSwitchName`, `privateIpAddress`, `subnetMask` - the
     router's private-side NIC, which downstream VMs (step 2) treat
     as their gateway.
@@ -47,6 +53,16 @@ yet; steps 2 and 3 wire consumers.
   `Private`; throws if a switch of the same name exists with a
   different type. Does **not** assign a host vNIC IP and does
   **not** create a NetNat - those concerns move to the router VM.
+- **External switch creation.** Add
+  `hyper-v/ubuntu/up/network/Ensure-ExternalSwitch.ps1` exporting
+  `Ensure-ExternalSwitch -Name <name> -NetAdapterName <adapter>`.
+  Idempotent. Creates a Hyper-V External switch bound to the named
+  physical NIC if absent (`-AllowManagementOS` on, so the host keeps
+  its existing connectivity through the adapter); reuses an
+  existing one of type `External`; throws if a switch of the same
+  name exists with a different type or if the named adapter is
+  missing. Sibling of `Ensure-PrivateSwitch`; both are called from
+  the router-VM branch of `Invoke-NetworkSetup`.
 - **Dual-NIC attachment.** Extend
   [`create-vm.ps1`](../../../../hyper-v/ubuntu/up/vm/create-vm.ps1)
   so router VMs are created with two adapters: the default one
@@ -85,6 +101,9 @@ yet; steps 2 and 3 wire consumers.
 
 - `Tests/up/network/Ensure-PrivateSwitch.Tests.ps1` (unit) - create
   when absent, reuse when present, throw on wrong type.
+- `Tests/up/network/Ensure-ExternalSwitch.Tests.ps1` (unit) - create
+  bound to the named adapter when absent, reuse when present, throw
+  on wrong type, throw when the named adapter is missing.
 - `Tests/up/seed/Invoke-RouterSeedIsoGeneration.Tests.ps1` (unit) -
   fixture-based assertions on `user-data`: packages list, sysctl
   payload, nftables ruleset matches a known-good template
@@ -119,11 +138,12 @@ flowchart LR
     CRT[create-vm.ps1]
   end
   subgraph Hyperv[Hyper-V]
-    EXT[(External switch<br/>pre-existing)]
+    EXT[(External switch<br/>created/reused)]
     PSW[(Private switch<br/>created/reused)]
     RVM[Router VM<br/>2 NICs]
   end
   CFG --> PRV
+  PRV --> EES[Ensure-ExternalSwitch] --> EXT
   PRV --> EPS --> PSW
   PRV --> SEED
   SEED --> CRT
