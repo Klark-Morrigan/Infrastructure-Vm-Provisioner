@@ -45,21 +45,38 @@
 #   network-config slot can ship and what netplan parses as one unit.
 #
 #   runcmd order (load-bearing):
-#     1. netplan apply             - bind both NICs first so dnsmasq has
-#                                     priv0's IP to listen on. Init-local
-#                                     usually applies the seed's
-#                                     network-config earlier; running
-#                                     netplan apply here is the safety
-#                                     net for the cases where it does not
-#                                     (e.g. Azure-base-image netplan
-#                                     defaults shadowing the seed) so
-#                                     dnsmasq's listen-address bind in
-#                                     step 4 cannot fail with "Cannot
-#                                     assign requested address".
-#     2. sysctl --system           - turn on forwarding before any
+#     1. Pre-apply diag dump       - print /etc/netplan/ listing, every
+#                                     .yaml/.yml file contents, and
+#                                     `netplan get` (merged effective)
+#                                     to the cloud-init log so the
+#                                     serial-console capture has a
+#                                     post-mortem record of what
+#                                     netplan was asked to apply -
+#                                     covers the case where init-local
+#                                     wrote 50-cloud-init.yaml but the
+#                                     base image shipped a higher-
+#                                     priority netplan file that
+#                                     shadowed it.
+#     2. netplan apply             - bind both NICs so dnsmasq has
+#                                     priv0's IP to listen on (step 5).
+#                                     Init-local usually applies the
+#                                     seed's network-config earlier;
+#                                     running netplan apply here is
+#                                     the safety net for the cases
+#                                     where it does not (e.g. Azure-
+#                                     base-image netplan defaults
+#                                     shadowing the seed).
+#     3. Post-apply diag dump      - `networkctl`, `ip -4 addr`, `ip
+#                                     -4 route` so the same log shows
+#                                     what landed on the wires - if
+#                                     ext0 still has DHCP after apply,
+#                                     that names a real netplan-file
+#                                     priority issue rather than a
+#                                     "netplan apply did not run" one.
+#     4. sysctl --system           - turn on forwarding before any
 #                                     packet hits the FORWARD chain.
-#     3. systemctl enable --now nftables - install the ruleset.
-#     4. systemctl enable --now dnsmasq  - bind the resolver to priv0.
+#     5. systemctl enable --now nftables - install the ruleset.
+#     6. systemctl enable --now dnsmasq  - bind the resolver to priv0.
 #
 #   SECURITY mirrors the workload path: user-data carries Vm.password in
 #   plaintext for cloud-init's plain_text_passwd, and the seed ISO is
@@ -226,7 +243,9 @@ $nftablesIndented
 $dnsmasqIndented
 
 runcmd:
+  - sh -c "echo '--- [diag] /etc/netplan/ ---'; ls -la /etc/netplan/; for f in /etc/netplan/*.yaml /etc/netplan/*.yml; do [ -f \"`$f\" ] || continue; echo \"=== `$f ===\"; cat \"`$f\"; done; echo '--- [diag] netplan get ---'; netplan get 2>&1 || true"
   - netplan apply
+  - sh -c "echo '--- [diag] networkctl post-apply ---'; networkctl --no-pager 2>&1 || true; echo '--- [diag] ip -4 addr ---'; ip -4 -o addr; echo '--- [diag] ip -4 route ---'; ip -4 route"
   - sysctl --system
   - systemctl enable --now nftables.service
   - systemctl enable --now dnsmasq.service

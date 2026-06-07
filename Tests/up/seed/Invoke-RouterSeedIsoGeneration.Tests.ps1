@@ -294,14 +294,16 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
         # matched), nftables before dnsmasq (ruleset up before the
         # resolver listens).
 
-        It 'orders runcmd entries as netplan -> sysctl -> nftables -> dnsmasq' {
+        It 'orders runcmd entries as diag -> netplan -> diag -> sysctl -> nftables -> dnsmasq' {
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
             Should -Invoke New-SeedIso -ParameterFilter {
                 $Files['user-data'] -match (
                     '(?s)runcmd:\s*\r?\n' +
+                    '\s*-\s*sh -c "echo ''--- \[diag\] /etc/netplan/.+?"\s*\r?\n' +
                     '\s*-\s*netplan apply\s*\r?\n' +
+                    '\s*-\s*sh -c "echo ''--- \[diag\] networkctl.+?"\s*\r?\n' +
                     '\s*-\s*sysctl --system\s*\r?\n' +
                     '\s*-\s*systemctl enable --now nftables\.service\s*\r?\n' +
                     '\s*-\s*systemctl enable --now dnsmasq\.service'
