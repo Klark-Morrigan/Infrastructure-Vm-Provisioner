@@ -267,71 +267,89 @@ actually resolves, or that the configuration survives a reboot.
 This step is the gate that lets production migration proceed as
 a separate operator-driven event.
 
-**Scope.**
+**Scope.** The suite lives in Infrastructure-E2E alongside the
+other end-to-end provisioning tests (the polyrepo's established
+home for tests that drive `provision.ps1` cross-repo). It follows
+the same script-orchestrator pattern as the existing
+`vm-provisioning` and `vm-users` scenarios: one entry-point script
+that builds the test environment and an orchestrator that
+dot-sources per-concern setup, assertion, and teardown files. This
+step of this plan is about commissioning that suite; only the
+README pointer lands in this repo.
 
-- **Probe VM config.** Add a minimal workload VM definition under
-  `Tests/Integration/fixtures/` (Ubuntu cloud image, 1 vCPU,
-  ~512 MB RAM, single private-switch NIC). Name is neutral
-  (`minimal-ubuntu` or similar) - no test-framework names in
-  paths that production code might read.
-- **Throwaway environment.** Test harness sets up:
-  - A private switch named with a unique suffix
-    (e.g. `vm-prov-test-<guid>`).
-  - A router VM definition pointing at that switch.
-  - The probe VM definition pointing at that switch with
-    `gateway` = router VM's private IP.
-- **Pester integration test.** Add
-  `Tests/Integration/RouterVm.Integration.Tests.ps1` that:
-  1. Provisions the router VM and the probe VM via the live
-     `provision.ps1` (this is an integration test - no mocking
-     Hyper-V or cloud-init).
-  2. SSHes into the **router VM** and asserts (white-box - pins
-     the router's internal state so a failure in step 3
-     diagnoses itself instead of forcing manual triage):
-     - `sysctl -n net.ipv4.ip_forward` returns `1`.
-     - `systemctl is-active nftables` and
-       `systemctl is-active dnsmasq` both return `active`.
-     - `nft list ruleset` contains the expected MASQUERADE rule on
-       the external NIC and a FORWARD accept rule for traffic
-       sourced on the private NIC (string-grep against
-       interface names from the router's config).
-     - `ip -4 addr show` lists the configured private IP on the
-       private NIC and a non-link-local upstream IP on the
-       external NIC (the latter just has to be routable; the
-       specific address depends on the host's upstream).
-  3. SSHes into the **probe VM** and asserts (black-box -
-     end-to-end traffic flow):
-     - `curl -fsS https://www.google.com -o /dev/null` returns 0
-       (egress works).
-     - `dig +short example.com @127.0.0.53` and the resolver
-       chain via `/etc/resolv.conf` lead to the router VM's
-       private IP (DNS forwarding works).
-     - `ip -4 route show default` lists the router VM's private
-       IP as the default gateway (proves the probe is on the
-       intended switch and not coincidentally reaching the
-       internet via some fallback).
-  4. Reboots the router VM (`Restart-VM` on the host), waits for
-     SSH-ready, re-runs **both** the router-side and probe-side
-     assertion sets (proves nftables, dnsmasq, IPv4 forwarding,
-     and NIC config all survive reboot - the
-     `runcmd`-vs-systemd-unit distinction matters here).
-  5. Tears down both VMs and the private switch in a `finally`
-     block. Idempotent: a stale switch or VM from a previous
-     aborted run is removed before setup proceeds.
-- **Operator entry point.** Add a small wrapper script
-  `scripts/Invoke-RouterVmE2E.ps1` that runs Pester against the
-  integration test file. Documented in README so developers can
-  run it pre-merge on the workstation.
+- **Test suite location.** `agent/e2e/router-vm/` in
+  Infrastructure-E2E:
+  - `Start-RouterVmTest.ps1` - parameter entry point (operator-
+    facing). Builds the `Config` PSCustomObject and calls
+    `Invoke-RouterVmTest`.
+  - `Invoke-RouterVmTest.ps1` - orchestrator. Defines the scenario
+    constants (router / probe VM names, per-environment Private
+    switch name, probe-base fixture), dot-sources all the per-
+    concern files, and runs the dispatch: Setup, router-side
+    assertions, probe-side assertions, reboot persistence,
+    Teardown (finally).
+  - `Invoke-NoLeftoverRouterVmsAssertions.ps1` - pre-flight: fails
+    if either VM is still in Hyper-V from a previous run.
+  - `Invoke-RouterVmSetup.ps1` - builds the router + probe VM
+    definitions, writes the test VmProvisionerConfig to the vault,
+    calls `provision.ps1` cross-repo.
+  - `Invoke-RouterReadyAssertions.ps1` - router-side white-box
+    (sysctl, systemctl, nft, NIC addresses).
+  - `Invoke-ProbeReachabilityAssertions.ps1` - probe-side black-box
+    (default route, HTTPS egress, DNS via the router,
+    resolv.conf).
+  - `Invoke-RouterRebootPersistenceAssertions.ps1` - reboots the
+    router and re-calls the two assertion sets above.
+  - `Invoke-RouterVmTeardown.ps1` - deprovisions, removes the vault
+    entry, calls Teardown assertions.
+  - `Invoke-RouterVmTeardownAssertions.ps1` - post-condition: both
+    VMs gone, per-environment Private switch gone, vault entry
+    gone, External vSwitch still present (host-shared resource
+    the test must not remove).
+  - `fixtures/minimal-ubuntu.json` - minimal workload VM
+    definition (Ubuntu cloud image, 1 vCPU, ~1 GB RAM, single
+    private-switch NIC). Neutral name - no test-framework names
+    in paths that production code might read.
+
+- **Throwaway environment.** Setup composes:
+  - The per-environment Private switch named `vm-prov-test-e2e`.
+  - A router VM definition (`router-e2e`) attached to that switch
+    with a per-run password.
+  - The probe VM definition (`probe-e2e`) attached to that switch
+    with `gateway` and `dns` both pointing at the router VM's
+    private IP, and its own per-run password.
+
+- **Behavioural coverage** (what the assertion files together pin
+  down):
+  - Router-side, post-provisioning: `sysctl -n net.ipv4.ip_forward`
+    returns `1`; `systemctl is-active nftables` and `dnsmasq` both
+    return `active`; `nft list ruleset` contains the MASQUERADE
+    rule on `ext0` and the FORWARD accept rule for `priv0 -> ext0`;
+    `ip -4 addr show` lists the configured private IP on `priv0`
+    and a non-link-local upstream IP on `ext0`.
+  - Probe-side, post-provisioning: `ip -4 route show default` lists
+    the router VM's private IP as the default gateway; `curl -fsS
+    https://www.google.com -o /dev/null` returns 0; `dig +short
+    example.com @<router-private-ip>` returns an A record;
+    `/etc/resolv.conf` lists the router's private IP as a
+    nameserver.
+  - Reboot persistence: `Restart-VM` on the router, then the same
+    router-side and probe-side assertions are re-run verbatim
+    (proves nftables, dnsmasq, IPv4 forwarding, and NIC config
+    survive reboot - the `runcmd`-vs-systemd-unit distinction
+    matters here).
 
 **Tests.** This step **is** the test. No supporting unit tests are
 added unless probe-fixture composition is non-trivial enough to
 warrant one. If the harness grows a non-trivial helper, that
-helper gets a sibling unit test in the same commit.
+helper gets a sibling unit test in the same commit (in
+Infrastructure-E2E, alongside the test file).
 
-**README.** Add "End-to-end verification" section: how to run
-`scripts/Invoke-RouterVmE2E.ps1` locally, expected duration,
-prerequisites (external switch present, Hyper-V available),
-teardown behaviour on failure.
+**README.** No change in this repo. The suite is owned by
+Infrastructure-E2E; the run instructions and operator-facing
+contract live with it there. Surfacing it again here would
+duplicate the source of truth and rot the moment the E2E layout
+changes.
 
 **Diagram.**
 

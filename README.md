@@ -1072,7 +1072,10 @@ Infrastructure-VM-Provisioner/
 |  `- down/
 |     |- network/            # Unit tests for down/network
 |     `- vm/                 # Unit tests for down/vm
-|- Run-Tests.ps1             # Runs Pester tests (called by ci-powershell.yml)
+|- scripts/
+|  |- Run-Tests.ps1                       # Unit-test runner (delegates to PowerShell-Common)
+|  |- Run-IntegrationTests.ps1            # Docker-host integration runner (delegates to PowerShell-Common)
+|  `- Run-IntegrationTests-AgainstDockerTarget.ps1  # Docker-target integration runner
 `- README.md
 ```
 
