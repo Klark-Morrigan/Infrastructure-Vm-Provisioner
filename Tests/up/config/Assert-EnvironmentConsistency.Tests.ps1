@@ -26,12 +26,19 @@ BeforeAll {
         param(
             [string] $VmName            = 'router-prod',
             [string] $PrivateIpAddress  = '10.10.0.1',
+            # Upstream LAN gateway - the router's default route. By
+            # design distinct from privateIpAddress: the router has
+            # two NICs and its 'gateway' field describes the upstream
+            # one. Defaulting to 192.168.1.1 reflects the real schema
+            # (a typical LAN gateway) rather than the privateIpAddress
+            # fiction the earlier shape used.
+            [string] $Gateway           = '192.168.1.1',
             [string] $SubnetMask        = '24',
             [string] $PrivateSwitchName = 'PrivateSwitch-Production'
         )
         [PSCustomObject]@{
             vmName            = $VmName
-            gateway           = $PrivateIpAddress
+            gateway           = $Gateway
             subnetMask        = $SubnetMask
             privateSwitchName = $PrivateSwitchName
             kind              = 'router'
@@ -57,6 +64,32 @@ Describe 'Assert-EnvironmentConsistency' {
                 (New-WorkloadVm -Gateway '10.10.0.1')
             )
             { Assert-EnvironmentConsistency -VmDefs $vms } | Should -Not -Throw
+        }
+
+        It "accepts a router with a distinct upstream gateway (real schema)" {
+            # Regression for the case the earlier validator wrongly
+            # rejected: the router's top-level 'gateway' describes its
+            # UPSTREAM NIC (a real LAN gateway) and is necessarily on
+            # a different subnet than the workloads' 'gateway' (which
+            # equals the router's privateIpAddress). Both shapes must
+            # coexist in one environment without preflight failing.
+            $vms = @(
+                (New-RouterVm   -PrivateIpAddress '10.10.0.1' -Gateway '192.168.1.1'),
+                (New-WorkloadVm -Gateway          '10.10.0.1')
+            )
+            { Assert-EnvironmentConsistency -VmDefs $vms } | Should -Not -Throw
+        }
+
+        It "throws when the router's subnetMask differs from the workloads'" {
+            # The router's downstream NIC sits on the workloads'
+            # private subnet (the schema reuses the single subnetMask
+            # field for both router NICs), so the masks must match.
+            $vms = @(
+                (New-RouterVm   -PrivateIpAddress '10.10.0.1' -SubnetMask '16'),
+                (New-WorkloadVm -Gateway          '10.10.0.1' -SubnetMask '24')
+            )
+            { Assert-EnvironmentConsistency -VmDefs $vms } |
+                Should -Throw -ExpectedMessage "*subnetMask*"
         }
 
         It 'accepts two independent environments side by side' {
