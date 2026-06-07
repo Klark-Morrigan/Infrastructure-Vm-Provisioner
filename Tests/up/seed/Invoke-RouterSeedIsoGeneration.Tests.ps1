@@ -232,6 +232,29 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
             }
         }
 
+        It 'neutralises the Azure base-image /etc/netplan/90-hotplug-azure.yaml' {
+            # The Azure cloud image ships an ephemeral-NIC netplan
+            # entry that turns on dhcp4 for every hv_netvsc NIC not
+            # named eth0. After our set-name renames the router's
+            # NICs to ext0 / priv0 that match wildcard catches both
+            # and fights our static config. The seed's write_files
+            # overwrites the Azure file with an empty-but-valid
+            # netplan v2 document so the merged config has no DHCP
+            # fallback racing the static addresses.
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match (
+                    '(?s)path: /etc/netplan/90-hotplug-azure\.yaml\s*\r?\n' +
+                    '\s*permissions: ''0600''\s*\r?\n' +
+                    '\s*content: \|\s*\r?\n' +
+                    '\s*network:\s*\r?\n' +
+                    '\s*version: 2'
+                )
+            }
+        }
+
         It 'configures ext0 and priv0 ethernet entries with set-name' {
             Mock Test-Path { $true }
             Mock New-SeedIso {}

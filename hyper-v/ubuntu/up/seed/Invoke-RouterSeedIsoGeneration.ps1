@@ -225,6 +225,21 @@ packages:
 
 write_files:
 $disableEntry
+  # The Azure cloud image ships /etc/netplan/90-hotplug-azure.yaml with
+  # an 'ephemeral' entry that matches every hv_netvsc NIC NOT named
+  # eth0 and turns on dhcp4: true on it. After our set-name renames the
+  # router's NICs to ext0 / priv0 both match that pattern, fight our
+  # static config in 99-router.yaml, and leave networkd stuck on
+  # `configuring` while DHCP tries to lease addresses neither
+  # interface wants. Overwriting the file with an empty-but-valid
+  # netplan document neutralises it without removing the path - the
+  # Azure agent (walinuxagent) will not regenerate it because the file
+  # still exists.
+  - path: /etc/netplan/90-hotplug-azure.yaml
+    permissions: '0600'
+    content: |
+      network:
+        version: 2
   - path: /etc/netplan/99-router.yaml
     permissions: '0600'
     content: |
