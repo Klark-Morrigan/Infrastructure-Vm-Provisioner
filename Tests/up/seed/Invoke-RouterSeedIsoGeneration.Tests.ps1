@@ -286,22 +286,25 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
     # ------------------------------------------------------------------
     Context 'user-data runcmd order' {
     # ------------------------------------------------------------------
-        # sysctl before nftables (forwarding must be on before traffic
-        # is matched), nftables before dnsmasq (so dnsmasq binds after
-        # the ruleset is up), netplan apply last (belt-and-braces
-        # against init-local already having applied network-config).
+        # netplan apply first - bind both NICs so dnsmasq's
+        # listen-address has an interface IP to attach to even when
+        # init-local did not apply the seed's network-config (Azure
+        # base-image netplan defaults can shadow it). Then sysctl
+        # before nftables (forwarding must be on before traffic is
+        # matched), nftables before dnsmasq (ruleset up before the
+        # resolver listens).
 
-        It 'orders runcmd entries as sysctl -> nftables -> dnsmasq -> netplan' {
+        It 'orders runcmd entries as netplan -> sysctl -> nftables -> dnsmasq' {
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
             Should -Invoke New-SeedIso -ParameterFilter {
                 $Files['user-data'] -match (
                     '(?s)runcmd:\s*\r?\n' +
+                    '\s*-\s*netplan apply\s*\r?\n' +
                     '\s*-\s*sysctl --system\s*\r?\n' +
                     '\s*-\s*systemctl enable --now nftables\.service\s*\r?\n' +
-                    '\s*-\s*systemctl enable --now dnsmasq\.service\s*\r?\n' +
-                    '\s*-\s*netplan apply'
+                    '\s*-\s*systemctl enable --now dnsmasq\.service'
                 )
             }
         }

@@ -45,14 +45,21 @@
 #   network-config slot can ship and what netplan parses as one unit.
 #
 #   runcmd order (load-bearing):
-#     1. sysctl --system           - turn on forwarding before any
+#     1. netplan apply             - bind both NICs first so dnsmasq has
+#                                     priv0's IP to listen on. Init-local
+#                                     usually applies the seed's
+#                                     network-config earlier; running
+#                                     netplan apply here is the safety
+#                                     net for the cases where it does not
+#                                     (e.g. Azure-base-image netplan
+#                                     defaults shadowing the seed) so
+#                                     dnsmasq's listen-address bind in
+#                                     step 4 cannot fail with "Cannot
+#                                     assign requested address".
+#     2. sysctl --system           - turn on forwarding before any
 #                                     packet hits the FORWARD chain.
-#     2. systemctl enable --now nftables - install the ruleset.
-#     3. systemctl enable --now dnsmasq  - bind the resolver to priv0.
-#     4. netplan apply             - idempotent re-apply (init-local
-#                                     already applied network-config,
-#                                     this is the same belt-and-braces
-#                                     line the workload path uses).
+#     3. systemctl enable --now nftables - install the ruleset.
+#     4. systemctl enable --now dnsmasq  - bind the resolver to priv0.
 #
 #   SECURITY mirrors the workload path: user-data carries Vm.password in
 #   plaintext for cloud-init's plain_text_passwd, and the seed ISO is
@@ -219,10 +226,10 @@ $nftablesIndented
 $dnsmasqIndented
 
 runcmd:
+  - netplan apply
   - sysctl --system
   - systemctl enable --now nftables.service
   - systemctl enable --now dnsmasq.service
-  - netplan apply
 "@
 
     # network-config ships the same netplan so cloud-init's init-local
