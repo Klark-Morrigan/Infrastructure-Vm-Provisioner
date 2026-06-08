@@ -36,13 +36,21 @@ BeforeAll {
     # Builds a router VM definition for the same default environment.
     # privateIpAddress matches the workload's gateway so the env passes
     # the consistency preflight unless the test overrides it.
+    #
+    # `externalDhcp` defaults to $false here so the fixture has a known
+    # static ext0 IP and the IP-conflict / offline-VM Contexts below
+    # actually exercise their respective branches. The schema default
+    # of $true (DHCP) skips Test-IpAddressInUse entirely; tests that
+    # care about the DHCP-router classification path set ExternalDhcp
+    # back to $true (or omit the field via the optional parameter).
     function New-RouterVm {
         param(
             [string] $VmName            = 'router-prod',
             [string] $IpAddress         = '192.168.1.2',
             [string] $PrivateIpAddress  = '10.10.0.1',
             [string] $SubnetMask        = '24',
-            [string] $PrivateSwitchName = 'PrivateSwitch-Production'
+            [string] $PrivateSwitchName = 'PrivateSwitch-Production',
+            [object] $ExternalDhcp      = $false
         )
         $vm = New-TestVm `
                   -VmName            $VmName `
@@ -53,6 +61,10 @@ BeforeAll {
                   -Kind              'router'
         $vm | Add-Member -MemberType NoteProperty -Name privateIpAddress `
                           -Value $PrivateIpAddress
+        if ($null -ne $ExternalDhcp) {
+            $vm | Add-Member -MemberType NoteProperty -Name externalDhcp `
+                              -Value $ExternalDhcp
+        }
         $vm
     }
 
@@ -162,6 +174,71 @@ Describe 'Select-VmsForProvisioning' {
                 3> $null)
 
             $result.Count | Should -Be 0
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'DHCP-mode router (externalDhcp $true or absent)' {
+    # ------------------------------------------------------------------
+        # The DHCP-default router has no known static IP at config-load
+        # time, so the static-IP probe Test-IpAddressInUse does not
+        # apply. Classification falls back to VM-presence-only:
+        # missing -> new, present -> existing. Conflict / offline
+        # warnings cannot fire because there is no IP to conflict over.
+
+        It 'classifies a DHCP router with no Hyper-V VM as new (no IP probe)' {
+            Initialize-Mocks
+            # Ping must NOT run - the DHCP router has no known IP.
+            $script:_pingCalled = $false
+            Mock Test-IpAddressInUse {
+                $script:_pingCalled = $true
+                $false
+            }
+
+            $result = @(Select-VmsForProvisioning `
+                -VmDefs @((New-RouterVm -ExternalDhcp $true)))
+
+            $result.Count        | Should -Be 1
+            $result[0]._state    | Should -Be 'new'
+            $script:_pingCalled  | Should -Be $false
+        }
+
+        It 'classifies a DHCP router with an existing Hyper-V VM as existing (no IP probe)' {
+            Initialize-Mocks
+            Mock Get-VM { [PSCustomObject]@{ Name = 'router-prod' } }
+            $script:_pingCalled = $false
+            Mock Test-IpAddressInUse {
+                $script:_pingCalled = $true
+                $true
+            }
+
+            $result = @(Select-VmsForProvisioning `
+                -VmDefs @((New-RouterVm -ExternalDhcp $true)))
+
+            $result.Count        | Should -Be 1
+            $result[0]._state    | Should -Be 'existing'
+            $script:_pingCalled  | Should -Be $false
+        }
+
+        It 'treats a router with no externalDhcp field as DHCP-mode (schema default)' {
+            # Operators who skip the field rely on the schema default
+            # of $true. Select-VmsForProvisioning must read the absence
+            # the same way the seed generator does.
+            Initialize-Mocks
+            $script:_pingCalled = $false
+            Mock Test-IpAddressInUse {
+                $script:_pingCalled = $true
+                $false
+            }
+
+            # Pass $null to suppress the externalDhcp Add-Member in the
+            # fixture, leaving the field genuinely absent.
+            $result = @(Select-VmsForProvisioning `
+                -VmDefs @((New-RouterVm -ExternalDhcp $null)))
+
+            $result.Count        | Should -Be 1
+            $result[0]._state    | Should -Be 'new'
+            $script:_pingCalled  | Should -Be $false
         }
     }
 

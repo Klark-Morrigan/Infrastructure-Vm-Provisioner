@@ -52,8 +52,34 @@ function Select-VmsForProvisioning {
 
         # Get-VM throws on a missing name without -ErrorAction;
         # SilentlyContinue returns $null instead.
-        $existing  = $null -ne (Get-VM -Name $vm.vmName -ErrorAction SilentlyContinue)
-        $ipInUse   = Test-IpAddressInUse -IpAddress $vm.ipAddress
+        $existing = $null -ne (Get-VM -Name $vm.vmName -ErrorAction SilentlyContinue)
+
+        # Router VMs in externalDhcp mode (the schema default) have no
+        # known static IP at config-load time, so the static-IP
+        # conflict probe does not apply. Classify them on VM presence
+        # alone: missing VM -> new (create); present VM -> existing
+        # (reconcile). The IP they pick up from DHCP gets discovered
+        # later by create-vm.ps1's wait-for-SSH via Hyper-V KVP.
+        $isRouter     = $vm.kind -eq 'router'
+        $externalDhcp = $isRouter -and (
+            -not $vm.PSObject.Properties['externalDhcp'] -or
+            [bool] $vm.externalDhcp
+        )
+
+        if ($externalDhcp) {
+            $state = if ($existing) { 'existing' } else { 'new' }
+            $vm | Add-Member -MemberType NoteProperty -Name '_state' -Value $state -Force
+            $label = if ($state -eq 'new') {
+                "[OK] '$($vm.vmName)' is new (router/DHCP, IP discovered after boot) - full pipeline."
+            } else {
+                "[OK] '$($vm.vmName)' exists (router/DHCP, IP discovered after boot) - reconcile (additive steps only)."
+            }
+            Write-Host $label -ForegroundColor Green
+            $vm
+            continue
+        }
+
+        $ipInUse = Test-IpAddressInUse -IpAddress $vm.ipAddress
 
         # Decision matrix. The four cases are exhaustive and mutually exclusive.
         if (-not $existing -and -not $ipInUse) {
