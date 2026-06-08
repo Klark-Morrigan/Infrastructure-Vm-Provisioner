@@ -186,9 +186,7 @@ Re-running safely updates the stored config.
     "ubuntuVersion":      "24.04",
     "username":           "admin",
     "password":           "...",
-    "ipAddress":          "192.168.1.10",
     "subnetMask":         "24",
-    "gateway":            "192.168.1.1",
     "dns":                "8.8.8.8",
     "vmConfigPath":       "E:\\a_VMs\\Hyper-V\\Config",
     "vhdPath":            "E:\\a_VMs\\Hyper-V\\Disks",
@@ -207,7 +205,19 @@ router. The two VMs sit on the same `privateSwitchName`. See
 [Networking](#networking) for the full topology and
 [Router VM](#router-vm-kind-router) for the router-specific fields.
 
-All fields are required. After first boot, connect via `ssh username@ipAddress`.
+Router VMs do not carry `ipAddress` / `gateway` in the default
+`externalDhcp: true` mode shown above - the upstream NIC gets its
+address from whatever LAN the host's External vSwitch is currently
+bridged to, so the same config keeps working when the operator
+moves the workstation between networks. Set `externalDhcp: false`
+to pin a static; the two fields become required again. Workload VMs
+always require both because their gateway is a config-time choice
+(see the table below).
+
+All listed fields are required. After first boot, connect via
+`ssh username@ipAddress`; for router VMs in DHCP mode the IP is
+discovered via Hyper-V KVP after boot - inspect with
+`Get-VMNetworkAdapter -VMName <router> | Select IPAddresses`.
 
 | Field           | Type   | Description                                        |
 |-----------------|--------|----------------------------------------------------|
@@ -218,17 +228,18 @@ All fields are required. After first boot, connect via `ssh username@ipAddress`.
 | `ubuntuVersion` | string | Ubuntu release, e.g. `"24.04"`                     |
 | `username`      | string | OS user created by cloud-init on first boot        |
 | `password`      | string | Password for that user (plain text in vault only)  |
-| `ipAddress`     | string | Static IPv4 address assigned inside the VM         |
-| `subnetMask`    | string | CIDR prefix length, e.g. `"24"`                    |
-| `gateway`       | string | Default gateway for the VM. For workload VMs this **must equal** the matching router VM's `privateIpAddress` (preflight enforced). For router VMs this is the upstream gateway on the external NIC. |
-| `dns`           | string | DNS server IP                                      |
+| `ipAddress`     | string | Static IPv4 address inside the VM. **Required** for workload VMs, and for router VMs only when `externalDhcp: false`. Router VMs with `externalDhcp: true` (the default) get their upstream IP via DHCP and discover it through Hyper-V KVP after boot. |
+| `subnetMask`    | string | CIDR prefix length, e.g. `"24"`. Required on every VM - workloads use it for their NIC; router VMs use it for the priv0 (downstream) NIC even under DHCP. |
+| `gateway`       | string | Default gateway for the VM. **Required** for workload VMs (and **must equal** the matching router VM's `privateIpAddress` - preflight enforced). For router VMs, required only when `externalDhcp: false`. |
+| `dns`           | string | DNS server IP. On workloads this is the resolver (set to the router VM's `privateIpAddress`); on routers this is dnsmasq's upstream forwarder. |
 | `vmConfigPath`  | string | Windows path where seed ISO is written             |
 | `vhdPath`       | string | Windows path where VHDX files are stored           |
 | `privateSwitchName`  | string  | Per-environment Hyper-V Private switch this VM attaches to. Required on both VM kinds (workloads attach their only NIC to it; router VMs attach their downstream NIC to it). Created on demand by `Ensure-PrivateSwitch` when absent. |
 | `kind`          | string? | Optional. `"workload"` (default) or `"router"`. See [Router VM](#router-vm-kind-router). |
 | `externalSwitchName` | string | Required when `kind: router`. Host-bridged Hyper-V switch the router's upstream NIC attaches to; created on demand if absent (see `externalAdapterName`). |
 | `externalAdapterName`| string | Required when `kind: router`. Physical NIC the External switch binds to when `Ensure-ExternalSwitch` needs to create it. Ignored at runtime if the switch already exists. Find the name with `Get-NetAdapter`. |
-| `privateIpAddress`   | string | Required when `kind: router`. IP the router carries on its private-side NIC; downstream VMs use it as their default gateway and DNS server. |
+| `externalDhcp`  | bool?   | Optional, defaults to `true`. Addressing mode for the router VM's upstream NIC. `true` = DHCP from whatever LAN the host's External vSwitch is bridged to (portable across networks); `false` = static (requires `ipAddress` / `gateway`). Only meaningful when `kind: router`. |
+| `privateIpAddress`   | string | Required when `kind: router`. IP the router carries on its private-side NIC; downstream VMs use it as their default gateway and DNS server. Always static - no DHCP path can pre-commit a value workloads can be configured against. |
 | `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. Not supported on `kind: router`. See [Optional: install a JDK](#optional-install-a-jdk). |
 | `dotnetSdk`     | object? | Optional. Installs a .NET SDK system-wide on first boot. See [Optional: install a .NET SDK](#optional-install-a-net-sdk). |
 | `dotnetTools`   | array?  | Optional. Installs .NET global tools system-wide on first boot. Requires `dotnetSdk` on the same VM. See [Optional: install .NET global tools](#optional-install-net-global-tools). |
@@ -624,9 +635,7 @@ host's NAT slot. Background: see
   "ubuntuVersion":      "24.04",
   "username":           "admin",
   "password":           "...",
-  "ipAddress":          "192.168.1.10",
   "subnetMask":         "24",
-  "gateway":            "192.168.1.1",
   "dns":                "8.8.8.8",
   "vmConfigPath":       "E:\\a_VMs\\Hyper-V\\Config",
   "vhdPath":            "E:\\a_VMs\\Hyper-V\\Disks",
@@ -638,6 +647,34 @@ host's NAT slot. Background: see
 }
 ```
 
+The upstream NIC defaults to DHCP (`externalDhcp: true`). The router
+picks up its IP from whatever LAN the host's External vSwitch is
+currently bridged to, so the same config keeps working when the
+workstation moves between Wi-Fi networks. To pin a static instead,
+add `"externalDhcp": false` and the three matching fields:
+
+```jsonc
+{
+  "vmName":             "router-prod",
+  ...
+  "kind":                "router",
+  "externalDhcp":        false,
+  "ipAddress":           "192.168.1.10",
+  "subnetMask":          "24",
+  "gateway":             "192.168.1.1",
+  "externalSwitchName":  "ExternalSwitch-Shared",
+  "externalAdapterName": "Ethernet",
+  "privateSwitchName":   "PrivateSwitch-Production",
+  "privateIpAddress":    "10.10.0.1"
+}
+```
+
+In DHCP mode the orchestrator discovers the router's actual upstream
+IP via Hyper-V's KVP integration services after the VM boots (polls
+`Get-VMNetworkAdapter -VMName <router>` for an IPv4 on the External
+switch). The wait-for-SSH timer covers both the DHCP-lease wait and
+the SSH-readiness wait under one 10-minute budget.
+
 `externalAdapterName` is the host's physical NIC the External switch
 will bind to when `Ensure-ExternalSwitch` needs to create it. Run
 `Get-NetAdapter` to see the available names on the host. If the
@@ -648,10 +685,10 @@ exists, this field is ignored at runtime.
 cloud-init netplan's match-by-MAC blocks find their NIC across reboots
 and kernel-naming changes:
 
-| Adapter            | Hyper-V switch                  | Guest name (via `set-name`) | Addresses                                 | Role                                           |
-|--------------------|---------------------------------|------------------------------|-------------------------------------------|------------------------------------------------|
-| `Network Adapter`  | `externalSwitchName` (existing) | `ext0`                       | `ipAddress/subnetMask`, default via `gateway`, DNS = `dns` | Upstream egress; MASQUERADE source.            |
-| `Private`          | `privateSwitchName` (created)   | `priv0`                      | `privateIpAddress/subnetMask`             | Downstream gateway / DNS for environment VMs.  |
+| Adapter            | Hyper-V switch                  | Guest name (via `set-name`) | Addresses                                                                                       | Role                                           |
+|--------------------|---------------------------------|------------------------------|-------------------------------------------------------------------------------------------------|------------------------------------------------|
+| `Network Adapter`  | `externalSwitchName` (existing) | `ext0`                       | DHCP (default) or `ipAddress/subnetMask` + default via `gateway` + DNS = `dns` (`externalDhcp: false`) | Upstream egress; MASQUERADE source.            |
+| `Private`          | `privateSwitchName` (created)   | `priv0`                      | `privateIpAddress/subnetMask` (always static)                                                   | Downstream gateway / DNS for environment VMs.  |
 
 **Cloud-init payload.** The router seed ISO lands:
 
@@ -668,10 +705,15 @@ and kernel-naming changes:
 - `packages: nftables, dnsmasq` — installed via `apt` on first boot
   (the router has real upstream egress as soon as `netplan apply`
   runs, so `apt-get update` works).
-- `runcmd:` `sysctl --system` → `systemctl enable --now nftables.service` →
-  `systemctl enable --now dnsmasq.service` → `netplan apply`. Order
-  matters: forwarding must be on before traffic is matched, and the
-  nftables ruleset must be in effect before dnsmasq starts answering.
+- `runcmd:` `netplan apply` → `sysctl --system` →
+  `systemctl enable --now nftables.service` →
+  `systemctl enable --now dnsmasq.service`, with diagnostic dumps
+  before and after `netplan apply` (`/etc/netplan/` listing +
+  contents, `netplan get`, `networkctl`, `ip -4 addr`/`route`).
+  Order matters: netplan must bind `priv0` before dnsmasq tries to
+  listen on it; forwarding must be on before any packet traverses
+  the FORWARD chain; the nftables ruleset must be loaded before
+  dnsmasq starts serving requests.
 
 **Idempotency.**
 

@@ -77,6 +77,63 @@ Describe 'Assert-RouterVmField' {
     }
 
     # ------------------------------------------------------------------
+    Context 'externalDhcp (default true, opt-out for static)' {
+    # ------------------------------------------------------------------
+        # externalDhcp defaults to true so a router VM works on whatever
+        # LAN the host's External vSwitch is currently bridged to. The
+        # default omits ipAddress / subnetMask / gateway from the schema.
+        # An operator who wants a pinned static can set externalDhcp:
+        # false; the three fields then become required.
+
+        It 'accepts a router VM with no ipAddress when externalDhcp is absent (default true)' {
+            { Assert-RouterVmField -Vm (New-RouterVm) } | Should -Not -Throw
+        }
+
+        It 'accepts a router VM with externalDhcp=true explicitly' {
+            $vm = New-RouterVm
+            $vm | Add-Member -MemberType NoteProperty -Name externalDhcp -Value $true
+            { Assert-RouterVmField -Vm $vm } | Should -Not -Throw
+        }
+
+        It 'accepts a router VM with externalDhcp=false and all three static fields' {
+            $vm = New-RouterVm
+            $vm | Add-Member -MemberType NoteProperty -Name externalDhcp -Value $false
+            $vm | Add-Member -MemberType NoteProperty -Name ipAddress    -Value '192.168.1.10'
+            $vm | Add-Member -MemberType NoteProperty -Name subnetMask   -Value '24'
+            $vm | Add-Member -MemberType NoteProperty -Name gateway      -Value '192.168.1.1'
+            { Assert-RouterVmField -Vm $vm } | Should -Not -Throw
+        }
+
+        It 'throws when externalDhcp is false and ipAddress is missing' {
+            $vm = New-RouterVm
+            $vm | Add-Member -MemberType NoteProperty -Name externalDhcp -Value $false
+            $vm | Add-Member -MemberType NoteProperty -Name subnetMask   -Value '24'
+            $vm | Add-Member -MemberType NoteProperty -Name gateway      -Value '192.168.1.1'
+            { Assert-RouterVmField -Vm $vm } |
+                Should -Throw -ExpectedMessage "*externalDhcp=false*ipAddress*"
+        }
+
+        It 'throws when externalDhcp is false and gateway is missing' {
+            $vm = New-RouterVm
+            $vm | Add-Member -MemberType NoteProperty -Name externalDhcp -Value $false
+            $vm | Add-Member -MemberType NoteProperty -Name ipAddress    -Value '192.168.1.10'
+            $vm | Add-Member -MemberType NoteProperty -Name subnetMask   -Value '24'
+            { Assert-RouterVmField -Vm $vm } |
+                Should -Throw -ExpectedMessage "*externalDhcp=false*gateway*"
+        }
+
+        It 'throws when externalDhcp is false and a static field is empty' {
+            $vm = New-RouterVm
+            $vm | Add-Member -MemberType NoteProperty -Name externalDhcp -Value $false
+            $vm | Add-Member -MemberType NoteProperty -Name ipAddress    -Value ''
+            $vm | Add-Member -MemberType NoteProperty -Name subnetMask   -Value '24'
+            $vm | Add-Member -MemberType NoteProperty -Name gateway      -Value '192.168.1.1'
+            { Assert-RouterVmField -Vm $vm } |
+                Should -Throw -ExpectedMessage "*non-empty*"
+        }
+    }
+
+    # ------------------------------------------------------------------
     Context 'rejected toolchain blocks' {
     # ------------------------------------------------------------------
         # Router VMs are intentionally minimal (nftables + dnsmasq only).

@@ -13,9 +13,15 @@ BeforeAll {
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\Write-VmSeedIso.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\Invoke-RouterSeedIsoGeneration.ps1"
 
-    # Standard router VM definition. Fixture content (router-nftables.conf,
-    # router-dnsmasq.conf) is keyed to these values - changing them here
-    # without updating the fixtures will fail the string-equal checks.
+    # Standard router VM definition - STATIC ext0 (externalDhcp=$false).
+    # Fixture content (router-nftables.conf, router-dnsmasq.conf) is keyed
+    # to these values; changing them here without updating the fixtures
+    # will fail the string-equal checks.
+    #
+    # The schema default is externalDhcp=$true, but the test fixture pins
+    # the static mode explicitly so the netplan-shape assertions below
+    # exercise the deterministic path. DHCP-mode coverage lives in its
+    # own Context with its own fixture.
     function New-RouterTestVm {
         [PSCustomObject]@{
             vmName              = 'router-prod'
@@ -25,6 +31,27 @@ BeforeAll {
             ipAddress           = '192.168.1.10'
             subnetMask          = '24'
             gateway             = '192.168.1.1'
+            dns                 = '8.8.8.8'
+            kind                = 'router'
+            externalSwitchName  = 'ExternalSwitch-Shared'
+            externalDhcp        = $false
+            privateSwitchName   = 'PrivateSwitch-Production'
+            privateIpAddress    = '10.10.0.1'
+        }
+    }
+
+    # DHCP-mode router VM (the schema default). The ext0 NIC gets its
+    # address from the LAN's DHCP server, so ipAddress and gateway are
+    # absent. subnetMask stays - it pins the priv0 CIDR even under
+    # ext0 DHCP. dns also stays - dnsmasq uses it as the upstream
+    # forwarder regardless of ext0's addressing.
+    function New-DhcpRouterTestVm {
+        [PSCustomObject]@{
+            vmName              = 'router-prod'
+            vmConfigPath        = 'C:\a_VMs\Hyper-V\Config'
+            username            = 'admin'
+            password            = 'P@ssw0rd'
+            subnetMask          = '24'
             dns                 = '8.8.8.8'
             kind                = 'router'
             externalSwitchName  = 'ExternalSwitch-Shared'
@@ -285,6 +312,59 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
                 $Files['user-data'] -match `
                     '(?s)ext0:.*?- 192\.168\.1\.10/24.*?via: 192\.168\.1\.1.*?- 8\.8\.8\.8'
             }
+        }
+
+        It 'emits a DHCP ext0 entry when externalDhcp is true (default)' {
+            # Capture the user-data via Mock side-effect rather than
+            # asserting in a ParameterFilter scriptblock - the filter
+            # runs in Pester's mock-evaluation scope and a regex hiccup
+            # there reads as "no matching invocation" rather than a
+            # clear assertion failure.
+            #
+            # The DHCP ext0 stanza is shaped exactly as:
+            #     ext0:
+            #       match:
+            #         macaddress: <pinned>
+            #       set-name: ext0
+            #       dhcp4: true
+            # so `set-name: ext0` immediately followed by `dhcp4: true`
+            # is a precise structural signal. Asserting via that pair
+            # avoids the cloud-init literal-block indentation tripping
+            # any "extract just the ext0 slice" regex.
+            Mock Test-Path { $true }
+            $script:_capturedUserData = $null
+            Mock New-SeedIso {
+                $script:_capturedUserData = $Files['user-data']
+            }
+            Invoke-RouterSeedIsoGeneration -Vm (New-DhcpRouterTestVm)
+
+            $script:_capturedUserData |
+                Should -Match 'set-name: ext0\s*\r?\n\s+dhcp4: true'
+        }
+
+        It 'omits operator IP / gateway / DNS literals from the ext0 stanza in DHCP mode' {
+            # Belt-and-braces regression check distinct from the
+            # "emits dhcp4: true" assertion. A future regression that
+            # left the static literals in but added dhcp4:true (a
+            # half-applied refactor) would fail this even if the
+            # previous test happened to pass. Asserts that no line
+            # between `set-name: ext0` and the next set-name (priv0)
+            # carries an addresses / routes / nameservers block. The
+            # match runs across the whole user-data and uses a
+            # lookahead bounded by the next set-name token, which is
+            # robust to literal-block indentation.
+            Mock Test-Path { $true }
+            $script:_capturedUserData = $null
+            Mock New-SeedIso {
+                $script:_capturedUserData = $Files['user-data']
+            }
+            Invoke-RouterSeedIsoGeneration -Vm (New-DhcpRouterTestVm)
+
+            $script:_capturedUserData |
+                Should -Not -Match (
+                    '(?s)set-name: ext0\s*\r?\n' +
+                    '(?:(?!set-name:).)*?(?:addresses:|routes:|nameservers:)'
+                )
         }
 
         It 'configures the private NIC with the privateIpAddress and no gateway' {

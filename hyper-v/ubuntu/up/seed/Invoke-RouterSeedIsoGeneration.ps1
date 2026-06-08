@@ -115,20 +115,49 @@ function Invoke-RouterSeedIsoGeneration {
     # owns the entry shape (match block / dhcp4 / addresses / optional
     # routes and nameservers); the wrapper is composed here so both
     # entries share one `network: / version: 2 / ethernets:` header.
-    # The external NIC carries gateway + DNS (upstream egress); the
-    # private NIC carries neither (it IS the gateway and resolver for
-    # downstream VMs, so an upstream gateway here would create a routing
-    # loop).
+    #
+    # The external NIC has two modes:
+    #   - externalDhcp $true (the schema default): emit a minimal DHCP
+    #     entry. The router picks up whatever LAN the host's External
+    #     vSwitch is bridged to, so changing networks (operator moves
+    #     between Wi-Fi hotspots / different office VLANs) does not
+    #     require re-pinning the seed. The router's own DNS resolution
+    #     comes from DHCP; the router VM's `dns` field is used by
+    #     dnsmasq's upstream forwarder, not by ext0's resolver.
+    #   - externalDhcp $false: full static via New-StaticNetplanYaml,
+    #     same shape workload VMs use. The validator requires
+    #     ipAddress / subnetMask / gateway in that mode.
+    #
+    # The private NIC is always static and carries neither gateway nor
+    # nameservers - it IS the gateway and resolver for downstream VMs.
     # ------------------------------------------------------------------
-    $extEntry = New-StaticNetplanYaml `
-        -Key        'ext0' `
-        -MacAddress $extMac.Netplan `
-        -SetName    'ext0' `
-        -IpAddress  $Vm.ipAddress `
-        -SubnetMask $Vm.subnetMask `
-        -Gateway    $Vm.gateway `
-        -Dns        $Vm.dns `
-        -NoWrapper
+    $externalDhcp = if ($Vm.PSObject.Properties['externalDhcp']) {
+        [bool] $Vm.externalDhcp
+    } else { $true }
+
+    if ($externalDhcp) {
+        # Minimal DHCP entry. Same indentation as New-StaticNetplanYaml
+        # produces - the wrapper below assumes four-space indent on the
+        # interface key line.
+        $extEntry = @"
+    ext0:
+      match:
+        macaddress: $($extMac.Netplan)
+      set-name: ext0
+      dhcp4: true
+"@
+    }
+    else {
+        $extEntry = New-StaticNetplanYaml `
+            -Key        'ext0' `
+            -MacAddress $extMac.Netplan `
+            -SetName    'ext0' `
+            -IpAddress  $Vm.ipAddress `
+            -SubnetMask $Vm.subnetMask `
+            -Gateway    $Vm.gateway `
+            -Dns        $Vm.dns `
+            -NoWrapper
+    }
 
     $privEntry = New-StaticNetplanYaml `
         -Key        'priv0' `

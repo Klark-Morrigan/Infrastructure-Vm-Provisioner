@@ -10,6 +10,7 @@ BeforeAll {
     function Add-VMNetworkAdapter     { param($VMName, $Name, $SwitchName, $StaticMacAddress) }
     function Start-VM                 { param($VMName) }
     function Get-VM                   { param($Name) }
+    function Get-VMNetworkAdapter     { param($VMName) }
     function Get-VMDvdDrive           { param($VMName) }
     function Remove-VMDvdDrive        { param($VMName, $ControllerNumber, $ControllerLocation) }
     function Remove-Item              { param($Path, [switch]$Force) }
@@ -97,6 +98,26 @@ BeforeAll {
         }
     }
 
+    # DHCP-mode router VM - no ipAddress in its config (the upstream
+    # NIC's address comes from the LAN's DHCP server, discovered via
+    # Hyper-V KVP). Exercises the IP-discovery branch in wait-for-SSH.
+    function New-DhcpRouterTestVm {
+        [PSCustomObject]@{
+            vmName              = 'router-01'
+            vmConfigPath        = 'C:\a_VMs\Hyper-V\Config'
+            username            = 'admin'
+            cpuCount            = 2
+            ramGB               = 4
+            _vhdxPath           = 'C:\VMs\router-01\router-01.vhdx'
+            _seedIsoPath        = 'C:\VMs\router-01\router-01-seed.iso'
+            kind                = 'router'
+            externalSwitchName  = 'ExternalSwitch-Shared'
+            privateSwitchName   = 'PrivateSwitch-Production'
+            _externalMac        = '02aabbccdd00'
+            _privateMac         = '02aabbccdd01'
+        }
+    }
+
     # Standard DVD drive object returned by Get-VMDvdDrive.
     function New-TestDvdDrive {
         [PSCustomObject]@{
@@ -123,6 +144,12 @@ BeforeAll {
         Mock Get-VMDvdDrive      { New-TestDvdDrive }
         Mock Remove-VMDvdDrive   { }
         Mock Test-Path           { $false }
+        # IP discovery (KVP) defaults to "no adapters found" - router-
+        # DHCP path either supplies its own override or hits the
+        # discovery timeout cleanly. Workload + router-static tests
+        # never trigger the discovery branch because their fixtures
+        # carry ipAddress.
+        Mock Get-VMNetworkAdapter { @() }
         # SSH polling: the real cmdlets reach Hyper-V networking and
         # Renci.SshNet; stub both. Test-VmSshPort returns $false so
         # the polling loop always falls through to the timeout path
@@ -415,6 +442,116 @@ Describe 'Invoke-VmCreation' {
 
             { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
                 Should -Throw -ExpectedMessage '*did not become reachable*'
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'SSH polling - router DHCP IP discovery' {
+    # ------------------------------------------------------------------
+        # DHCP-mode router VMs have no ipAddress in their config; the
+        # wait-for-SSH sub-step discovers the actual ext0 IP via Hyper-V
+        # KVP integration services before probing SSH and writes the
+        # discovered value back onto the VM def so the workload tunnel
+        # later (provision.ps1 step 7 references _RouterVm.ipAddress)
+        # finds it via the same object.
+
+        It 'queries Get-VMNetworkAdapter filtered to the external switch' {
+            Initialize-HyperVMocks
+            # Stateful Get-VM: Off for the post-creation guard, then
+            # Running for the discovery + SSH loops. Mirrors the
+            # pattern in the jump-host dispatch tests.
+            $script:_getVmCallCount = 0
+            Mock Get-VM {
+                $script:_getVmCallCount++
+                $state = if ($script:_getVmCallCount -eq 1) {
+                    'Off'
+                } else {
+                    'Running'
+                }
+                [PSCustomObject]@{ State = $state }
+            }
+            # KVP returns the discovered IPv4 immediately.
+            Mock Get-VMNetworkAdapter {
+                @([PSCustomObject]@{
+                    SwitchName  = 'ExternalSwitch-Shared'
+                    IPAddresses = @('192.168.1.42', 'fe80::1234')
+                })
+            }
+            # SSH probe succeeds on the FIRST iteration so the test
+            # exits the loop cleanly without burning the full 10-min
+            # budget. Side benefit: probeIp is set to the discovered
+            # IP before this fires, so we can assert on it.
+            $script:_probedIpAfterDiscovery = $null
+            Mock Test-VmSshPort {
+                param($IpAddress, $Port)
+                $script:_probedIpAfterDiscovery = $IpAddress
+                $true
+            }
+
+            Invoke-VmCreation -Vm (New-DhcpRouterTestVm) -SwitchName 'External'
+
+            Should -Invoke Get-VMNetworkAdapter -ParameterFilter {
+                $VMName -eq 'router-01'
+            }
+            $script:_probedIpAfterDiscovery | Should -Be '192.168.1.42'
+        }
+
+        It 'writes the discovered IP back onto the VM def as ipAddress' {
+            Initialize-HyperVMocks
+            $script:_getVmCallCount = 0
+            Mock Get-VM {
+                $script:_getVmCallCount++
+                $state = if ($script:_getVmCallCount -eq 1) {
+                    'Off'
+                } else {
+                    'Running'
+                }
+                [PSCustomObject]@{ State = $state }
+            }
+            Mock Get-VMNetworkAdapter {
+                @([PSCustomObject]@{
+                    SwitchName  = 'ExternalSwitch-Shared'
+                    IPAddresses = @('192.168.42.99')
+                })
+            }
+            Mock Test-VmSshPort { $true }
+
+            $vm = New-DhcpRouterTestVm
+            Invoke-VmCreation -Vm $vm -SwitchName 'External'
+
+            # Workload code path reads $vm._RouterVm.ipAddress, which
+            # is the same object. Adding the field via Add-Member is
+            # what makes the discovery observable to downstream code.
+            $vm.PSObject.Properties['ipAddress']        | Should -Not -BeNullOrEmpty
+            $vm.ipAddress                                | Should -Be '192.168.42.99'
+        }
+
+        It 'throws with a router-specific message when KVP never reports an IP' {
+            # The Set-ExpiredDeadline mock keeps the discovery loop from
+            # actually running; the IP-discovery branch hits its own
+            # "did not report ... within N minutes" throw. The error
+            # text differs from the regular SSH-not-reachable throw so
+            # the operator can tell which budget ran out.
+            Initialize-HyperVMocks
+            Set-ExpiredDeadline
+            # Default Get-VMNetworkAdapter returns an empty array.
+
+            { Invoke-VmCreation -Vm (New-DhcpRouterTestVm) -SwitchName 'External' } |
+                Should -Throw -ExpectedMessage "*did not report an ext0 IP*"
+        }
+
+        It 'skips the discovery branch when the router VM has a static ipAddress' {
+            # New-RouterTestVm carries ipAddress = '192.168.1.10', so
+            # the discovery branch is bypassed. The SSH probe targets
+            # the static IP directly. Set-ExpiredDeadline keeps the
+            # loop from running.
+            Initialize-HyperVMocks
+            Set-ExpiredDeadline
+
+            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'External' } |
+                Should -Throw -ExpectedMessage "*did not become reachable*"
+
+            Should -Invoke Get-VMNetworkAdapter -Times 0 -Exactly
         }
     }
 

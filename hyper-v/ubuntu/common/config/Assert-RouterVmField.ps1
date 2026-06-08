@@ -6,14 +6,15 @@
 
 # ---------------------------------------------------------------------------
 # Assert-RouterVmField
-#   Validates the router-specific portion of a VM definition. A router VM
-#   needs three extra fields and cannot carry toolchain blocks; this
-#   validator pins both rules in one place so the schema dispatch in
-#   ConvertFrom-VmConfigJson is just a kind-check + a call here.
+#   Validates the router-specific portion of a VM definition. Router VMs
+#   need extra downstream-NIC fields, cannot carry toolchain blocks, and
+#   have a kind-specific addressing-mode choice for the upstream NIC.
+#   This validator pins all of that in one place so the schema dispatch
+#   in ConvertFrom-VmConfigJson is just a kind-check + a call here.
 #
-#   Required (in addition to the base required-field set, which is
-#   already enforced by ConvertFrom-VmConfigJson - 'privateSwitchName'
-#   lives there because workload VMs also need it):
+#   Always required (in addition to the base required-field set, which
+#   ConvertFrom-VmConfigJson enforces - 'privateSwitchName' lives there
+#   because workload VMs also need it):
 #     - externalSwitchName  : Hyper-V switch the router's upstream NIC
 #                             attaches to. Created on demand by
 #                             Ensure-ExternalSwitch when absent; reused
@@ -26,7 +27,28 @@
 #                             field is ignored at runtime.
 #     - privateIpAddress    : IP the router carries on its private-side
 #                             NIC. Downstream VMs use it as their
-#                             default gateway and DNS server.
+#                             default gateway and DNS server. Always
+#                             static - no DHCP path can pre-commit a
+#                             value workloads can be configured against.
+#
+#   Optional:
+#     - externalDhcp        : addressing mode for the upstream (ext0)
+#                             NIC. Defaults to $true (DHCP). Set $false
+#                             to pin a static address - typically for
+#                             a fixed-workstation deployment whose LAN
+#                             never changes. When $false,
+#                             ipAddress/subnetMask/gateway from the base
+#                             schema become REQUIRED here; when $true,
+#                             they are ignored if present (DHCP supplies
+#                             everything ext0 needs).
+#
+#                             Default of $true exists because the host's
+#                             External vSwitch is often Wi-Fi-bridged
+#                             on a mobile workstation, and a static IP
+#                             on the wrong LAN leaves the router with
+#                             no upstream connectivity. DHCP picks up
+#                             whichever LAN is currently bridged and
+#                             "just works" across networks.
 #
 #   Rejected:
 #     - javaDevKit, dotnetSdk, dotnetTools - a router VM is intentionally
@@ -53,6 +75,38 @@ function Assert-RouterVmField {
         if ($null -eq $value -or
             ($value -is [string] -and [string]::IsNullOrWhiteSpace($value))) {
             throw "${ctx}.$field must be a non-empty string."
+        }
+    }
+
+    # externalDhcp defaults to $true. The default is captured in
+    # provision-time code (Invoke-RouterSeedIsoGeneration consults the
+    # field) so we don't mutate $Vm here - keeps the validator pure
+    # (no side effects on its input) and the default decision in one
+    # place. Tests pass $Vm in both shapes (field present or absent).
+    $externalDhcp = if ($Vm.PSObject.Properties['externalDhcp']) {
+        # Booleans round-trip from JSON as System.Boolean already; the
+        # type cast is defensive against operators writing "true" /
+        # "false" as strings (still parses).
+        [bool] $Vm.externalDhcp
+    } else { $true }
+
+    if (-not $externalDhcp) {
+        # Static-mode requires the two ext0-specific fields workloads
+        # always use. subnetMask is universal (it lives in the base
+        # required-field set; the router uses it for priv0 even under
+        # DHCP) so it is not gated here.
+        foreach ($field in @('ipAddress', 'gateway')) {
+            if (-not $Vm.PSObject.Properties[$field]) {
+                throw (
+                    "${ctx} has externalDhcp=false but is missing required " +
+                    "static-address field '$field'."
+                )
+            }
+            $value = $Vm.$field
+            if ($null -eq $value -or
+                ($value -is [string] -and [string]::IsNullOrWhiteSpace($value))) {
+                throw "${ctx}.$field must be a non-empty string."
+            }
         }
     }
 

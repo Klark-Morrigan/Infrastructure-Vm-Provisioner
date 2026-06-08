@@ -130,7 +130,13 @@ Describe 'ConvertFrom-VmConfigJson' {
             # the result is a string, not a PSCustomObject. Assert-RequiredProperties
             # is called on it - this test pins the current behaviour so any
             # future guard added here is a deliberate, tested change.
+            #
+            # Per-kind validators (Assert-WorkloadVmField default-dispatched
+            # for missing kind) get mocked to no-ops; their behaviour lives
+            # in their own .Tests.ps1 files, and pinning the dispatch
+            # contract here does not require their throw paths to fire.
             Mock Assert-RequiredProperties {}
+            Mock Assert-WorkloadVmField {}
             { ConvertFrom-VmConfigJson -Json '"hello"' } | Should -Not -Throw
             Should -Invoke Assert-RequiredProperties -Times 1 -Exactly
         }
@@ -160,6 +166,10 @@ Describe 'ConvertFrom-VmConfigJson' {
             # must fall back to (unknown) so the error is still meaningful.
             $json = '[{ "cpuCount": 2 }]'
             Mock Assert-RequiredProperties {}
+            # Default-kind dispatch routes to Assert-WorkloadVmField; mock
+            # to no-op so the dispatch contract test does not run into
+            # the validator's required-field check.
+            Mock Assert-WorkloadVmField {}
             @(ConvertFrom-VmConfigJson -Json $json)
             Should -Invoke Assert-RequiredProperties -Times 1 -Exactly -ParameterFilter {
                 $Context -like "*(unknown)*"

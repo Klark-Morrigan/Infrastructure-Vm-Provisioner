@@ -41,11 +41,34 @@ yet; steps 2 and 3 wire consumers.
     `Get-NetAdapter` on the host shows the available names.
   - `privateSwitchName`, `privateIpAddress`, `subnetMask` - the
     router's private-side NIC, which downstream VMs (step 2) treat
-    as their gateway.
-  - Standard fields for the management IP on the external NIC
-    (`ipAddress`, `gateway`, `subnetMask`, `dns`).
+    as their gateway. `subnetMask` also masks priv0's address; the
+    router uses one mask field for both NICs.
+  - `dns` - upstream resolver dnsmasq forwards to. Stays operator-
+    supplied regardless of upstream addressing mode so the router's
+    DNS choice does not drift with the LAN.
+  - `externalDhcp` (optional, default `true`) - addressing mode for
+    the upstream (`ext0`) NIC. The default exists because the host's
+    External vSwitch is often Wi-Fi-bridged on a mobile workstation;
+    pinning a static there breaks every time the operator moves to
+    a different network. DHCP picks up whichever LAN the vSwitch is
+    bridged to and the orchestrator discovers the actual IP via
+    Hyper-V KVP integration services (`Get-VMNetworkAdapter`'s
+    `IPAddresses` property) before the SSH probe runs.
+  - When `externalDhcp` is `false`, `ipAddress` and `gateway` become
+    required for the static-ext0 path. Validated by
+    `Assert-RouterVmField`. Operators on a fixed LAN who want a
+    pinned address opt in this way.
   - No `dotnet`/`jdk`/`dotnetTools` blocks - a router VM is
     intentionally minimal.
+  - Workload VMs always require `ipAddress` / `gateway` (their
+    gateway must equal the env's router's `privateIpAddress`, a
+    config-time choice no DHCP path can provide). Per-kind required-
+    field rules live in `Assert-WorkloadVmField` and
+    `Assert-RouterVmField`; the base required-field set in
+    `ConvertFrom-VmConfigJson` carries only what every VM shares
+    (vmName, cpuCount, ramGB, diskGB, ubuntuVersion, username,
+    password, subnetMask, dns, vmConfigPath, vhdPath,
+    privateSwitchName).
 - **Private switch creation.** Add
   `hyper-v/ubuntu/up/network/Ensure-PrivateSwitch.ps1` exporting
   `Ensure-PrivateSwitch -Name <name>`. Idempotent. Creates a Hyper-V

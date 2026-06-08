@@ -197,6 +197,69 @@ function Invoke-VmCreation {
         -Name   'wait for SSH' `
         -Action {
 
+    # Router VMs in externalDhcp mode (the schema default) have no
+    # ipAddress in their VM def at this point - the upstream NIC's
+    # address gets handed to them by the LAN's DHCP server moments
+    # after boot. Discover it through Hyper-V's KVP integration
+    # services BEFORE the SSH probe: poll Get-VMNetworkAdapter on
+    # the external switch until an IPv4 appears, then write it back
+    # onto $Vm.ipAddress so every downstream consumer (this loop's
+    # SSH probe, the workload's tunnel in step 7, plan/diag output)
+    # sees a single source of truth. Pinned-static router VMs and
+    # workload VMs already have ipAddress and skip the discovery
+    # loop.
+    $needsIpDiscovery = -not $Vm.PSObject.Properties['ipAddress']
+    if ($needsIpDiscovery) {
+        Write-Host "  Discovering ext0 IP via Hyper-V KVP ..." -NoNewline
+        $discoveredIp = $null
+        while ((Get-Date) -lt $deadline -and -not $discoveredIp) {
+            # Same VM-running guard as the SSH loop below. KVP only
+            # reports on a Running VM, so a stopped VM would loop
+            # silently here until the deadline.
+            $vmState = (Get-VM -Name $Vm.vmName).State
+            if ($vmState -ne 'Running') {
+                Write-Host ''
+                throw (
+                    "VM '$($Vm.vmName)' stopped unexpectedly " +
+                    "(state: $vmState) before its IP could be discovered. " +
+                    "Check the Hyper-V console."
+                )
+            }
+
+            # Match the external NIC by switch name. Router VMs have
+            # two NICs and Get-VMNetworkAdapter returns both; the
+            # downstream NIC is on the private switch, the upstream
+            # on the external one.
+            $extAdapter = @(Get-VMNetworkAdapter -VMName $Vm.vmName |
+                Where-Object { $_.SwitchName -eq $Vm.externalSwitchName })
+            if ($extAdapter.Count -gt 0) {
+                $discoveredIp = @($extAdapter[0].IPAddresses) |
+                    Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } |
+                    Select-Object -First 1
+            }
+            if (-not $discoveredIp) {
+                Write-Host '.' -NoNewline
+                Start-Sleep -Seconds $pollIntervalSeconds
+            }
+        }
+
+        if (-not $discoveredIp) {
+            Write-Host ''
+            throw (
+                "Router VM '$($Vm.vmName)' did not report an ext0 IP via " +
+                "Hyper-V KVP within $timeoutMinutes minutes. Check the " +
+                "External vSwitch upstream connectivity."
+            )
+        }
+
+        Add-Member -InputObject $Vm `
+                   -MemberType NoteProperty `
+                   -Name 'ipAddress' `
+                   -Value $discoveredIp `
+                   -Force
+        Write-Host " $discoveredIp" -ForegroundColor Green
+    }
+
     # Workload VMs after feature 53 sit on a per-environment private
     # switch the host has no route to. provision.ps1 step 7 stamps
     # _RouterVm onto every workload def; we open a port forward
@@ -244,23 +307,35 @@ function Invoke-VmCreation {
             Start-Sleep -Seconds $pollIntervalSeconds
         }
 
-        # Elapsed-time tail on the same line as the dots: visualises
-        # how close to the timeout the probe landed. Gradient runs
-        # green at low ratios through orange as the ratio climbs;
-        # red is reserved for the timeout itself so a glance at the
-        # row separates "fast boot" from "almost-timed-out boot"
-        # without reading numbers.
+        # Elapsed-time tail on the same line as the dots. Colour
+        # encodes outcome at a glance:
+        #   - Success: elapsed shifts green -> orange as the ratio
+        #     to the budget climbs. The budget itself is uncoloured
+        #     because we did not hit it; colouring it would compete
+        #     with the gradient for the eye.
+        #   - Timeout: BOTH numbers go red. Elapsed because that
+        #     is the time we burned; budget because that is what
+        #     we ran out of. Two reds carry the "we hit the cap"
+        #     reading from a metre away.
         $totalSeconds = $timeoutMinutes * 60
         $elapsedSecs  = [int]([Math]::Round(
             ((Get-Date) - $startTime).TotalSeconds))
-        $ratio        = [Math]::Min(1.0,
-            [double]$elapsedSecs / [double]$totalSeconds)
-        # gold-to-white-style linear blend: (80,200,80) -> (255,165,0).
-        $r = [int][Math]::Round( 80 + $ratio * (255 -  80))
-        $g = [int][Math]::Round(200 + $ratio * (165 - 200))
-        $b = [int][Math]::Round( 80 + $ratio * (  0 -  80))
-        $elapsedColored = "`e[38;2;$r;$g;${b}m${elapsedSecs}s`e[0m"
-        $timeoutColored = "`e[38;2;220;70;70m${totalSeconds}s`e[0m"
+        if ($sshReady) {
+            $ratio = [Math]::Min(1.0,
+                [double]$elapsedSecs / [double]$totalSeconds)
+            # Linear blend (80,200,80) -> (255,165,0): green at ratio 0,
+            # orange at ratio 1.
+            $r = [int][Math]::Round( 80 + $ratio * (255 -  80))
+            $g = [int][Math]::Round(200 + $ratio * (165 - 200))
+            $b = [int][Math]::Round( 80 + $ratio * (  0 -  80))
+            $elapsedColored = "`e[38;2;$r;$g;${b}m${elapsedSecs}s`e[0m"
+            $timeoutColored = "${totalSeconds}s"
+        }
+        else {
+            $red            = '38;2;220;70;70'
+            $elapsedColored = "`e[${red}m${elapsedSecs}s`e[0m"
+            $timeoutColored = "`e[${red}m${totalSeconds}s`e[0m"
+        }
         Write-Host " $elapsedColored / $timeoutColored"
 
         if (-not $sshReady) {
