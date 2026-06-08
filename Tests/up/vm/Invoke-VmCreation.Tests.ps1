@@ -38,6 +38,28 @@ BeforeAll {
         param($Capture)
     }
 
+    # SSH polling stubs - the real cmdlets need Hyper-V networking
+    # (Test-VmSshPort) and Posh-SSH's Renci.SshNet types
+    # (New-VmSshTunnel). Define them as no-ops here so Pester's
+    # Mock layer can replace them in Initialize-HyperVMocks.
+    function Test-VmSshPort {
+        param([string] $IpAddress, [int] $Port = 22)
+        $false
+    }
+    function New-VmSshTunnel {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+            'PSAvoidUsingPlainTextForPassword', 'JumpPassword')]
+        param(
+            [string] $TargetIp,
+            [string] $JumpHostIp,
+            [string] $JumpUsername,
+            [string] $JumpPassword,
+            [uint32] $TargetPort = 22,
+            [TimeSpan] $JumpConnectTimeout = [TimeSpan]::FromSeconds(30)
+        )
+        $null
+    }
+
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\vm\create-vm.ps1"
 
     # Standard VM object satisfying all Invoke-VmCreation requirements.
@@ -101,15 +123,40 @@ BeforeAll {
         Mock Get-VMDvdDrive      { New-TestDvdDrive }
         Mock Remove-VMDvdDrive   { }
         Mock Test-Path           { $false }
+        # SSH polling: the real cmdlets reach Hyper-V networking and
+        # Renci.SshNet; stub both. Test-VmSshPort returns $false so
+        # the polling loop always falls through to the timeout path
+        # (the deadline mock is what controls when the loop exits).
+        # New-VmSshTunnel returns a tunnel-shaped object whose Dispose
+        # method is a no-op, so the finally branch can call it without
+        # touching the network.
+        Mock Test-VmSshPort      { $false }
+        $script:_tunnelDisposed  = 0
+        Mock New-VmSshTunnel     {
+            $obj = [PSCustomObject]@{
+                LocalHost = '127.0.0.1'
+                LocalPort = 12345
+            }
+            Add-Member -InputObject $obj -MemberType ScriptMethod `
+                       -Name Dispose -Value {
+                $script:_tunnelDisposed++
+            }
+            $obj
+        }
     }
 
-    # Makes the SSH polling loop body never execute by returning a deadline in
-    # the past relative to what Get-Date returns on the loop-condition check.
+    # Makes the SSH polling loop body never execute by returning a
+    # deadline in the past relative to what Get-Date returns on the
+    # loop-condition check.
     #
     # The source's Get-Date sequence is:
-    #   call 1: Get-Date -Format ...        (per-run _diagTimestamp)
-    #   call 2: (Get-Date).AddMinutes(10)   (deadline)
-    #   call 3+: while ((Get-Date) -lt $deadline)   (loop condition)
+    #   call 1 : Get-Date -Format ...   (per-run _diagTimestamp)
+    #   call 2 : Get-Date               ($startTime, used for both the
+    #                                    deadline calc and the elapsed
+    #                                    print at the end)
+    #   call 3+: while ((Get-Date) -lt $deadline)   (loop condition,
+    #                                                 then once more for
+    #                                                 the elapsed print)
     #
     # If the deadline call and the loop-condition call both see the same
     # instant T, the condition T < T+10min is true and the loop runs. To
@@ -368,6 +415,128 @@ Describe 'Invoke-VmCreation' {
 
             { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
                 Should -Throw -ExpectedMessage '*did not become reachable*'
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'SSH polling - jump-host dispatch' {
+    # ------------------------------------------------------------------
+        # Feature 53 step 3 follow-up: workloads sit on a private switch
+        # the host has no route to. Invoke-VmCreation must open an SSH
+        # tunnel through the router (stamped onto each workload as
+        # _RouterVm by provision.ps1 step 7) and probe localhost on the
+        # tunnel's forwarded port instead of the workload IP directly.
+
+        It 'opens New-VmSshTunnel against the router for a workload with _RouterVm' {
+            # The polling loop body is skipped by Set-ExpiredDeadline
+            # (the deadline is already past on the first iteration),
+            # so Test-VmSshPort itself is unobservable here. The
+            # localhost-vs-workload-IP probe target is covered by the
+            # next test, which inspects the live $probeIp variable
+            # via a stop-the-loop assertion.
+            Initialize-HyperVMocks
+            Set-ExpiredDeadline
+
+            $workload = New-TestVm
+            Add-Member -InputObject $workload `
+                       -MemberType NoteProperty -Name '_RouterVm' `
+                       -Value ([PSCustomObject]@{
+                           ipAddress = '192.168.1.20'
+                           username  = 'routeradmin'
+                           password  = 'router-secret'
+                       })
+
+            { Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E' } |
+                Should -Throw    # timeout throw - expected
+
+            Should -Invoke New-VmSshTunnel -Times 1 -Exactly -ParameterFilter {
+                $TargetIp     -eq $workload.ipAddress -and
+                $JumpHostIp   -eq '192.168.1.20'      -and
+                $JumpUsername -eq 'routeradmin'       -and
+                $JumpPassword -eq 'router-secret'
+            }
+        }
+
+        It 'probes the tunnel''s localhost endpoint (not the workload IP)' {
+            # Override Test-VmSshPort to record AND return $true so the
+            # polling loop exits via the success path on its first
+            # iteration. That gives us one observable call to assert
+            # against. Without this, Set-ExpiredDeadline's past-
+            # deadline mock skips the loop body and the probe target
+            # is unobservable.
+            Initialize-HyperVMocks
+            # Stateful Get-VM: the post-creation guard requires Off
+            # (first call) and the polling loop requires Running
+            # (subsequent calls). Returning the same state on every
+            # call would fail one branch or the other.
+            $script:_getVmCallCount = 0
+            Mock Get-VM {
+                $script:_getVmCallCount++
+                $state = if ($script:_getVmCallCount -eq 1) {
+                    'Off'
+                } else {
+                    'Running'
+                }
+                [PSCustomObject]@{ State = $state }
+            }
+            $script:_probedIp   = $null
+            $script:_probedPort = $null
+            Mock Test-VmSshPort {
+                param($IpAddress, $Port)
+                $script:_probedIp   = $IpAddress
+                $script:_probedPort = $Port
+                $true
+            }
+
+            $workload = New-TestVm
+            Add-Member -InputObject $workload `
+                       -MemberType NoteProperty -Name '_RouterVm' `
+                       -Value ([PSCustomObject]@{
+                           ipAddress = '192.168.1.20'
+                           username  = 'routeradmin'
+                           password  = 'router-secret'
+                       })
+
+            Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E'
+
+            $script:_probedIp   | Should -Be '127.0.0.1'
+            $script:_probedPort | Should -Be 12345
+        }
+
+        It 'does not open a tunnel for a router VM (no _RouterVm)' {
+            # Router VMs are reachable directly on the host's External
+            # vSwitch upstream LAN. A tunnel-open here would be a
+            # chicken-and-egg.
+            Initialize-HyperVMocks
+            Set-ExpiredDeadline
+
+            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'External' } |
+                Should -Throw
+
+            Should -Invoke New-VmSshTunnel -Times 0 -Exactly
+        }
+
+        It 'disposes the tunnel in the finally block when the poll times out' {
+            # Per-test isolation: the dispose counter lives on a script
+            # scope that persists across calls; reset it before this
+            # specific It so a prior It does not bleed into the count.
+            $script:_tunnelDisposed = 0
+            Initialize-HyperVMocks
+            Set-ExpiredDeadline
+
+            $workload = New-TestVm
+            Add-Member -InputObject $workload `
+                       -MemberType NoteProperty -Name '_RouterVm' `
+                       -Value ([PSCustomObject]@{
+                           ipAddress = '192.168.1.20'
+                           username  = 'routeradmin'
+                           password  = 'router-secret'
+                       })
+
+            { Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E' } |
+                Should -Throw
+
+            $script:_tunnelDisposed | Should -Be 1
         }
     }
 

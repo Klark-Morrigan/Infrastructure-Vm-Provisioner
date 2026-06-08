@@ -188,13 +188,37 @@ function Invoke-VmCreation {
     # ------------------------------------------------------------------
     $timeoutMinutes      = 10
     $pollIntervalSeconds = 10
-    $deadline            = (Get-Date).AddMinutes($timeoutMinutes)
+    $startTime           = Get-Date
+    $deadline            = $startTime.AddMinutes($timeoutMinutes)
     $sshReady            = $false
 
     Invoke-WithSubStepTimer `
         -Parent 'VM creation' `
         -Name   'wait for SSH' `
         -Action {
+
+    # Workload VMs after feature 53 sit on a per-environment private
+    # switch the host has no route to. provision.ps1 step 7 stamps
+    # _RouterVm onto every workload def; we open a port forward
+    # through that router so the TCP probe below can target a
+    # localhost endpoint that emerges at the workload on the far
+    # side of the jump. Router VMs (and any pre-feature-53 caller)
+    # take the no-tunnel branch and probe the configured IP
+    # directly.
+    $sshTunnel = $null
+    $hasRouter = $Vm.PSObject.Properties['_RouterVm'] -and $Vm._RouterVm
+    if ($hasRouter) {
+        $sshTunnel = New-VmSshTunnel `
+                         -TargetIp     $Vm.ipAddress `
+                         -JumpHostIp   $Vm._RouterVm.ipAddress `
+                         -JumpUsername $Vm._RouterVm.username `
+                         -JumpPassword $Vm._RouterVm.password
+        $probeIp   = $sshTunnel.LocalHost
+        $probePort = $sshTunnel.LocalPort
+    } else {
+        $probeIp   = $Vm.ipAddress
+        $probePort = 22
+    }
 
     try {
         Write-Host "  Polling SSH on $($Vm.vmName) ..." -NoNewline
@@ -211,7 +235,7 @@ function Invoke-VmCreation {
                 )
             }
 
-            if (Test-VmSshPort -IpAddress $Vm.ipAddress -Port 22) {
+            if (Test-VmSshPort -IpAddress $probeIp -Port $probePort) {
                 $sshReady = $true
                 break
             }
@@ -220,7 +244,24 @@ function Invoke-VmCreation {
             Start-Sleep -Seconds $pollIntervalSeconds
         }
 
-        Write-Host ''
+        # Elapsed-time tail on the same line as the dots: visualises
+        # how close to the timeout the probe landed. Gradient runs
+        # green at low ratios through orange as the ratio climbs;
+        # red is reserved for the timeout itself so a glance at the
+        # row separates "fast boot" from "almost-timed-out boot"
+        # without reading numbers.
+        $totalSeconds = $timeoutMinutes * 60
+        $elapsedSecs  = [int]([Math]::Round(
+            ((Get-Date) - $startTime).TotalSeconds))
+        $ratio        = [Math]::Min(1.0,
+            [double]$elapsedSecs / [double]$totalSeconds)
+        # gold-to-white-style linear blend: (80,200,80) -> (255,165,0).
+        $r = [int][Math]::Round( 80 + $ratio * (255 -  80))
+        $g = [int][Math]::Round(200 + $ratio * (165 - 200))
+        $b = [int][Math]::Round( 80 + $ratio * (  0 -  80))
+        $elapsedColored = "`e[38;2;$r;$g;${b}m${elapsedSecs}s`e[0m"
+        $timeoutColored = "`e[38;2;220;70;70m${totalSeconds}s`e[0m"
+        Write-Host " $elapsedColored / $timeoutColored"
 
         if (-not $sshReady) {
             throw (
@@ -233,6 +274,12 @@ function Invoke-VmCreation {
         Write-Host "  [OK] SSH reachable on $($Vm.vmName)." -ForegroundColor Green
     }
     finally {
+        # Tear the tunnel down before the seed-ISO cleanup so the
+        # forward stops listening before the wider 'wait for SSH'
+        # sub-step ends. Tunnel disposal is idempotent and safe to
+        # call when the tunnel was never opened (router branch).
+        if ($null -ne $sshTunnel) { $sshTunnel.Dispose() }
+
         # Stop the serial-console reader. Safe to call with $null (Start
         # may have thrown). The reader normally exits on its own when the
         # VM stops; this is belt-and-braces for the orchestrator-tears-

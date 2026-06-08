@@ -50,6 +50,8 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common\config\Group-VmsByEnvironment.ps1"
 . "$PSScriptRoot\common\config\Read-VmProvisionerConfig.ps1"
 . "$PSScriptRoot\common\network\Remove-LegacySingletonNat.ps1"
+. "$PSScriptRoot\common\ssh\New-VmSshTunnel.ps1"
+. "$PSScriptRoot\common\ssh\New-VmSshClientWithJump.ps1"
 . "$PSScriptRoot\up\config\Select-VmsForProvisioning.ps1"
 . "$PSScriptRoot\up\seed\iso.ps1"
 . "$PSScriptRoot\up\disk\Invoke-BaseImagePatch.ps1"
@@ -320,6 +322,20 @@ try {
             # router VM is provisioned.
             Invoke-NetworkSetup -RouterVm    $routerVm `
                                 -WorkloadVms $env.WorkloadVms
+
+            # Stamp the env's router VM onto every workload as
+            # _RouterVm so downstream SSH paths (wait-for-SSH probe,
+            # post-provisioning session open) can find the jump host
+            # without re-running the per-env grouping. The router's
+            # NoteProperties carry its SSH credentials, which the
+            # tunnel needs to authenticate the jump leg.
+            foreach ($workload in $env.WorkloadVms) {
+                Add-Member -InputObject $workload `
+                           -MemberType NoteProperty `
+                           -Name '_RouterVm' `
+                           -Value $routerVm `
+                           -Force
+            }
         }
     }
 

@@ -319,6 +319,53 @@ Describe 'provision.ps1 - post-provisioning wiring (Step 5)' {
     }
 }
 
+Describe 'provision.ps1 - jump host wiring (feature 53 step 3 follow-up)' {
+
+    # The host has no route into the per-environment private switch
+    # after feature 53 step 2. provision.ps1 step 7 stamps the env's
+    # router VM onto every workload as _RouterVm so create-vm.ps1's
+    # wait-for-SSH and Invoke-VmPostProvisioning can open an SSH
+    # tunnel through the router instead of trying (and failing) to
+    # reach the workload IP directly.
+
+    It 'dot-sources New-VmSshTunnel.ps1' {
+        $text = Get-Content -Path $script:provisionPath -Raw
+        $text | Should -Match 'New-VmSshTunnel\.ps1'
+    }
+
+    It 'dot-sources New-VmSshClientWithJump.ps1' {
+        $text = Get-Content -Path $script:provisionPath -Raw
+        $text | Should -Match 'New-VmSshClientWithJump\.ps1'
+    }
+
+    It 'stamps _RouterVm onto every workload in the network-setup loop' {
+        # Regression guard: if a future refactor of the network-setup
+        # step drops the Add-Member, create-vm.ps1 and Invoke-Vm-
+        # PostProvisioning silently fall back to the direct-connect
+        # branch and every workload's wait-for-SSH times out 10 min
+        # later with no useful diagnosis. Three separate string
+        # checks rather than one cross-line regex - PowerShell's
+        # backtick continuations are not \s in regex char-class
+        # terms, so a single pattern would have to special-case them.
+        $text = Get-Content -Path $script:provisionPath -Raw
+        $text | Should -Match "foreach\s*\(\s*\`$workload\s+in\s+\`$env\.WorkloadVms\s*\)"
+        $text | Should -Match "-Name\s+'_RouterVm'"
+        $text | Should -Match "-Value\s+\`$routerVm"
+    }
+
+    It 'places the _RouterVm stamping inside the network setup phase' {
+        # The router VM is mintable only inside the network-setup loop
+        # (Group-VmsByEnvironment is what surfaces it). Anywhere else
+        # in the file is a sign the loop's per-env router context was
+        # lost. This pins the Add-Member's surrounding phase header.
+        $text       = Get-Content -Path $script:provisionPath -Raw
+        $phaseAt    = $text.IndexOf("Invoke-WithPhaseTimer -Name 'Virtual switch + NAT'")
+        $addMember  = $text.IndexOf("-Name '_RouterVm'")
+        $phaseAt    | Should -BeGreaterThan -1
+        $addMember  | Should -BeGreaterThan $phaseAt
+    }
+}
+
 Describe 'provision.ps1 - new-vs-existing pipeline split' {
 
     # Pins each per-VM foreach to the right list variable so a regression

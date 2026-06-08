@@ -95,6 +95,50 @@ BeforeAll {
         return $global:_PostProv_FakeSshClient
     }
 
+    # Real Invoke-VmPostProvisioning now reaches the SSH session through
+    # New-VmSshClientWithJump - branches between a direct New-VmSshClient
+    # (router VMs, or pre-feature-53 callers) and a jumped session
+    # (workloads on the per-env private switch). The stub here mimics
+    # both branches:
+    #   - For VMs without _RouterVm: forward to the New-VmSshClient stub
+    #     above so existing tests (which assert on those credentials)
+    #     keep working.
+    #   - For VMs WITH _RouterVm: record the jump credentials separately
+    #     so a jump-host test can pin them.
+    # The returned session object exposes a .Client property the
+    # closure pulls into $sshClient and a .Dispose() method the finally
+    # block calls.
+    $global:_PostProv_Calls['New-VmSshClientWithJump'] = @()
+    function global:New-VmSshClientWithJump {
+        param($Vm, $Timeout)
+        $hasRouter = $Vm.PSObject.Properties['_RouterVm'] -and $Vm._RouterVm
+        if ($hasRouter) {
+            $global:_PostProv_Calls['New-VmSshClientWithJump'] += @{
+                TargetIp     = $Vm.ipAddress
+                JumpHostIp   = $Vm._RouterVm.ipAddress
+                JumpUsername = $Vm._RouterVm.username
+            }
+        }
+        # Always forward to New-VmSshClient so existing assertions on
+        # the workload's IP / username / password remain valid - the
+        # real New-VmSshClientWithJump also delegates to it on the
+        # no-jump path.
+        $client = New-VmSshClient `
+                      -IpAddress $Vm.ipAddress `
+                      -Username  $Vm.username `
+                      -Password  $Vm.password `
+                      -Timeout   $Timeout
+        $session = [PSCustomObject]@{ Client = $client; Tunnel = $null }
+        Add-Member -InputObject $session -MemberType ScriptMethod `
+                   -Name Dispose -Value {
+            # Mirror the real session: dispose the underlying SshClient
+            # so tests that patch FakeSshClient.Dispose to record
+            # teardown still see the call through this layer.
+            if ($null -ne $this.Client) { $this.Client.Dispose() }
+        }
+        return $session
+    }
+
     function global:Invoke-SshClientCommand {
         param($SshClient, $Command)
         $global:_PostProv_Calls['Invoke-SshClientCommand'] += @{

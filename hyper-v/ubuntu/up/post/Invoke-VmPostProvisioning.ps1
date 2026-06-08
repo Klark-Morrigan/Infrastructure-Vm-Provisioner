@@ -66,10 +66,11 @@ function Invoke-VmPostProvisioning {
     # below sees them when invoked from another module (Invoke-WithVmFileServer
     # lives in Infrastructure.HyperV - function-scoped variables are not in
     # its lookup chain at invocation time without GetNewClosure()).
+    # username / password are read off $vmRef inside the closure now
+    # that New-VmSshClientWithJump is the connect path, so they no
+    # longer need their own locals.
     $vmIp     = $Vm.ipAddress
     $vmName   = $Vm.vmName
-    $username = $Vm.username
-    $password = $Vm.password
     $vmRef    = $Vm
     # vmConfigPath is the diagnostic-output root. PSObject.Properties
     # guard because the reconcile path on an existing VM (and unit
@@ -107,11 +108,18 @@ function Invoke-VmPostProvisioning {
     # Wraps the real SshClient with a tee-to-file logger covering the
     # whole post-provisioning phase. See New-DiagnosticSshClientWrapper.ps1.
     $newDiagSshWrapper       = ${function:New-DiagnosticSshClientWrapper}
+    # Connect helper that decides between a direct SSH session and a
+    # jump-through-router session based on $vmRef._RouterVm. Same
+    # closure-capture reason as the per-step functions above; without
+    # capturing it as a variable, name-based resolution from inside
+    # Invoke-WithVmFileServer's module scope would not find it.
+    $newSshClientWithJump    = ${function:New-VmSshClientWithJump}
 
     $postBlock = {
         param($server)
 
         $sshClient = $null
+        $sshSession = $null
         try {
             # Generous Timeout because ssh.socket binds port 22 early via
             # socket activation, so the upstream 'wait for SSH' TCP probe
@@ -127,15 +135,24 @@ function Invoke-VmPostProvisioning {
             # Connect is synchronous with no progress output. The leading
             # Write-Host below tells the operator the silence is expected,
             # so a multi-minute wait does not read like a hang.
+            #
+            # New-VmSshClientWithJump branches on $vmRef._RouterVm
+            # (stamped by provision.ps1 step 7 onto every workload):
+            # router VMs and pre-feature-53 callers get a direct
+            # New-VmSshClient session; workload VMs get a session
+            # tunnelled through the router so the host's lack of a
+            # route into the private subnet does not block post-
+            # provisioning. The session wraps both the client and
+            # (when used) the tunnel; the finally below disposes
+            # them together.
             Write-Host (
                 "  Connecting to $vmIp (this may take several minutes " +
                 "while cloud-init finishes) ..."
             )
-            $sshClient = New-VmSshClient `
-                             -IpAddress $vmIp `
-                             -Username  $username `
-                             -Password  $password `
-                             -Timeout   ([TimeSpan]::FromMinutes(10))
+            $sshSession = & $newSshClientWithJump `
+                              -Vm      $vmRef `
+                              -Timeout ([TimeSpan]::FromMinutes(10))
+            $sshClient  = $sshSession.Client
 
             # Replace $sshClient with a duck-type-compatible wrapper that
             # tees every RunCommand to ssh.log under the per-run diag
@@ -319,9 +336,13 @@ function Invoke-VmPostProvisioning {
             }
         }
         finally {
-            if ($null -ne $sshClient) {
-                if ($sshClient.IsConnected) { $sshClient.Disconnect() }
-                $sshClient.Dispose()
+            # $sshSession owns both the client AND (for workload VMs)
+            # the underlying jump tunnel. Its Dispose tears them down
+            # in the right order so the workload-side connection
+            # drops before the forwarded port closes. Safe to call
+            # when the session was never opened ($sshSession is $null).
+            if ($null -ne $sshSession) {
+                try { $sshSession.Dispose() } catch {}
             }
         }
     }.GetNewClosure()
