@@ -328,6 +328,21 @@ Describe 'provision.ps1 - jump host wiring (feature 53 step 3 follow-up)' {
     # tunnel through the router instead of trying (and failing) to
     # reach the workload IP directly.
 
+    It 'dot-sources Assert-SshNetLoaded.ps1 before the jump-aware helpers' {
+        # The jump-aware helpers call Assert-SshNetLoaded to fail fast
+        # when Posh-SSH (which bundles Renci.SshNet.dll) was not loaded.
+        # Dot-sourcing the guard AFTER its callers would not break
+        # execution order at runtime but would couple the load graph
+        # to luck - lock the order to keep diagnostics intact.
+        $text = Get-Content -Path $script:provisionPath -Raw
+        $text | Should -Match 'Assert-SshNetLoaded\.ps1'
+        $guardIdx  = $text.IndexOf('Assert-SshNetLoaded.ps1')
+        $tunnelIdx = $text.IndexOf('New-VmSshTunnel.ps1')
+        $jumpIdx   = $text.IndexOf('New-VmSshClientWithJump.ps1')
+        $guardIdx  | Should -BeLessThan $tunnelIdx
+        $guardIdx  | Should -BeLessThan $jumpIdx
+    }
+
     It 'dot-sources New-VmSshTunnel.ps1' {
         $text = Get-Content -Path $script:provisionPath -Raw
         $text | Should -Match 'New-VmSshTunnel\.ps1'
