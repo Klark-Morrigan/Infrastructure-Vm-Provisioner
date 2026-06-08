@@ -347,5 +347,28 @@ function Invoke-VmPostProvisioning {
         }
     }.GetNewClosure()
 
-    Invoke-WithVmFileServer -VmIpAddress $vmIp -ScriptBlock $postBlock
+    # File-server binding decision. Get-VmSwitchHostIp (called by
+    # Invoke-WithVmFileServer's -VmIpAddress path) walks Get-NetIPAddress
+    # for a host adapter on the SAME /24 as the supplied VM IP. That works
+    # for legacy VMs sitting on a Hyper-V Internal vSwitch the host has
+    # its own address on, but a feature-53 workload's IP lives on a
+    # private switch the host has no route into - the lookup throws
+    # "No host adapter found on the same /24" and post-provisioning
+    # aborts before touching the workload.
+    #
+    # When _RouterVm is stamped on the VM, we instead bind the file
+    # server on the host adapter that sits on the same upstream LAN as
+    # the router's ext0 (the External vSwitch's underlying physical NIC).
+    # The workload reaches that bind via its default route -> router
+    # priv0 -> router MASQUERADE on ext0 -> host. Address discovery uses
+    # the same Get-VmSwitchHostIp helper, just keyed off the router's
+    # discovered upstream IP instead of the workload's unreachable one.
+    $hasRouter = $Vm.PSObject.Properties['_RouterVm'] -and $Vm._RouterVm
+    if ($hasRouter) {
+        $hostIp = Resolve-RouterUpstreamHostIp `
+                      -RouterIpAddress $Vm._RouterVm.ipAddress
+        Invoke-WithVmFileServer -HostIp $hostIp -ScriptBlock $postBlock
+    } else {
+        Invoke-WithVmFileServer -VmIpAddress $vmIp -ScriptBlock $postBlock
+    }
 }

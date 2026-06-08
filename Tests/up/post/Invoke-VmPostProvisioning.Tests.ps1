@@ -69,13 +69,31 @@ BeforeAll {
 
     # Outer (orchestrator-scope) stub. Forwards to the captured scriptblock
     # so the closure executes in-process and records its own calls below.
+    # The orchestrator picks one of two parameter sets - -VmIpAddress
+    # (legacy / router VMs the host can route to directly) or -HostIp
+    # (workloads behind a router, host IP pre-derived from the router's
+    # upstream IP). Record both so assertions can target either path.
     function global:Invoke-WithVmFileServer {
-        param($VmIpAddress, $Port, [scriptblock]$ScriptBlock)
+        param($VmIpAddress, $HostIp, $Port, [scriptblock]$ScriptBlock)
         $global:_PostProv_Calls['Invoke-WithVmFileServer'] += @{
             VmIpAddress = $VmIpAddress
+            HostIp      = $HostIp
             Port        = $Port
         }
         & $ScriptBlock $global:_PostProv_FakeServer
+    }
+
+    # Resolve-RouterUpstreamHostIp is called by the orchestrator BEFORE
+    # Invoke-WithVmFileServer when _RouterVm is present, to derive a
+    # host bind IP on the same upstream LAN as the router's ext0.
+    # Default returns a sentinel; tests assert on the input IP.
+    $global:_PostProv_Calls['Resolve-RouterUpstreamHostIp'] = @()
+    function global:Resolve-RouterUpstreamHostIp {
+        param($RouterIpAddress)
+        $global:_PostProv_Calls['Resolve-RouterUpstreamHostIp'] += @{
+            RouterIpAddress = $RouterIpAddress
+        }
+        '192.168.1.10'
     }
 
     # PSSA's plain-text password warning is suppressed for the same reason
@@ -298,6 +316,22 @@ BeforeAll {
                 entries   = @()
             }
         )
+        $vm
+    }
+
+    # Workload VM with _RouterVm stamped (the shape provision.ps1 step 7
+    # produces). The orchestrator's file-server binding decision branches
+    # on the presence of this property.
+    function New-VmWithRouter {
+        $vm = New-VmWithJdk
+        $router = [PSCustomObject]@{
+            vmName    = 'router-prod'
+            ipAddress = '192.168.1.211'
+            username  = 'routeradmin'
+            password  = 'unit-test-router-password-not-real'
+        }
+        Add-Member -InputObject $vm -MemberType NoteProperty -Name '_RouterVm' `
+            -Value $router
         $vm
     }
 
@@ -696,6 +730,47 @@ Describe 'Invoke-VmPostProvisioning' {
             Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
 
             $global:_PostProv_Calls['Invoke-ToolchainReconciliation'].Count | Should -Be 1
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'file-server binding (workload behind a NAT router)' {
+    # ------------------------------------------------------------------
+        # provision.ps1 step 7 stamps _RouterVm onto every workload. The
+        # workload's IP lives on a private switch the host has no route
+        # into, so the legacy -VmIpAddress code path of
+        # Invoke-WithVmFileServer (which scans Get-NetIPAddress for a
+        # host adapter on the same /24 as the VM) throws "No host
+        # adapter found". The orchestrator must instead resolve a host
+        # IP on the upstream LAN (the same /24 as the router's ext0)
+        # and pass it as -HostIp.
+
+        It 'resolves the host IP from the router upstream IP when _RouterVm is stamped' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithRouter)
+
+            $calls = $global:_PostProv_Calls['Resolve-RouterUpstreamHostIp']
+            $calls.Count                | Should -Be 1
+            $calls[0].RouterIpAddress   | Should -Be '192.168.1.211'
+        }
+
+        It 'binds the file server with -HostIp (not -VmIpAddress) for a workload behind a router' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithRouter)
+
+            $calls = $global:_PostProv_Calls['Invoke-WithVmFileServer']
+            $calls.Count           | Should -Be 1
+            $calls[0].HostIp       | Should -Be '192.168.1.10'
+            # The workload IP must NOT be passed - the legacy -VmIpAddress
+            # path would call Get-VmSwitchHostIp on the private-switch IP
+            # and explode with "No host adapter found".
+            $calls[0].VmIpAddress  | Should -BeNullOrEmpty
+        }
+
+        It 'does NOT resolve the router upstream IP for a VM without _RouterVm' {
+            # Static / pre-feature-53 VMs the host can route to keep the
+            # original -VmIpAddress code path; no upstream resolve runs.
+            Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
+
+            $global:_PostProv_Calls['Resolve-RouterUpstreamHostIp'].Count | Should -Be 0
         }
     }
 }

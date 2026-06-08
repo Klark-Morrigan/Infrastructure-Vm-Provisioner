@@ -50,6 +50,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common\config\Group-VmsByEnvironment.ps1"
 . "$PSScriptRoot\common\config\Read-VmProvisionerConfig.ps1"
 . "$PSScriptRoot\common\network\Remove-LegacySingletonNat.ps1"
+. "$PSScriptRoot\common\network\Resolve-RouterUpstreamHostIp.ps1"
 . "$PSScriptRoot\common\ssh\Assert-SshNetLoaded.ps1"
 . "$PSScriptRoot\common\ssh\New-VmSshTunnel.ps1"
 . "$PSScriptRoot\common\ssh\New-VmSshClientWithJump.ps1"
