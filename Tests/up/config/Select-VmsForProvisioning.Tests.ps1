@@ -243,36 +243,97 @@ Describe 'Select-VmsForProvisioning' {
     }
 
     # ------------------------------------------------------------------
+    Context 'workload behind a NAT router (feature 53 topology)' {
+    # ------------------------------------------------------------------
+        # Workloads sharing a router's privateSwitchName sit on the
+        # per-environment private switch the host cannot route to.
+        # Same posture as the DHCP-router branch: skip the IP probe,
+        # classify on VM presence alone, let downstream wait-for-SSH
+        # open a tunnel through the router to verify reach.
+        #
+        # Use a DHCP-mode router in these fixtures (-ExternalDhcp $true)
+        # so the router itself ALSO skips the probe; the per-IP probe
+        # filter below then catches a regression that re-introduces the
+        # probe specifically for the workload row.
+
+        It 'classifies a workload-behind-router as new when no Hyper-V VM exists (no IP probe)' {
+            Initialize-Mocks
+            $script:_workloadProbeCalled = $false
+            Mock Test-IpAddressInUse -ParameterFilter { $IpAddress -eq '10.0.0.10' } {
+                $script:_workloadProbeCalled = $true
+                $false
+            }
+
+            $result = @(Select-VmsForProvisioning -VmDefs @(
+                (New-RouterVm -ExternalDhcp $true),
+                (New-TestVm -VmName 'wl' -IpAddress '10.0.0.10')
+            ))
+
+            ($result | Where-Object vmName -eq 'wl')._state | Should -Be 'new'
+            $script:_workloadProbeCalled | Should -Be $false
+        }
+
+        It 'classifies a workload-behind-router as existing when its Hyper-V VM exists (no IP probe)' {
+            Initialize-Mocks
+            Mock Get-VM -ParameterFilter { $Name -eq 'wl' } {
+                [PSCustomObject]@{ Name = 'wl' }
+            }
+            $script:_workloadProbeCalled = $false
+            Mock Test-IpAddressInUse -ParameterFilter { $IpAddress -eq '10.0.0.10' } {
+                $script:_workloadProbeCalled = $true
+                $true
+            }
+
+            $result = @(Select-VmsForProvisioning -VmDefs @(
+                (New-RouterVm -ExternalDhcp $true),
+                (New-TestVm -VmName 'wl' -IpAddress '10.0.0.10')
+            ))
+
+            ($result | Where-Object vmName -eq 'wl')._state | Should -Be 'existing'
+            $script:_workloadProbeCalled | Should -Be $false
+        }
+    }
+
+    # ------------------------------------------------------------------
     Context 'mixed batch' {
     # ------------------------------------------------------------------
 
-        It 'classifies each VM independently and returns only valid ones' {
+        It 'classifies each workload-behind-router on VM presence alone' {
+            # When a router is in the batch, every workload sharing
+            # its privateSwitchName lives on the per-environment
+            # private switch the host has no route to. The static-IP
+            # probe cannot succeed for them, so the four-case decision
+            # matrix collapses to a two-case classification on VM
+            # presence (mirrors the DHCP-router branch). The conflict
+            # / offline warnings that fire for directly-routable
+            # workloads do not apply here - their IPs were never
+            # reachable from the host to begin with.
             Initialize-Mocks
-            Mock Get-VM -ParameterFilter { $Name -eq 'router-prod' }  { $null }
-            Mock Get-VM -ParameterFilter { $Name -eq 'new-vm' }       { $null }
-            Mock Get-VM -ParameterFilter { $Name -eq 'existing-vm' }  {
+            Mock Get-VM -ParameterFilter { $Name -eq 'router-prod' } { $null }
+            Mock Get-VM -ParameterFilter { $Name -eq 'new-vm' }      { $null }
+            Mock Get-VM -ParameterFilter { $Name -eq 'existing-vm' } {
                 [PSCustomObject]@{ Name = 'existing-vm' }
             }
-            Mock Get-VM -ParameterFilter { $Name -eq 'conflict-vm' }  { $null }
-            Mock Get-VM -ParameterFilter { $Name -eq 'offline-vm' }   {
-                [PSCustomObject]@{ Name = 'offline-vm' }
+
+            # Per-workload-IP probe filters so a regression that re-
+            # introduces the broken probe gets caught here. The router
+            # is DHCP-mode (no static probe of its own); workloads
+            # behind it must also skip the probe.
+            $script:_newProbeCalled      = $false
+            $script:_existingProbeCalled = $false
+            Mock Test-IpAddressInUse -ParameterFilter { $IpAddress -eq '10.0.0.1' } {
+                $script:_newProbeCalled = $true
+                $false
+            }
+            Mock Test-IpAddressInUse -ParameterFilter { $IpAddress -eq '10.0.0.2' } {
+                $script:_existingProbeCalled = $true
+                $true
             }
 
-            Mock Test-IpAddressInUse -ParameterFilter { $IpAddress -eq '192.168.1.2' }  { $false }
-            Mock Test-IpAddressInUse -ParameterFilter { $IpAddress -eq '10.0.0.1' }     { $false }
-            Mock Test-IpAddressInUse -ParameterFilter { $IpAddress -eq '10.0.0.2' }     { $true  }
-            Mock Test-IpAddressInUse -ParameterFilter { $IpAddress -eq '10.0.0.3' }     { $true  }
-            Mock Test-IpAddressInUse -ParameterFilter { $IpAddress -eq '10.0.0.4' }     { $false }
-
             $vms = @(
-                # Router is in the JSON so the preflight passes for the
-                # whole environment. It is classified 'new' alongside
-                # 'new-vm'; the other three exercise the failure paths.
-                (New-RouterVm),
+                (New-RouterVm -ExternalDhcp $true),
                 (New-TestVm -VmName 'new-vm'      -IpAddress '10.0.0.1'),
-                (New-TestVm -VmName 'existing-vm' -IpAddress '10.0.0.2'),
-                (New-TestVm -VmName 'conflict-vm' -IpAddress '10.0.0.3'),
-                (New-TestVm -VmName 'offline-vm'  -IpAddress '10.0.0.4')
+                (New-TestVm -VmName 'existing-vm' -IpAddress '10.0.0.2')
             )
 
             $result = @(Select-VmsForProvisioning -VmDefs $vms 3> $null)
@@ -281,6 +342,8 @@ Describe 'Select-VmsForProvisioning' {
             ($result | Where-Object vmName -eq 'router-prod')._state | Should -Be 'new'
             ($result | Where-Object vmName -eq 'new-vm')._state      | Should -Be 'new'
             ($result | Where-Object vmName -eq 'existing-vm')._state | Should -Be 'existing'
+            $script:_newProbeCalled                                  | Should -Be $false
+            $script:_existingProbeCalled                             | Should -Be $false
         }
     }
 }

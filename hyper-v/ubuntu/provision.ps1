@@ -325,6 +325,41 @@ try {
             Invoke-NetworkSetup -RouterVm    $routerVm `
                                 -WorkloadVms $env.WorkloadVms
 
+            # Router-IP availability for the workload stamping below.
+            #
+            # When the router is _state == 'new' the VM does not exist
+            # in Hyper-V yet; step 8 (create-vm.ps1) runs first for
+            # the router, KVP-discovers its IP, and writes it back onto
+            # this same $routerVm object so the workload's reference
+            # below sees the populated value when its own wait-for-SSH
+            # iterates.
+            #
+            # When the router is _state == 'existing' (the case that
+            # surfaces on every phase after Phase 1, where the router
+            # persists across provision runs) create-vm.ps1 is skipped
+            # for it - the workload would then read $_RouterVm.ipAddress
+            # before anyone populated it and throw the property-not-found
+            # we just regressed on. Discover here to close that gap.
+            # KVP needs the VM running; an existing-but-Off router is
+            # an operator error (the workload cannot reach its jump
+            # anyway) so surface a directed message rather than the
+            # raw timeout.
+            $isExistingRouter = $routerVm.PSObject.Properties['_state'] -and
+                                $routerVm._state -eq 'existing'
+            $hasRouterIp      = $routerVm.PSObject.Properties['ipAddress'] -and
+                                $routerVm.ipAddress
+            if ($isExistingRouter -and -not $hasRouterIp) {
+                Write-Host "  Resolving existing router '$($routerVm.vmName)' upstream IP via KVP ..." `
+                    -NoNewline -ForegroundColor Cyan
+                $discoveredIp = Get-VmKvpIpAddress `
+                                    -VmName     $routerVm.vmName `
+                                    -SwitchName $routerVm.externalSwitchName `
+                                    -OnPoll     { Write-Host '.' -NoNewline -ForegroundColor Cyan }
+                Add-Member -InputObject $routerVm -MemberType NoteProperty `
+                           -Name 'ipAddress' -Value $discoveredIp -Force
+                Write-Host " $discoveredIp" -ForegroundColor Green
+            }
+
             # Stamp the env's router VM onto every workload as
             # _RouterVm so downstream SSH paths (wait-for-SSH probe,
             # post-provisioning session open) can find the jump host

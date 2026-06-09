@@ -46,6 +46,23 @@ function Select-VmsForProvisioning {
 
     Assert-EnvironmentConsistency -VmDefs $VmDefs
 
+    # Build a set of privateSwitchName values that have a router VM in
+    # this batch. Workloads whose privateSwitchName lands in this set
+    # sit behind a NAT router (feature 53) and are not reachable from
+    # the host directly - the static-IP conflict probe below would
+    # always return $false for them, classifying an otherwise healthy
+    # workload as "exists but IP does not respond" and dropping it
+    # from reconciliation. Skip the probe for those, same posture as
+    # the DHCP-router branch already takes.
+    $routerSwitchNames = @{}
+    foreach ($vm in $VmDefs) {
+        if ($vm.PSObject.Properties['kind'] -and $vm.kind -eq 'router' -and
+            $vm.PSObject.Properties['privateSwitchName'] -and
+            $vm.privateSwitchName) {
+            $routerSwitchNames[$vm.privateSwitchName] = $true
+        }
+    }
+
     foreach ($vm in $VmDefs) {
         Write-Host ""
         Write-Host "--- Checking: $($vm.vmName) ---" -ForegroundColor Cyan
@@ -73,6 +90,27 @@ function Select-VmsForProvisioning {
                 "[OK] '$($vm.vmName)' is new (router/DHCP, IP discovered after boot) - full pipeline."
             } else {
                 "[OK] '$($vm.vmName)' exists (router/DHCP, IP discovered after boot) - reconcile (additive steps only)."
+            }
+            Write-Host $label -ForegroundColor Green
+            $vm
+            continue
+        }
+
+        # Workload-behind-router. Same rationale as the DHCP-router
+        # branch above: the static-IP probe cannot succeed from the
+        # host because traffic to the private-switch IP has no route.
+        # Classify on VM presence alone; downstream wait-for-SSH
+        # opens its own tunnel through the router to verify reach.
+        $behindRouter = -not $isRouter -and
+                        $vm.PSObject.Properties['privateSwitchName'] -and
+                        $routerSwitchNames.ContainsKey($vm.privateSwitchName)
+        if ($behindRouter) {
+            $state = if ($existing) { 'existing' } else { 'new' }
+            $vm | Add-Member -MemberType NoteProperty -Name '_state' -Value $state -Force
+            $label = if ($state -eq 'new') {
+                "[OK] '$($vm.vmName)' is new (workload behind router, IP reachable only via jump) - full pipeline."
+            } else {
+                "[OK] '$($vm.vmName)' exists (workload behind router, IP reachable only via jump) - reconcile (additive steps only)."
             }
             Write-Host $label -ForegroundColor Green
             $vm
