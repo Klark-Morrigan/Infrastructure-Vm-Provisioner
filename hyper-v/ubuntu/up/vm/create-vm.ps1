@@ -299,8 +299,20 @@ function Invoke-VmCreation {
             }
 
             if (Test-VmSshPort -IpAddress $probeIp -Port $probePort) {
-                $sshReady = $true
-                break
+                # Through a tunnel, TCP accepts the moment SSH.NET's
+                # ForwardedPortLocal listener binds - true says nothing
+                # about the workload's own sshd. Banner-read confirms
+                # the far end is actually serving SSH so the next
+                # consumer (Invoke-VmPostProvisioning's SSH connect)
+                # does not race against a still-booting workload and
+                # die with "no SSH identification string". Direct
+                # probes against a known-good IP take the same banner
+                # check uniformly; the cost is one extra round trip
+                # per success.
+                if (Test-SshBanner -IpAddress $probeIp -Port $probePort) {
+                    $sshReady = $true
+                    break
+                }
             }
 
             Write-Host '.' -NoNewline

@@ -54,6 +54,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common\ssh\Assert-SshNetLoaded.ps1"
 . "$PSScriptRoot\common\ssh\New-VmSshTunnel.ps1"
 . "$PSScriptRoot\common\ssh\New-VmSshClientWithJump.ps1"
+. "$PSScriptRoot\common\ssh\Test-SshBanner.ps1"
 . "$PSScriptRoot\up\config\Select-VmsForProvisioning.ps1"
 . "$PSScriptRoot\up\seed\iso.ps1"
 . "$PSScriptRoot\up\disk\Invoke-BaseImagePatch.ps1"

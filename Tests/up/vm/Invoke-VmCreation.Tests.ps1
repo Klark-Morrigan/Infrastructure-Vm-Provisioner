@@ -40,12 +40,22 @@ BeforeAll {
     }
 
     # SSH polling stubs - the real cmdlets need Hyper-V networking
-    # (Test-VmSshPort) and Posh-SSH's Renci.SshNet types
-    # (New-VmSshTunnel). Define them as no-ops here so Pester's
+    # (Test-VmSshPort, Test-SshBanner) and Posh-SSH's Renci.SshNet
+    # types (New-VmSshTunnel). Define them as no-ops here so Pester's
     # Mock layer can replace them in Initialize-HyperVMocks.
     function Test-VmSshPort {
         param([string] $IpAddress, [int] $Port = 22)
         $false
+    }
+    # Banner-read gate the wait-for-SSH loop runs AFTER a successful
+    # Test-VmSshPort. Default to $true here so the canonical happy-path
+    # tests (which mock Test-VmSshPort to $true) reach $sshReady=$true
+    # without each test having to know about the new gate; tests that
+    # care about the false-positive-through-tunnel path override locally.
+    function Test-SshBanner {
+        param([string] $IpAddress, [int] $Port = 22,
+              [int] $TimeoutMilliseconds = 3000)
+        $true
     }
     function New-VmSshTunnel {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
@@ -158,6 +168,11 @@ BeforeAll {
         # method is a no-op, so the finally branch can call it without
         # touching the network.
         Mock Test-VmSshPort      { $false }
+        # Banner-read gate is reached only when Test-VmSshPort is $true
+        # (per-test override below). Default mock returns $true so the
+        # canonical happy path is gated only by the TCP probe; tests
+        # exercising the false-positive-through-tunnel branch override.
+        Mock Test-SshBanner      { $true }
         $script:_tunnelDisposed  = 0
         Mock New-VmSshTunnel     {
             $obj = [PSCustomObject]@{
@@ -651,6 +666,50 @@ Describe 'Invoke-VmCreation' {
                 Should -Throw
 
             Should -Invoke New-VmSshTunnel -Times 0 -Exactly
+        }
+
+        It 'keeps polling when TCP probe succeeds but the SSH banner does not arrive' {
+            # SSH.NET ForwardedPortLocal's TCP listener accepts the
+            # moment Start() returns, so Test-VmSshPort against the
+            # tunnel succeeds INSTANTLY against a workload whose own
+            # sshd is not yet serving. Without the banner-read gate,
+            # Invoke-VmPostProvisioning then runs a real SSH Connect()
+            # that dies with "no SSH identification string". Verify
+            # the loop polls until the banner read succeeds, not just
+            # until TCP accepts.
+            $script:_getVmCallCount = 0
+            Initialize-HyperVMocks
+            Mock Get-VM {
+                $script:_getVmCallCount++
+                $state = if ($script:_getVmCallCount -eq 1) {
+                    'Off'
+                } else {
+                    'Running'
+                }
+                [PSCustomObject]@{ State = $state }
+            }
+            Mock Test-VmSshPort { $true }
+            $script:_bannerCalls = 0
+            Mock Test-SshBanner {
+                $script:_bannerCalls++
+                # First two iterations: banner not present (workload
+                # still booting); third iteration: ready.
+                $script:_bannerCalls -ge 3
+            }
+
+            $workload = New-TestVm
+            Add-Member -InputObject $workload `
+                       -MemberType NoteProperty -Name '_RouterVm' `
+                       -Value ([PSCustomObject]@{
+                           ipAddress = '192.168.1.20'
+                           username  = 'routeradmin'
+                           password  = 'router-secret'
+                       })
+
+            Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E'
+
+            $script:_bannerCalls | Should -Be 3
+            Should -Invoke Test-VmSshPort -Times 3 -Exactly
         }
 
         It 'disposes the tunnel in the finally block when the poll times out' {
