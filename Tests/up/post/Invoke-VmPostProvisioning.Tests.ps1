@@ -83,15 +83,16 @@ BeforeAll {
         & $ScriptBlock $global:_PostProv_FakeServer
     }
 
-    # Resolve-RouterUpstreamHostIp is called by the orchestrator BEFORE
-    # Invoke-WithVmFileServer when _RouterVm is present, to derive a
-    # host bind IP on the same upstream LAN as the router's ext0.
-    # Default returns a sentinel; tests assert on the input IP.
-    $global:_PostProv_Calls['Resolve-RouterUpstreamHostIp'] = @()
-    function global:Resolve-RouterUpstreamHostIp {
-        param($RouterIpAddress)
-        $global:_PostProv_Calls['Resolve-RouterUpstreamHostIp'] += @{
-            RouterIpAddress = $RouterIpAddress
+    # Get-VmSwitchHostIp (Infrastructure.HyperV >= 0.11.0) is called by
+    # the orchestrator BEFORE Invoke-WithVmFileServer when _RouterVm is
+    # present, to derive a host bind IP on the same upstream LAN as the
+    # router's ext0. Default returns a sentinel; tests assert on the
+    # input IP.
+    $global:_PostProv_Calls['Get-VmSwitchHostIp'] = @()
+    function global:Get-VmSwitchHostIp {
+        param($VmIpAddress)
+        $global:_PostProv_Calls['Get-VmSwitchHostIp'] += @{
+            VmIpAddress = $VmIpAddress
         }
         '192.168.1.10'
     }
@@ -748,9 +749,9 @@ Describe 'Invoke-VmPostProvisioning' {
         It 'resolves the host IP from the router upstream IP when _RouterVm is stamped' {
             Invoke-VmPostProvisioning -Vm (New-VmWithRouter)
 
-            $calls = $global:_PostProv_Calls['Resolve-RouterUpstreamHostIp']
-            $calls.Count                | Should -Be 1
-            $calls[0].RouterIpAddress   | Should -Be '192.168.1.211'
+            $calls = $global:_PostProv_Calls['Get-VmSwitchHostIp']
+            $calls.Count               | Should -Be 1
+            $calls[0].VmIpAddress      | Should -Be '192.168.1.211'
         }
 
         It 'binds the file server with -HostIp (not -VmIpAddress) for a workload behind a router' {
@@ -770,7 +771,7 @@ Describe 'Invoke-VmPostProvisioning' {
             # original -VmIpAddress code path; no upstream resolve runs.
             Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
 
-            $global:_PostProv_Calls['Resolve-RouterUpstreamHostIp'].Count | Should -Be 0
+            $global:_PostProv_Calls['Get-VmSwitchHostIp'].Count | Should -Be 0
         }
     }
 }

@@ -210,46 +210,25 @@ function Invoke-VmCreation {
     # loop.
     $needsIpDiscovery = -not $Vm.PSObject.Properties['ipAddress']
     if ($needsIpDiscovery) {
+        # Get-VmKvpIpAddress (Infrastructure.HyperV >= 0.11.0) owns the
+        # polling loop, the VM-state guard, the IPv4 filter, and the
+        # deadline error surface. -OnPoll paints the inline progress
+        # dot so the operator sees the discovery is alive without the
+        # helper having to know about Write-Host. The discovered IP is
+        # stamped back onto $Vm so downstream consumers (this loop's
+        # SSH probe, the workload tunnel below) see a single source of
+        # truth.
         Write-Host "  Discovering ext0 IP via Hyper-V KVP ..." -NoNewline
-        $discoveredIp = $null
-        while ((Get-Date) -lt $deadline -and -not $discoveredIp) {
-            # Same VM-running guard as the SSH loop below. KVP only
-            # reports on a Running VM, so a stopped VM would loop
-            # silently here until the deadline.
-            $vmState = (Get-VM -Name $Vm.vmName).State
-            if ($vmState -ne 'Running') {
-                Write-Host ''
-                throw (
-                    "VM '$($Vm.vmName)' stopped unexpectedly " +
-                    "(state: $vmState) before its IP could be discovered. " +
-                    "Check the Hyper-V console."
-                )
-            }
-
-            # Match the external NIC by switch name. Router VMs have
-            # two NICs and Get-VMNetworkAdapter returns both; the
-            # downstream NIC is on the private switch, the upstream
-            # on the external one.
-            $extAdapter = @(Get-VMNetworkAdapter -VMName $Vm.vmName |
-                Where-Object { $_.SwitchName -eq $Vm.externalSwitchName })
-            if ($extAdapter.Count -gt 0) {
-                $discoveredIp = @($extAdapter[0].IPAddresses) |
-                    Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } |
-                    Select-Object -First 1
-            }
-            if (-not $discoveredIp) {
-                Write-Host '.' -NoNewline
-                Start-Sleep -Seconds $pollIntervalSeconds
-            }
-        }
-
-        if (-not $discoveredIp) {
+        try {
+            $discoveredIp = Get-VmKvpIpAddress `
+                                -VmName              $Vm.vmName `
+                                -SwitchName          $Vm.externalSwitchName `
+                                -TimeoutMinutes      $timeoutMinutes `
+                                -PollIntervalSeconds $pollIntervalSeconds `
+                                -OnPoll              { Write-Host '.' -NoNewline }
+        } catch {
             Write-Host ''
-            throw (
-                "Router VM '$($Vm.vmName)' did not report an ext0 IP via " +
-                "Hyper-V KVP within $timeoutMinutes minutes. Check the " +
-                "External vSwitch upstream connectivity."
-            )
+            throw
         }
 
         Add-Member -InputObject $Vm `

@@ -328,29 +328,18 @@ Describe 'provision.ps1 - jump host wiring (feature 53 step 3 follow-up)' {
     # tunnel through the router instead of trying (and failing) to
     # reach the workload IP directly.
 
-    It 'dot-sources Assert-SshNetLoaded.ps1 before the jump-aware helpers' {
-        # The jump-aware helpers call Assert-SshNetLoaded to fail fast
-        # when Posh-SSH (which bundles Renci.SshNet.dll) was not loaded.
-        # Dot-sourcing the guard AFTER its callers would not break
-        # execution order at runtime but would couple the load graph
-        # to luck - lock the order to keep diagnostics intact.
-        $text = Get-Content -Path $script:provisionPath -Raw
-        $text | Should -Match 'Assert-SshNetLoaded\.ps1'
-        $guardIdx  = $text.IndexOf('Assert-SshNetLoaded.ps1')
-        $tunnelIdx = $text.IndexOf('New-VmSshTunnel.ps1')
-        $jumpIdx   = $text.IndexOf('New-VmSshClientWithJump.ps1')
-        $guardIdx  | Should -BeLessThan $tunnelIdx
-        $guardIdx  | Should -BeLessThan $jumpIdx
-    }
-
-    It 'dot-sources New-VmSshTunnel.ps1' {
-        $text = Get-Content -Path $script:provisionPath -Raw
-        $text | Should -Match 'New-VmSshTunnel\.ps1'
-    }
-
-    It 'dot-sources New-VmSshClientWithJump.ps1' {
-        $text = Get-Content -Path $script:provisionPath -Raw
-        $text | Should -Match 'New-VmSshClientWithJump\.ps1'
+    It 'pins Infrastructure.HyperV to the version that exports the jump-aware SSH helpers' {
+        # New-VmSshTunnel / New-VmSshClientWithJump / Test-SshBanner
+        # moved into Infrastructure.HyperV >= 0.11.0; provision.ps1 no
+        # longer dot-sources them locally. Lock the MinimumVersion pin
+        # here so a future downgrade does not break the load graph
+        # silently (the helpers would resolve to whatever earlier
+        # version was already on PSGallery and we would only catch it
+        # at first jump-host invocation).
+        $depsPath = Join-Path (Split-Path $script:provisionPath -Parent) `
+            'Install-ModuleDependencies.ps1'
+        $depsText = Get-Content -Path $depsPath -Raw
+        $depsText | Should -Match "Infrastructure\.HyperV.*MinimumVersion\s+'0\.1[1-9]\.\d+'"
     }
 
     It 'stamps _RouterVm onto every workload in the network-setup loop' {

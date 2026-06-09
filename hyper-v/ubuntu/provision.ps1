@@ -50,11 +50,10 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common\config\Group-VmsByEnvironment.ps1"
 . "$PSScriptRoot\common\config\Read-VmProvisionerConfig.ps1"
 . "$PSScriptRoot\common\network\Remove-LegacySingletonNat.ps1"
-. "$PSScriptRoot\common\network\Resolve-RouterUpstreamHostIp.ps1"
-. "$PSScriptRoot\common\ssh\Assert-SshNetLoaded.ps1"
-. "$PSScriptRoot\common\ssh\New-VmSshTunnel.ps1"
-. "$PSScriptRoot\common\ssh\New-VmSshClientWithJump.ps1"
-. "$PSScriptRoot\common\ssh\Test-SshBanner.ps1"
+# SSH jump-host helpers (New-VmSshTunnel, New-VmSshClientWithJump,
+# Test-SshBanner) and the upstream-host-IP discovery (Get-VmSwitchHostIp)
+# live in Infrastructure.HyperV >= 0.11.0 - imported by
+# Install-ModuleDependencies above. No dot-source needed.
 . "$PSScriptRoot\up\config\Select-VmsForProvisioning.ps1"
 . "$PSScriptRoot\up\seed\iso.ps1"
 . "$PSScriptRoot\up\disk\Invoke-BaseImagePatch.ps1"

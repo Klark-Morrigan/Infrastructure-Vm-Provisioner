@@ -71,6 +71,24 @@ BeforeAll {
         $null
     }
 
+    # KVP IP-discovery helper now lives in Infrastructure.HyperV >= 0.11.0
+    # (extracted from create-vm.ps1's inline loop). The provisioner tests
+    # do not exercise the helper's polling internals - those have their
+    # own coverage in Infrastructure-HyperV/Tests/Get-VmKvpIpAddress.Tests.ps1.
+    # The stub returns a sentinel IP; per-test mocks override when a
+    # specific discovered address matters (e.g. the "writes the
+    # discovered IP back onto the VM def" test).
+    function Get-VmKvpIpAddress {
+        param(
+            [string]      $VmName,
+            [string]      $SwitchName,
+            [int]         $TimeoutMinutes,
+            [int]         $PollIntervalSeconds,
+            [scriptblock] $OnPoll
+        )
+        '192.168.1.42'
+    }
+
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\vm\create-vm.ps1"
 
     # Standard VM object satisfying all Invoke-VmCreation requirements.
@@ -470,11 +488,17 @@ Describe 'Invoke-VmCreation' {
         # later (provision.ps1 step 7 references _RouterVm.ipAddress)
         # finds it via the same object.
 
-        It 'queries Get-VMNetworkAdapter filtered to the external switch' {
+        It 'delegates to Get-VmKvpIpAddress with the external switch name' {
+            # KVP polling logic lives in Infrastructure.HyperV's
+            # Get-VmKvpIpAddress (its own test suite covers the
+            # state guard, IPv4 filter, deadline behaviour). What
+            # the provisioner must still own is the call - pass the
+            # router's vmName and externalSwitchName so the helper
+            # picks the right NIC on multi-adapter VMs.
             Initialize-HyperVMocks
             # Stateful Get-VM: Off for the post-creation guard, then
-            # Running for the discovery + SSH loops. Mirrors the
-            # pattern in the jump-host dispatch tests.
+            # Running for the SSH probe loop. Mirrors the pattern in
+            # the jump-host dispatch tests.
             $script:_getVmCallCount = 0
             Mock Get-VM {
                 $script:_getVmCallCount++
@@ -485,17 +509,10 @@ Describe 'Invoke-VmCreation' {
                 }
                 [PSCustomObject]@{ State = $state }
             }
-            # KVP returns the discovered IPv4 immediately.
-            Mock Get-VMNetworkAdapter {
-                @([PSCustomObject]@{
-                    SwitchName  = 'ExternalSwitch-Shared'
-                    IPAddresses = @('192.168.1.42', 'fe80::1234')
-                })
-            }
-            # SSH probe succeeds on the FIRST iteration so the test
-            # exits the loop cleanly without burning the full 10-min
-            # budget. Side benefit: probeIp is set to the discovered
-            # IP before this fires, so we can assert on it.
+            Mock Get-VmKvpIpAddress { '192.168.1.42' }
+            # Capture probe IP so we can verify it matches the
+            # KVP-returned address (one-iteration success keeps the
+            # SSH loop from sleeping).
             $script:_probedIpAfterDiscovery = $null
             Mock Test-VmSshPort {
                 param($IpAddress, $Port)
@@ -505,8 +522,9 @@ Describe 'Invoke-VmCreation' {
 
             Invoke-VmCreation -Vm (New-DhcpRouterTestVm) -SwitchName 'External'
 
-            Should -Invoke Get-VMNetworkAdapter -ParameterFilter {
-                $VMName -eq 'router-01'
+            Should -Invoke Get-VmKvpIpAddress -ParameterFilter {
+                $VmName -eq 'router-01' -and
+                $SwitchName -eq 'ExternalSwitch-Shared'
             }
             $script:_probedIpAfterDiscovery | Should -Be '192.168.1.42'
         }
@@ -523,13 +541,8 @@ Describe 'Invoke-VmCreation' {
                 }
                 [PSCustomObject]@{ State = $state }
             }
-            Mock Get-VMNetworkAdapter {
-                @([PSCustomObject]@{
-                    SwitchName  = 'ExternalSwitch-Shared'
-                    IPAddresses = @('192.168.42.99')
-                })
-            }
-            Mock Test-VmSshPort { $true }
+            Mock Get-VmKvpIpAddress { '192.168.42.99' }
+            Mock Test-VmSshPort     { $true }
 
             $vm = New-DhcpRouterTestVm
             Invoke-VmCreation -Vm $vm -SwitchName 'External'
@@ -541,32 +554,36 @@ Describe 'Invoke-VmCreation' {
             $vm.ipAddress                                | Should -Be '192.168.42.99'
         }
 
-        It 'throws with a router-specific message when KVP never reports an IP' {
-            # The Set-ExpiredDeadline mock keeps the discovery loop from
-            # actually running; the IP-discovery branch hits its own
-            # "did not report ... within N minutes" throw. The error
-            # text differs from the regular SSH-not-reachable throw so
-            # the operator can tell which budget ran out.
+        It 'propagates the Get-VmKvpIpAddress throw on discovery timeout' {
+            # The module helper owns the "did not report ... within N
+            # minutes" wording; the provisioner just lets it propagate.
+            # A bare 'throw' inside the Mock keeps the message intact
+            # rather than re-wrapping.
             Initialize-HyperVMocks
-            Set-ExpiredDeadline
-            # Default Get-VMNetworkAdapter returns an empty array.
+            Mock Get-VmKvpIpAddress {
+                throw "VM 'router-01' did not report an IPv4 address via Hyper-V KVP within 10 minute(s)."
+            }
 
             { Invoke-VmCreation -Vm (New-DhcpRouterTestVm) -SwitchName 'External' } |
-                Should -Throw -ExpectedMessage "*did not report an ext0 IP*"
+                Should -Throw -ExpectedMessage "*did not report an IPv4 address*"
         }
 
         It 'skips the discovery branch when the router VM has a static ipAddress' {
             # New-RouterTestVm carries ipAddress = '192.168.1.10', so
             # the discovery branch is bypassed. The SSH probe targets
             # the static IP directly. Set-ExpiredDeadline keeps the
-            # loop from running.
+            # loop from running. Mock Get-VmKvpIpAddress registers the
+            # function with Pester (required for Should -Invoke even
+            # at -Times 0) so a regression that re-introduces a call
+            # is caught here.
             Initialize-HyperVMocks
             Set-ExpiredDeadline
+            Mock Get-VmKvpIpAddress { '192.168.0.0' }
 
             { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'External' } |
                 Should -Throw -ExpectedMessage "*did not become reachable*"
 
-            Should -Invoke Get-VMNetworkAdapter -Times 0 -Exactly
+            Should -Invoke Get-VmKvpIpAddress -Times 0 -Exactly
         }
     }
 

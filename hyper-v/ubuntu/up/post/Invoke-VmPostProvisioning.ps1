@@ -365,8 +365,13 @@ function Invoke-VmPostProvisioning {
     # discovered upstream IP instead of the workload's unreachable one.
     $hasRouter = $Vm.PSObject.Properties['_RouterVm'] -and $Vm._RouterVm
     if ($hasRouter) {
-        $hostIp = Resolve-RouterUpstreamHostIp `
-                      -RouterIpAddress $Vm._RouterVm.ipAddress
+        # Get-VmSwitchHostIp resolves a host adapter on the same /24 as
+        # the supplied VM IP. Keyed off the router's discovered upstream
+        # address rather than the workload's unreachable private IP -
+        # the host's External vSwitch adapter shares that /24 by
+        # construction, so the file server binds where the router's
+        # MASQUERADE NAT can route workload traffic back.
+        $hostIp = Get-VmSwitchHostIp -VmIpAddress $Vm._RouterVm.ipAddress
         Invoke-WithVmFileServer -HostIp $hostIp -ScriptBlock $postBlock
     } else {
         Invoke-WithVmFileServer -VmIpAddress $vmIp -ScriptBlock $postBlock
