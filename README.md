@@ -19,6 +19,7 @@
   - [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables)
   - [Router VM (kind: router)](#router-vm-kind-router)
 - [provision.ps1](#provisionps1)
+- [Test-HostNetworkPreflight.ps1](#test-hostnetworkpreflightps1)
 - [Get-VmRuntimeDiag.ps1](#get-vmruntimediagps1)
 - [start-vms.ps1](#start-vmsps1)
 - [deprovision.ps1](#deprovisionps1)
@@ -816,14 +817,26 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
 7. **(always)** Per-environment network setup. For each router VM in
    the batch, ensures the External switch named in
    `externalSwitchName` exists (created on demand bound to
-   `externalAdapterName`) and the per-environment Private switch
-   named in `privateSwitchName` exists. Then runs an idempotent
-   cleanup of any legacy singleton-NAT state for the environment's
-   gateway IP - any `New-NetNat` whose prefix covers the gateway,
-   and any host vNIC carrying that IP, are removed. Safe to re-run
-   against a partially-migrated host. The whole step is idempotent,
-   so it runs even when only existing VMs are being reconciled so
-   a rebuilt host gets the network re-applied. See
+   `externalAdapterName`). Immediately after, **gates on a
+   host-side network preflight** (`Assert-HostNetworkPreflight`)
+   that throws on any of: missing/wrong-type switch, host vNIC down
+   or unbound, Internal vSwitch sharing MAC with a Wi-Fi adapter
+   (stale config from an unfinished External -> Internal+ICS
+   migration), External vSwitch bridged to Wi-Fi (guaranteed
+   host-vs-VM IP collision via shared MAC at the AP), missing
+   connected route, or IP collision between host vNIC and any VM
+   on that switch. Failing fast here saves the 10-minute
+   wait-for-SSH burn the misconfigured host would otherwise pay.
+   See [`Test-HostNetworkPreflight.ps1`](#test-hostnetworkpreflightps1)
+   for the manual entry point with the same checks. Then ensures
+   the per-environment Private switch named in `privateSwitchName`
+   exists, and runs an idempotent cleanup of any legacy
+   singleton-NAT state for the environment's gateway IP - any
+   `New-NetNat` whose prefix covers the gateway, and any host vNIC
+   carrying that IP, are removed. Safe to re-run against a
+   partially-migrated host. The whole step is idempotent, so it
+   runs even when only existing VMs are being reconciled so a
+   rebuilt host gets the network re-applied. See
    [Networking](#networking) for the resulting topology.
 8. **(new VMs only)** Creates each VM (Gen 2, static RAM, VHDX from
    step 4), sets Secure Boot to `MicrosoftUEFICertificateAuthority`
@@ -933,6 +946,38 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
     sourcing `/etc/profile.d/`. Login shells pick the same dir up
     automatically because `DotnetSdkProvider`'s `/etc/profile.d/dotnet.sh`
     prepends `DOTNET_TOOLS_ROOT` to `PATH`.
+
+---
+
+## Test-HostNetworkPreflight.ps1
+
+Run as Administrator to sanity-check the host's Hyper-V networking
+before kicking off `provision.ps1`, or after any host networking
+change (switch recreate, ICS toggle, Wi-Fi LAN change).
+
+```powershell
+.\scripts\Test-HostNetworkPreflight.ps1
+```
+
+Thin wrapper around `Assert-HostNetworkPreflight` that
+`provision.ps1` step 7 already fires automatically before VM
+creation. Surfaces the same checks as a standalone command so the
+operator can confirm a clean host without committing to a full
+provisioning run.
+
+**Checks (PASS / WARN / FAIL inline; non-zero exit on any FAIL):**
+
+| # | Check | Smoking-gun failure mode it catches |
+|---|---|---|
+| 1 | External vSwitch exists, recognized SwitchType | Switch missing, or accidentally Private (no upstream egress) |
+| 2 | Host vNIC `vEthernet (<switch>)` Up + IPv4 | ICS flipped off, switch torn down without recreate |
+| 3 | Switch-type-specific MAC story | **Internal**: vEthernet MAC matches a Wi-Fi NIC -> stale config (forgot to recreate as Internal after External -> ICS migration). **External**: vEthernet MAC matches a Wi-Fi NIC -> Hyper-V is MAC-translating every VM's egress to the host's Wi-Fi MAC, so the AP gives the host vNIC and every VM the same DHCP lease and they collide on the same IP. |
+| 4 | Connected route to host vNIC subnet via that vNIC | Route missing -> host routes VM-subnet traffic out the Wi-Fi default gateway by mistake (the "duplicate-IP / SourceAddress=WiFi" symptom). |
+| 5 | No IP collision between host vNIC and any VM on the switch | The Wi-Fi External-bridge MAC-sharing smoking gun -> host steals VM traffic via local routing. |
+
+`SwitchName` defaults to `ExternalSwitch-Shared` to match the
+provisioner's secret.json convention; override with
+`-SwitchName <name>` when probing a custom-named switch.
 
 ---
 
@@ -1109,6 +1154,7 @@ Infrastructure-VM-Provisioner/
 |     |  |  |- Get-VmDiagFolder.ps1          # Pure helper: the single source of truth for <vhdPath>/diagnostics/<vmName>/<timestamp>/ - every diag artifact (console.log, cloud-init-*.txt, ssh.log, runtime-diag.log) lands at the same path.
 |     |  |  `- Invoke-VmRuntimeDiag.ps1      # Host-side + best-effort guest-side runtime snapshot. Auto-fires from create-vm.ps1's wait-for-SSH and router-side reachability timeout paths. Manual entry point: scripts\Get-VmRuntimeDiag.ps1.
 |     |  `- network/
+|     |     |- Assert-HostNetworkPreflight.ps1 # Five host-side network checks (switch type, vNIC up + IP, MAC story, connected route, host-vs-VM IP collision). Throws on FAIL. Gate at provision.ps1 step 7; manual entry point: scripts\Test-HostNetworkPreflight.ps1.
 |     |     `- Remove-LegacySingletonNat.ps1 # Idempotent NetNat + host vNIC cleanup at a given gateway IP. Shared by Invoke-NetworkSetup (provision) and Invoke-NetworkTeardown (deprovision); also exports Test-IpInPrefix.
 |     |- up/
 |     |  |- config/
@@ -1178,7 +1224,8 @@ Infrastructure-VM-Provisioner/
 |- scripts/
 |  |- Run-Tests.ps1                       # Unit-test runner (delegates to PowerShell-Common)
 |  |- Run-IntegrationTests.ps1            # Docker-host integration runner (delegates to PowerShell-Common)
-|  `- Run-IntegrationTests-AgainstDockerTarget.ps1  # Docker-target integration runner
+|  |- Run-IntegrationTests-AgainstDockerTarget.ps1  # Docker-target integration runner
+|  |- Test-HostNetworkPreflight.ps1       # Manual entry point: host-side network sanity-check (Assert-HostNetworkPreflight)
 |  `- Get-VmRuntimeDiag.ps1               # Manual entry point: host + guest runtime diag snapshot (Invoke-VmRuntimeDiag)
 `- README.md
 ```

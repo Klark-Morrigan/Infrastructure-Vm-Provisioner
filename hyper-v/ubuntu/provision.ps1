@@ -51,6 +51,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common\config\Read-VmProvisionerConfig.ps1"
 . "$PSScriptRoot\common\diag\Get-VmDiagFolder.ps1"
 . "$PSScriptRoot\common\diag\Invoke-VmRuntimeDiag.ps1"
+. "$PSScriptRoot\common\network\Assert-HostNetworkPreflight.ps1"
 . "$PSScriptRoot\common\network\Assert-WorkloadReachableViaRouter.ps1"
 . "$PSScriptRoot\common\network\Remove-LegacySingletonNat.ps1"
 . "$PSScriptRoot\common\network\Resolve-ExistingRouterIp.ps1"
@@ -324,6 +325,15 @@ try {
             # no point creating the private switch that depends on it.
             Ensure-ExternalSwitch -Name           $routerVm.externalSwitchName `
                                   -NetAdapterName $routerVm.externalAdapterName
+
+            # Gate on host-side network sanity BEFORE Invoke-NetworkSetup
+            # / Resolve-ExistingRouterIp / VM creation. Catches the
+            # WiFi-MAC-collision and ICS-DHCP-drift failure modes (plus
+            # any other obviously-broken host state) in seconds, instead
+            # of after a 10-minute wait-for-SSH timeout. Throws on FAIL
+            # with an actionable message; PASS/WARN do not abort.
+            Assert-HostNetworkPreflight -SwitchName $routerVm.externalSwitchName
+
             Ensure-PrivateSwitch -Name $routerVm.privateSwitchName
 
             # Cleanup runs even for a router-only env so a stale host-
