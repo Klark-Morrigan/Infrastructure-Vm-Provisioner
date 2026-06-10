@@ -8,6 +8,10 @@ BeforeAll {
     function Get-NetRoute          { param([string]$DestinationPrefix, $ErrorAction) }
     function Get-VMNetworkAdapter  { param([switch]$All, $ErrorAction) }
 
+    # Pure adapter-IPv4 extractor - dot-source the real one so the
+    # IP-collision check's StrictMode-safety contract is exercised
+    # end-to-end, not stubbed.
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\common\network\Get-VmAdapterIPv4.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\common\network\Assert-HostNetworkPreflight.ps1"
 
     function New-IcsVNic {
@@ -326,6 +330,32 @@ Describe 'Assert-HostNetworkPreflight' {
 
             { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } |
                 Should -Not -Throw
+        }
+
+        It 'tolerates a VMNetworkAdapter object with no IPAddresses property at all (StrictMode-safe)' {
+            # Real-world: stopped VMs and Management OS adapters
+            # return VMNetworkAdapter objects that lack the
+            # IPAddresses property entirely. Under
+            # Set-StrictMode -Version Latest (set by the entry
+            # script), accessing a missing property terminates
+            # the script. Lock in the PSObject.Properties guard.
+            Initialize-HappyMocks
+            Mock Get-VMNetworkAdapter {
+                @(
+                    [PSCustomObject]@{
+                        SwitchName = 'ExternalSwitch-Shared'
+                        # NOTE: no IPAddresses property at all.
+                    }
+                )
+            }
+
+            Set-StrictMode -Version Latest
+            try {
+                { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } |
+                    Should -Not -Throw
+            } finally {
+                Set-StrictMode -Off
+            }
         }
     }
 

@@ -191,9 +191,7 @@ function Assert-HostNetworkPreflight {
     if ($vIp) {
         $vmsOnSwitch = Get-VMNetworkAdapter -All -ErrorAction SilentlyContinue |
                        Where-Object SwitchName -eq $SwitchName
-        $vmIps = @($vmsOnSwitch |
-            ForEach-Object { $_.IPAddresses } |
-            Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' })
+        $vmIps = @(Get-VmAdapterIPv4 -Adapter $vmsOnSwitch)
 
         if ($vmIps | Where-Object { $_ -eq $vIp.IPAddress }) {
             Add-Finding FAIL "No IP collision with VMs on '$SwitchName'" `

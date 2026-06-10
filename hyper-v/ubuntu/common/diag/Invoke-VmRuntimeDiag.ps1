@@ -145,10 +145,11 @@ function Get-VmRuntimeDiagHostSide {
     # Walk every IPv4 the VM has held (per Hyper-V integration services)
     # and dump the host's neighbor cache for each. Incomplete/Stale entries
     # tell us the VM stopped answering ARP at those addresses (typical
-    # ICS-drift symptom: old IP is Stale, new IP is Reachable).
-    $vmIps = @($vmNics |
-        Select-Object -ExpandProperty IPAddresses |
-        Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' })
+    # ICS-drift symptom: old IP is Stale, new IP is Reachable). The
+    # Get-VmAdapterIPv4 helper carries the StrictMode-safe IPAddresses
+    # access pattern; see its docstring for the IPv4-only / property-
+    # guard rationale.
+    $vmIps = @(Get-VmAdapterIPv4 -Adapter $vmNics)
 
     if ($vmIps.Count -gt 0) {
         "=== Get-NetNeighbor for VM IPs ===" | Out-File $OutputPath -Append

@@ -14,10 +14,13 @@ BeforeAll {
     function New-VmSshClientWithJump { param($Vm, $Timeout) }
     function Invoke-SshClientCommand { param($SshClient, $Command) }
 
-    # Get-VmDiagFolder is a pure path helper - dot-source the real one
-    # rather than stub, so the orchestrator's path-shape assertions
-    # exercise the actual contract.
+    # Pure helpers - dot-source the real implementations so the
+    # orchestrator and host-side capture exercise the actual
+    # contracts. Get-VmDiagFolder owns the diag-folder path shape;
+    # Get-VmAdapterIPv4 owns the StrictMode-safe IPAddresses
+    # access pattern.
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\common\diag\Get-VmDiagFolder.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\common\network\Get-VmAdapterIPv4.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\common\diag\Invoke-VmRuntimeDiag.ps1"
 
     function New-TestVm {
@@ -162,6 +165,38 @@ Describe 'Get-VmRuntimeDiagHostSide' {
         Should -Invoke Get-NetRoute    -Times 0
     }
 
+    It 'tolerates a VMNetworkAdapter with no IPAddresses property under StrictMode' {
+        # Real-world: stopped VMs / Management OS adapters return
+        # VMNetworkAdapter objects without the IPAddresses property
+        # at all. Under Set-StrictMode -Version Latest + Stop, the
+        # accessor terminates the capture. Lock in the
+        # PSObject.Properties guard so the runtime diag still
+        # produces a host-side log even in that case.
+        Mock Get-VM               { [PSCustomObject]@{ Name = 'router-e2e' } }
+        Mock Get-VMNetworkAdapter {
+            @(
+                [PSCustomObject]@{
+                    Name        = 'Network Adapter'
+                    SwitchName  = 'ExternalSwitch-Shared'
+                    MacAddress  = '020AB2FED200'
+                    Status      = @('Ok')
+                    # NOTE: no IPAddresses property at all.
+                }
+            )
+        }
+        Mock Get-NetIPConfiguration { }
+        Mock Get-NetNeighbor        { }
+        Mock Get-NetRoute           { }
+
+        Set-StrictMode -Version Latest
+        try {
+            { Get-VmRuntimeDiagHostSide -Vm (New-TestVm) -OutputPath $script:logPath } |
+                Should -Not -Throw
+        } finally {
+            Set-StrictMode -Off
+        }
+    }
+
     It 'tolerates the VM being absent from Hyper-V (Get-VM returns nothing)' {
         # SilentlyContinue keeps Get-VM/Get-VMNetworkAdapter from
         # throwing when the VM is gone; the diag still emits its
@@ -269,11 +304,10 @@ Describe 'Invoke-VmRuntimeDiag (orchestrator)' {
     It 'invokes the guest-side capture when SSH opens cleanly' {
         Mock Get-VmRuntimeDiagHostSide  { }
         Mock Get-VmRuntimeDiagGuestSide { }
-        $disposed = $false
         Mock New-VmSshClientWithJump {
             $obj = [PSCustomObject]@{ Client = [PSCustomObject]@{ Connected = $true } }
             $obj | Add-Member -MemberType ScriptMethod -Name Dispose `
-                              -Value { $script:_disposed = $true } -PassThru -Force
+                              -Value { } -PassThru -Force
         }
 
         $vm = [PSCustomObject]@{ vmName = 'router-e2e' }
