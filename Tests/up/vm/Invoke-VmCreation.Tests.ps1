@@ -541,31 +541,34 @@ Describe 'Invoke-VmCreation' {
         # Running it throws immediately rather than waiting out the timeout,
         # avoiding a 10-minute wait when the VM has already crashed.
 
-        It 'throws immediately when the VM state is not Running' {
+        It 'passes a non-null OnPoll callback to Wait-VmSshBannerReachable' {
+            # The polling loop's per-iteration "VM still Running?"
+            # check is Hyper-V-specific and lives in the OnPoll
+            # callback create-vm.ps1 hands to the helper. Verify the
+            # callback is non-null via Pester's parameter filter -
+            # DO NOT actually fire it from inside a Pester Mock body.
+            # The OnPoll closure resolves Get-VM via the calling
+            # session state, NOT the test's per-It Mock layer, so a
+            # fired closure inside a Mock body silently calls the
+            # real Hyper-V Get-VM cmdlet - which emits "permission
+            # denied" to stderr on any non-admin runner (CI, dev
+            # boxes without Hyper-V Administrators membership) even
+            # though the test itself passes.
+            #
+            # The callback's BEHAVIOUR (firing Get-VM and throwing on
+            # non-Running state) is covered by
+            # Tests\common\ssh\Wait-VmSshBannerReachable.Tests.ps1's
+            # "propagates an OnPoll throw" test running against the
+            # real helper, not a Pester Mock - the closure-vs-Mock
+            # interaction does not bite there.
             Initialize-HyperVMocks
 
-            # Return a date far enough in the future that the deadline
-            # (date + 10 min) does not overflow and the loop body executes
-            # at least once before the state check fires.
-            Mock Get-Date { [datetime]'2099-01-01' }
-            Mock Get-VM   { [PSCustomObject]@{ State = 'Off' } }
-            # Override the default Wait-VmSshBannerReachable Mock so it
-            # fires OnPoll - that is the seam the "VM stopped
-            # unexpectedly" check rides. The default Mock in
-            # Initialize-HyperVMocks skips OnPoll because closure +
-            # Pester-Mock-body scope interactions silently see empty
-            # state on stateful Get-VM Mocks; this test uses an
-            # unconditional Off, so the closure-scope issue does not
-            # bite.
-            Mock Wait-VmSshBannerReachable {
-                param([string] $IpAddress, [int] $Port, [datetime] $Deadline,
-                      [int] $PollIntervalSeconds, [scriptblock] $OnPoll)
-                if ($null -ne $OnPoll) { & $OnPoll }
-                $true
-            }
+            Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN'
 
-            { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
-                Should -Throw -ExpectedMessage '*stopped unexpectedly*'
+            Should -Invoke Wait-VmSshBannerReachable -Times 1 -Exactly `
+                -ParameterFilter {
+                    $null -ne $OnPoll -and $OnPoll -is [scriptblock]
+                }
         }
     }
 
@@ -785,33 +788,6 @@ Describe 'Invoke-VmCreation' {
                 Should -Throw
 
             Should -Invoke New-VmSshTunnel -Times 0 -Exactly
-        }
-
-        It 'passes a non-null OnPoll callback to Wait-VmSshBannerReachable' {
-            # The polling loop's per-iteration "VM still Running?"
-            # check is Hyper-V-specific and lives in the OnPoll
-            # callback create-vm.ps1 hands to the helper. Verify the
-            # callback is non-null on every invocation. The
-            # callback's BEHAVIOUR (the Get-VM lookup + the
-            # "stopped unexpectedly" throw) is covered by the
-            # "throws immediately when the VM state is not Running"
-            # test in the VM-state context above - asserting it
-            # again here would require running the closure outside
-            # its captured-Pester-Mock scope, where Get-VM no longer
-            # resolves to the per-test Mock.
-            Initialize-HyperVMocks
-            $script:_capturedOnPoll = $null
-            Mock Wait-VmSshBannerReachable {
-                param([string] $IpAddress, [int] $Port, [datetime] $Deadline,
-                      [int] $PollIntervalSeconds, [scriptblock] $OnPoll)
-                $script:_capturedOnPoll = $OnPoll
-                $true
-            }
-
-            Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN'
-
-            $script:_capturedOnPoll | Should -Not -BeNullOrEmpty
-            $script:_capturedOnPoll | Should -BeOfType [scriptblock]
         }
 
         It 'delegates to Assert-WorkloadReachableViaRouter with the tunnel''s JumpClient and the workload IP' {
