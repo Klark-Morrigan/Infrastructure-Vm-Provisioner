@@ -263,6 +263,38 @@ function Invoke-VmCreation {
     }
 
     try {
+        # Router-side reachability gate. Owns the polling probe plus
+        # the diag bundle capture on failure - see
+        # common\network\Assert-WorkloadReachableViaRouter.ps1 for
+        # the full contract. Lives inside the try block so a gate
+        # throw still disposes the tunnel + serial console capture
+        # via the finally below.
+        if ($hasRouter) {
+            $diagFolder = Join-Path $Vm.vmConfigPath 'diagnostics'
+            $diagFolder = Join-Path $diagFolder $Vm.vmName
+            $diagFolder = Join-Path $diagFolder $Vm._diagTimestamp
+            Assert-WorkloadReachableViaRouter `
+                -JumpClient      $sshTunnel.JumpClient `
+                -WorkloadIp      $Vm.ipAddress `
+                -WorkloadVmName  $Vm.vmName `
+                -RouterVmName    $Vm._RouterVm.vmName `
+                -DiagFolder      $diagFolder `
+                -OnPoll          {
+                    # Hyper-V VM-state check is the caller's concern;
+                    # the helper stays generic. A non-Running state
+                    # means the workload crashed / shut itself off
+                    # before its sshd could come up - no point
+                    # waiting out the gate's full budget.
+                    $vmState = (Get-VM -Name $Vm.vmName).State
+                    if ($vmState -ne 'Running') {
+                        throw (
+                            "VM '$($Vm.vmName)' stopped unexpectedly " +
+                            "(state: $vmState) during router-side probe."
+                        )
+                    }
+                }.GetNewClosure()
+        }
+
         Write-Host "  Polling SSH on $($Vm.vmName) ..." -NoNewline
 
         while ((Get-Date) -lt $deadline) {

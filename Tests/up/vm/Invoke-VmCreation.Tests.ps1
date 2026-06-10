@@ -57,6 +57,18 @@ BeforeAll {
               [int] $TimeoutMilliseconds = 3000)
         $true
     }
+    # Assert-WorkloadReachableViaRouter is the router-side reachability
+    # gate that runs the nc-banner-read probe + diag bundle capture.
+    # Stub it here so Invoke-VmCreation tests do not have to know
+    # about its internals (the helper has its own focused test file).
+    # Default is a no-op success; tests that need the failure branch
+    # override with `Mock ... { throw ... }`.
+    function Assert-WorkloadReachableViaRouter {
+        param(
+            $JumpClient, $WorkloadIp, $WorkloadVmName, $RouterVmName,
+            $DiagFolder, $TimeoutSeconds, $PollIntervalSeconds, $OnPoll
+        )
+    }
     function New-VmSshTunnel {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
             'PSAvoidUsingPlainTextForPassword', 'JumpPassword')]
@@ -194,8 +206,11 @@ BeforeAll {
         $script:_tunnelDisposed  = 0
         Mock New-VmSshTunnel     {
             $obj = [PSCustomObject]@{
-                LocalHost = '127.0.0.1'
-                LocalPort = 12345
+                LocalHost  = '127.0.0.1'
+                LocalPort  = 12345
+                # Sentinel JumpClient - real tests assert via Should-Invoke
+                # on Invoke-SshClientCommand rather than inspecting this.
+                JumpClient = [PSCustomObject]@{ _stub = 'jump-client' }
             }
             Add-Member -InputObject $obj -MemberType ScriptMethod `
                        -Name Dispose -Value {
@@ -203,6 +218,11 @@ BeforeAll {
             }
             $obj
         }
+        # Router-side reachability gate. Default is a silent success
+        # so the canonical happy-path tests reach the host-side poll
+        # without each having to know about this gate. Tests that
+        # exercise the failure-mode wiring override with a throw.
+        Mock Assert-WorkloadReachableViaRouter { }
     }
 
     # Makes the SSH polling loop body never execute by returning a
@@ -610,6 +630,7 @@ Describe 'Invoke-VmCreation' {
             Add-Member -InputObject $workload `
                        -MemberType NoteProperty -Name '_RouterVm' `
                        -Value ([PSCustomObject]@{
+                           vmName    = 'router-prod'
                            ipAddress = '192.168.1.20'
                            username  = 'routeradmin'
                            password  = 'router-secret'
@@ -661,6 +682,7 @@ Describe 'Invoke-VmCreation' {
             Add-Member -InputObject $workload `
                        -MemberType NoteProperty -Name '_RouterVm' `
                        -Value ([PSCustomObject]@{
+                           vmName    = 'router-prod'
                            ipAddress = '192.168.1.20'
                            username  = 'routeradmin'
                            password  = 'router-secret'
@@ -718,6 +740,7 @@ Describe 'Invoke-VmCreation' {
             Add-Member -InputObject $workload `
                        -MemberType NoteProperty -Name '_RouterVm' `
                        -Value ([PSCustomObject]@{
+                           vmName    = 'router-prod'
                            ipAddress = '192.168.1.20'
                            username  = 'routeradmin'
                            password  = 'router-secret'
@@ -727,6 +750,86 @@ Describe 'Invoke-VmCreation' {
 
             $script:_bannerCalls | Should -Be 3
             Should -Invoke Test-VmSshPort -Times 3 -Exactly
+        }
+
+        It 'delegates to Assert-WorkloadReachableViaRouter with the tunnel''s JumpClient and the workload IP' {
+            # The gate's internals (probe shape, diag capture, hints)
+            # have their own tests in Tests\common\network\Assert-
+            # WorkloadReachableViaRouter.Tests.ps1. Here we assert the
+            # wiring from Invoke-VmCreation: the workload IP, vmName,
+            # router vmName, and the JumpClient we got back from
+            # New-VmSshTunnel all flow into the helper.
+            $script:_getVmCallCount = 0
+            Initialize-HyperVMocks
+            Mock Get-VM {
+                $script:_getVmCallCount++
+                $state = if ($script:_getVmCallCount -eq 1) { 'Off' } else { 'Running' }
+                [PSCustomObject]@{ State = $state }
+            }
+            Mock Test-VmSshPort { $true }
+
+            $workload = New-TestVm
+            Add-Member -InputObject $workload `
+                       -MemberType NoteProperty -Name '_RouterVm' `
+                       -Value ([PSCustomObject]@{
+                           vmName    = 'router-prod'
+                           ipAddress = '192.168.1.20'
+                           username  = 'routeradmin'
+                           password  = 'router-secret'
+                       })
+
+            Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E'
+
+            Should -Invoke Assert-WorkloadReachableViaRouter -Times 1 -Exactly `
+                -ParameterFilter {
+                    $WorkloadIp     -eq '192.168.1.10' -and
+                    $WorkloadVmName -eq 'node-01'     -and
+                    $RouterVmName   -eq 'router-prod' -and
+                    $JumpClient._stub -eq 'jump-client'
+                }
+        }
+
+        It 'fails fast with the helper''s throw when it rejects reachability' {
+            # The gate's own tests cover the message-shaping and diag-
+            # capture branches. Here we just confirm the orchestrator
+            # surfaces a helper throw to the caller as-is, instead of
+            # swallowing it and falling through to the host-side poll.
+            $script:_getVmCallCount = 0
+            Initialize-HyperVMocks
+            Mock Get-VM {
+                $script:_getVmCallCount++
+                $state = if ($script:_getVmCallCount -eq 1) { 'Off' } else { 'Running' }
+                [PSCustomObject]@{ State = $state }
+            }
+            Mock Assert-WorkloadReachableViaRouter {
+                throw "Router 'router-prod' cannot reach workload 'node-01' at 192.168.1.10:22 within 300 seconds."
+            }
+
+            $workload = New-TestVm
+            Add-Member -InputObject $workload `
+                       -MemberType NoteProperty -Name '_RouterVm' `
+                       -Value ([PSCustomObject]@{
+                           vmName    = 'router-prod'
+                           ipAddress = '192.168.1.20'
+                           username  = 'routeradmin'
+                           password  = 'router-secret'
+                       })
+
+            { Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E' } |
+                Should -Throw -ExpectedMessage "*Router 'router-prod' cannot reach workload*"
+        }
+
+        It 'does NOT run the router-side gate for direct (no _RouterVm) targets' {
+            # Router VMs and any pre-feature-53 caller take the no-tunnel
+            # branch above; the gate is tunnel-specific and must not fire
+            # for them.
+            Initialize-HyperVMocks
+            Set-ExpiredDeadline
+
+            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'External' } |
+                Should -Throw
+
+            Should -Invoke Assert-WorkloadReachableViaRouter -Times 0 -Exactly
         }
 
         It 'disposes the tunnel in the finally block when the poll times out' {
@@ -741,6 +844,7 @@ Describe 'Invoke-VmCreation' {
             Add-Member -InputObject $workload `
                        -MemberType NoteProperty -Name '_RouterVm' `
                        -Value ([PSCustomObject]@{
+                           vmName    = 'router-prod'
                            ipAddress = '192.168.1.20'
                            username  = 'routeradmin'
                            password  = 'router-secret'
