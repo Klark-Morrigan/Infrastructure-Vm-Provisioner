@@ -273,93 +273,69 @@ function Invoke-VmCreation {
             $diagFolder = Join-Path $Vm.vmConfigPath 'diagnostics'
             $diagFolder = Join-Path $diagFolder $Vm.vmName
             $diagFolder = Join-Path $diagFolder $Vm._diagTimestamp
+            # Hyper-V VM-state check is the caller's concern; the
+            # helper stays generic. A non-Running state means the
+            # workload crashed / shut itself off before its sshd could
+            # come up - no point waiting out the gate's full budget.
+            # Closes over a plain string ($vmName) so the callback
+            # works regardless of which module/session state the
+            # helper invokes it from.
+            $vmName     = $Vm.vmName
+            $gateOnPoll = {
+                $vmState = (Get-VM -Name $vmName).State
+                if ($vmState -ne 'Running') {
+                    throw (
+                        "VM '$vmName' stopped unexpectedly " +
+                        "(state: $vmState) during router-side probe."
+                    )
+                }
+            }.GetNewClosure()
             Assert-WorkloadReachableViaRouter `
                 -JumpClient      $sshTunnel.JumpClient `
                 -WorkloadIp      $Vm.ipAddress `
                 -WorkloadVmName  $Vm.vmName `
                 -RouterVmName    $Vm._RouterVm.vmName `
                 -DiagFolder      $diagFolder `
-                -OnPoll          {
-                    # Hyper-V VM-state check is the caller's concern;
-                    # the helper stays generic. A non-Running state
-                    # means the workload crashed / shut itself off
-                    # before its sshd could come up - no point
-                    # waiting out the gate's full budget.
-                    $vmState = (Get-VM -Name $Vm.vmName).State
-                    if ($vmState -ne 'Running') {
-                        throw (
-                            "VM '$($Vm.vmName)' stopped unexpectedly " +
-                            "(state: $vmState) during router-side probe."
-                        )
-                    }
-                }.GetNewClosure()
+                -OnPoll          $gateOnPoll
         }
 
         Write-Host "  Polling SSH on $($Vm.vmName) ..." -NoNewline
 
-        while ((Get-Date) -lt $deadline) {
-            # Abort early if the VM is no longer running - no point waiting
-            # out the full timeout if it has already crashed or shut down.
-            $vmState = (Get-VM -Name $Vm.vmName).State
+        # Wait-VmSshBannerReachable owns the TCP+banner gate and the
+        # progress-dot cadence; the OnPoll callback below carries the
+        # Hyper-V "VM no longer Running" early-exit check that does not
+        # belong in a generic SSH waiter. The callback closes over a
+        # plain string ($vmName) instead of $Vm.vmName so we are not
+        # dependent on .GetNewClosure() capturing a PSCustomObject -
+        # callbacks invoked from a different module/session state see
+        # the script-block-local string the same way regardless.
+        $vmName = $Vm.vmName
+        $onPollVmState = {
+            $vmState = (Get-VM -Name $vmName).State
             if ($vmState -ne 'Running') {
                 Write-Host ''
                 throw (
-                    "VM '$($Vm.vmName)' stopped unexpectedly " +
+                    "VM '$vmName' stopped unexpectedly " +
                     "(state: $vmState). Check the Hyper-V console."
                 )
             }
+        }.GetNewClosure()
+        $sshReady = Wait-VmSshBannerReachable `
+                        -IpAddress           $probeIp `
+                        -Port                $probePort `
+                        -Deadline            $deadline `
+                        -PollIntervalSeconds $pollIntervalSeconds `
+                        -OnPoll              $onPollVmState
 
-            if (Test-VmSshPort -IpAddress $probeIp -Port $probePort) {
-                # Through a tunnel, TCP accepts the moment SSH.NET's
-                # ForwardedPortLocal listener binds - true says nothing
-                # about the workload's own sshd. Banner-read confirms
-                # the far end is actually serving SSH so the next
-                # consumer (Invoke-VmPostProvisioning's SSH connect)
-                # does not race against a still-booting workload and
-                # die with "no SSH identification string". Direct
-                # probes against a known-good IP take the same banner
-                # check uniformly; the cost is one extra round trip
-                # per success.
-                if (Test-SshBanner -IpAddress $probeIp -Port $probePort) {
-                    $sshReady = $true
-                    break
-                }
-            }
-
-            Write-Host '.' -NoNewline
-            Start-Sleep -Seconds $pollIntervalSeconds
-        }
-
-        # Elapsed-time tail on the same line as the dots. Colour
-        # encodes outcome at a glance:
-        #   - Success: elapsed shifts green -> orange as the ratio
-        #     to the budget climbs. The budget itself is uncoloured
-        #     because we did not hit it; colouring it would compete
-        #     with the gradient for the eye.
-        #   - Timeout: BOTH numbers go red. Elapsed because that
-        #     is the time we burned; budget because that is what
-        #     we ran out of. Two reds carry the "we hit the cap"
-        #     reading from a metre away.
+        # Elapsed-time tail on the same line as the dots. Outcome-
+        # encoded gradient lives in Format-ElapsedBudgetWithGradient.
         $totalSeconds = $timeoutMinutes * 60
         $elapsedSecs  = [int]([Math]::Round(
             ((Get-Date) - $startTime).TotalSeconds))
-        if ($sshReady) {
-            $ratio = [Math]::Min(1.0,
-                [double]$elapsedSecs / [double]$totalSeconds)
-            # Linear blend (80,200,80) -> (255,165,0): green at ratio 0,
-            # orange at ratio 1.
-            $r = [int][Math]::Round( 80 + $ratio * (255 -  80))
-            $g = [int][Math]::Round(200 + $ratio * (165 - 200))
-            $b = [int][Math]::Round( 80 + $ratio * (  0 -  80))
-            $elapsedColored = "`e[38;2;$r;$g;${b}m${elapsedSecs}s`e[0m"
-            $timeoutColored = "${totalSeconds}s"
-        }
-        else {
-            $red            = '38;2;220;70;70'
-            $elapsedColored = "`e[${red}m${elapsedSecs}s`e[0m"
-            $timeoutColored = "`e[${red}m${totalSeconds}s`e[0m"
-        }
-        Write-Host " $elapsedColored / $timeoutColored"
+        Write-Host (' ' + (Format-ElapsedBudgetWithGradient `
+                              -ElapsedSeconds $elapsedSecs `
+                              -BudgetSeconds  $totalSeconds `
+                              -Succeeded      $sshReady))
 
         if (-not $sshReady) {
             throw (
@@ -384,19 +360,7 @@ function Invoke-VmCreation {
         # down-first case.
         Stop-SerialConsoleCapture -Capture $consoleCapture
 
-        # Remove-VMDvdDrive detaches before Remove-Item deletes - deleting a
-        # file still attached leaves a broken DVD drive reference in the VM.
-        $dvdDrive = Get-VMDvdDrive -VMName $Vm.vmName |
-            Where-Object { $_.Path -eq $Vm._seedIsoPath }
-        if ($null -ne $dvdDrive) {
-            Remove-VMDvdDrive -VMName            $Vm.vmName `
-                              -ControllerNumber   $dvdDrive.ControllerNumber `
-                              -ControllerLocation $dvdDrive.ControllerLocation
-        }
-        if (Test-Path $Vm._seedIsoPath) {
-            Remove-Item -Path $Vm._seedIsoPath -Force
-            Write-Host "  [OK] Seed ISO removed." -ForegroundColor Green
-        }
+        Remove-VmSeedIso -VmName $Vm.vmName -SeedIsoPath $Vm._seedIsoPath
     }
 
         } # end 'wait for SSH' sub-step

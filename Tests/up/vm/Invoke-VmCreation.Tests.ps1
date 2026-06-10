@@ -101,6 +101,56 @@ BeforeAll {
         '192.168.1.42'
     }
 
+    # Wait-VmSshBannerReachable extracted from create-vm.ps1's inline
+    # polling loop. Its internals (TCP probe + banner gate + OnPoll
+    # ordering + dot painting) have their own coverage in
+    # Tests\common\ssh\Wait-VmSshBannerReachable.Tests.ps1; the stub
+    # here defaults to "ready immediately" so happy-path tests reach
+    # the post-wait cleanup. Tests that exercise the timeout branch
+    # override with `Mock Wait-VmSshBannerReachable { $false }`.
+    function Wait-VmSshBannerReachable {
+        param(
+            [string]      $IpAddress,
+            [int]         $Port,
+            [datetime]    $Deadline,
+            [int]         $PollIntervalSeconds = 10,
+            [scriptblock] $OnPoll
+        )
+        # Honour Set-ExpiredDeadline (and any other test that mocks
+        # Get-Date to return a far-future timestamp) by reporting
+        # timeout when the deadline is already in the past. Order
+        # matters: the real Wait-VmSshBannerReachable's `while ((Get-
+        # Date) -lt $Deadline)` checks the deadline BEFORE the body,
+        # so OnPoll never fires on an already-past deadline. Real-time
+        # tests have $Deadline well in the future, so the default
+        # path falls through to the OnPoll fire + success return.
+        if ((Get-Date) -ge $Deadline) { return $false }
+        # Forward the OnPoll fire so callers' VM-state guards still
+        # trigger - the "VM stopped unexpectedly" tests rely on that
+        # pathway throwing through the stub.
+        if ($null -ne $OnPoll) { & $OnPoll }
+        $true
+    }
+
+    # Format-ElapsedBudgetWithGradient owns the ANSI elapsed-time tail.
+    # Its internals (colour math + clamp) live in Tests\common\ui\
+    # Format-ElapsedBudgetWithGradient.Tests.ps1. The stub here
+    # returns an inert string so Write-Host has something to print
+    # without coupling create-vm tests to the colour-code layout.
+    function Format-ElapsedBudgetWithGradient {
+        param([int] $ElapsedSeconds, [int] $BudgetSeconds, [bool] $Succeeded)
+        "${ElapsedSeconds}s / ${BudgetSeconds}s"
+    }
+
+    # Remove-VmSeedIso owns the Get-VMDvdDrive -> Remove-VMDvdDrive ->
+    # Remove-Item sequence. Tests\up\vm\Remove-VmSeedIso.Tests.ps1
+    # covers it directly; this stub records the call so the create-vm
+    # finally-block dispatch tests can assert seed-ISO cleanup
+    # happened without inspecting the underlying cmdlets.
+    function Remove-VmSeedIso {
+        param([string] $VmName, [string] $SeedIsoPath)
+    }
+
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\vm\create-vm.ps1"
 
     # Standard VM object satisfying all Invoke-VmCreation requirements.
@@ -223,6 +273,26 @@ BeforeAll {
         # without each having to know about this gate. Tests that
         # exercise the failure-mode wiring override with a throw.
         Mock Assert-WorkloadReachableViaRouter { }
+
+        # Pester requires the function to be Mock'd (not just defined
+        # at file scope) for Should -Invoke to work. Register default
+        # mocks for each extracted helper.
+        #
+        # Wait-VmSshBannerReachable's default Mock does NOT fire
+        # OnPoll: closures executed from inside a Pester Mock body
+        # resolve commands via the original file-scope stub rather
+        # than the test's per-It Mocks (Get-VM in particular), which
+        # makes stateful Get-VM counter tests silently see empty
+        # state. Tests that specifically exercise OnPoll behaviour
+        # override this Mock locally to fire the callback.
+        Mock Remove-VmSeedIso { }
+        Mock Wait-VmSshBannerReachable {
+            param([string] $IpAddress, [int] $Port, [datetime] $Deadline,
+                  [int] $PollIntervalSeconds, [scriptblock] $OnPoll)
+            if ((Get-Date) -ge $Deadline) { return $false }
+            $true
+        }
+        Mock Format-ElapsedBudgetWithGradient { 'stub-elapsed-output' }
     }
 
     # Makes the SSH polling loop body never execute by returning a
@@ -479,6 +549,20 @@ Describe 'Invoke-VmCreation' {
             # at least once before the state check fires.
             Mock Get-Date { [datetime]'2099-01-01' }
             Mock Get-VM   { [PSCustomObject]@{ State = 'Off' } }
+            # Override the default Wait-VmSshBannerReachable Mock so it
+            # fires OnPoll - that is the seam the "VM stopped
+            # unexpectedly" check rides. The default Mock in
+            # Initialize-HyperVMocks skips OnPoll because closure +
+            # Pester-Mock-body scope interactions silently see empty
+            # state on stateful Get-VM Mocks; this test uses an
+            # unconditional Off, so the closure-scope issue does not
+            # bite.
+            Mock Wait-VmSshBannerReachable {
+                param([string] $IpAddress, [int] $Port, [datetime] $Deadline,
+                      [int] $PollIntervalSeconds, [scriptblock] $OnPoll)
+                if ($null -ne $OnPoll) { & $OnPoll }
+                $true
+            }
 
             { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
                 Should -Throw -ExpectedMessage '*stopped unexpectedly*'
@@ -530,12 +614,15 @@ Describe 'Invoke-VmCreation' {
                 [PSCustomObject]@{ State = $state }
             }
             Mock Get-VmKvpIpAddress { '192.168.1.42' }
-            # Capture probe IP so we can verify it matches the
-            # KVP-returned address (one-iteration success keeps the
-            # SSH loop from sleeping).
+            # Capture the IP Wait-VmSshBannerReachable is asked to
+            # probe so we can verify the discovered KVP address flows
+            # through. The original test inspected Test-VmSshPort
+            # directly; with Wait-VmSshBannerReachable extracted, that
+            # is now a parameter on the helper.
             $script:_probedIpAfterDiscovery = $null
-            Mock Test-VmSshPort {
-                param($IpAddress, $Port)
+            Mock Wait-VmSshBannerReachable {
+                param([string] $IpAddress, [int] $Port, [datetime] $Deadline,
+                      [int] $PollIntervalSeconds, [scriptblock] $OnPoll)
                 $script:_probedIpAfterDiscovery = $IpAddress
                 $true
             }
@@ -647,13 +734,12 @@ Describe 'Invoke-VmCreation' {
             }
         }
 
-        It 'probes the tunnel''s localhost endpoint (not the workload IP)' {
-            # Override Test-VmSshPort to record AND return $true so the
-            # polling loop exits via the success path on its first
-            # iteration. That gives us one observable call to assert
-            # against. Without this, Set-ExpiredDeadline's past-
-            # deadline mock skips the loop body and the probe target
-            # is unobservable.
+        It 'asks Wait-VmSshBannerReachable to probe the tunnel''s localhost endpoint (not the workload IP)' {
+            # The wait-for-SSH polling loop body now lives in Wait-
+            # VmSshBannerReachable; its own tests cover the TCP-then-
+            # banner gating. What Invoke-VmCreation still owns is the
+            # endpoint choice: the tunnel's loopback host + port, not
+            # the workload's private-switch IP.
             Initialize-HyperVMocks
             # Stateful Get-VM: the post-creation guard requires Off
             # (first call) and the polling loop requires Running
@@ -669,14 +755,6 @@ Describe 'Invoke-VmCreation' {
                 }
                 [PSCustomObject]@{ State = $state }
             }
-            $script:_probedIp   = $null
-            $script:_probedPort = $null
-            Mock Test-VmSshPort {
-                param($IpAddress, $Port)
-                $script:_probedIp   = $IpAddress
-                $script:_probedPort = $Port
-                $true
-            }
 
             $workload = New-TestVm
             Add-Member -InputObject $workload `
@@ -690,8 +768,10 @@ Describe 'Invoke-VmCreation' {
 
             Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E'
 
-            $script:_probedIp   | Should -Be '127.0.0.1'
-            $script:_probedPort | Should -Be 12345
+            Should -Invoke Wait-VmSshBannerReachable -Times 1 -Exactly `
+                -ParameterFilter {
+                    $IpAddress -eq '127.0.0.1' -and $Port -eq 12345
+                }
         }
 
         It 'does not open a tunnel for a router VM (no _RouterVm)' {
@@ -707,49 +787,31 @@ Describe 'Invoke-VmCreation' {
             Should -Invoke New-VmSshTunnel -Times 0 -Exactly
         }
 
-        It 'keeps polling when TCP probe succeeds but the SSH banner does not arrive' {
-            # SSH.NET ForwardedPortLocal's TCP listener accepts the
-            # moment Start() returns, so Test-VmSshPort against the
-            # tunnel succeeds INSTANTLY against a workload whose own
-            # sshd is not yet serving. Without the banner-read gate,
-            # Invoke-VmPostProvisioning then runs a real SSH Connect()
-            # that dies with "no SSH identification string". Verify
-            # the loop polls until the banner read succeeds, not just
-            # until TCP accepts.
-            $script:_getVmCallCount = 0
+        It 'passes a non-null OnPoll callback to Wait-VmSshBannerReachable' {
+            # The polling loop's per-iteration "VM still Running?"
+            # check is Hyper-V-specific and lives in the OnPoll
+            # callback create-vm.ps1 hands to the helper. Verify the
+            # callback is non-null on every invocation. The
+            # callback's BEHAVIOUR (the Get-VM lookup + the
+            # "stopped unexpectedly" throw) is covered by the
+            # "throws immediately when the VM state is not Running"
+            # test in the VM-state context above - asserting it
+            # again here would require running the closure outside
+            # its captured-Pester-Mock scope, where Get-VM no longer
+            # resolves to the per-test Mock.
             Initialize-HyperVMocks
-            Mock Get-VM {
-                $script:_getVmCallCount++
-                $state = if ($script:_getVmCallCount -eq 1) {
-                    'Off'
-                } else {
-                    'Running'
-                }
-                [PSCustomObject]@{ State = $state }
-            }
-            Mock Test-VmSshPort { $true }
-            $script:_bannerCalls = 0
-            Mock Test-SshBanner {
-                $script:_bannerCalls++
-                # First two iterations: banner not present (workload
-                # still booting); third iteration: ready.
-                $script:_bannerCalls -ge 3
+            $script:_capturedOnPoll = $null
+            Mock Wait-VmSshBannerReachable {
+                param([string] $IpAddress, [int] $Port, [datetime] $Deadline,
+                      [int] $PollIntervalSeconds, [scriptblock] $OnPoll)
+                $script:_capturedOnPoll = $OnPoll
+                $true
             }
 
-            $workload = New-TestVm
-            Add-Member -InputObject $workload `
-                       -MemberType NoteProperty -Name '_RouterVm' `
-                       -Value ([PSCustomObject]@{
-                           vmName    = 'router-prod'
-                           ipAddress = '192.168.1.20'
-                           username  = 'routeradmin'
-                           password  = 'router-secret'
-                       })
+            Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN'
 
-            Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E'
-
-            $script:_bannerCalls | Should -Be 3
-            Should -Invoke Test-VmSshPort -Times 3 -Exactly
+            $script:_capturedOnPoll | Should -Not -BeNullOrEmpty
+            $script:_capturedOnPoll | Should -BeOfType [scriptblock]
         }
 
         It 'delegates to Assert-WorkloadReachableViaRouter with the tunnel''s JumpClient and the workload IP' {
@@ -860,63 +922,45 @@ Describe 'Invoke-VmCreation' {
     # ------------------------------------------------------------------
     Context 'finally block - seed ISO cleanup' {
     # ------------------------------------------------------------------
-        # The seed ISO is always removed regardless of whether SSH succeeds
-        # or times out. It contains the plaintext password and must never
-        # persist on the host disk after provisioning.
+        # The seed ISO contains the plaintext password and must never
+        # persist on the host disk after provisioning. Removal lives in
+        # Remove-VmSeedIso (its own test file covers the detach + delete
+        # ordering and the idempotent skip branches); here we just
+        # verify the cleanup is dispatched from create-vm.ps1's finally
+        # regardless of whether wait-for-SSH succeeded or timed out.
 
-        It 'detaches the DVD drive in the finally block on timeout' {
+        It 'invokes Remove-VmSeedIso in the finally block on timeout' {
             Initialize-HyperVMocks
             Set-ExpiredDeadline
 
             { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
                 Should -Throw
 
-            Should -Invoke Remove-VMDvdDrive -Times 1 -Exactly -ParameterFilter {
-                $VMName             -eq 'node-01' -and
-                $ControllerNumber   -eq 1          -and
-                $ControllerLocation -eq 0
+            Should -Invoke Remove-VmSeedIso -Times 1 -Exactly -ParameterFilter {
+                $VmName      -eq 'node-01' -and
+                $SeedIsoPath -eq 'C:\VMs\node-01\node-01-seed.iso'
             }
         }
 
-        It 'deletes the seed ISO file in the finally block on timeout' {
+        It 'invokes Remove-VmSeedIso in the finally block on success' {
+            # Mirror test for the happy path - the cleanup must NOT be
+            # conditional on the SSH probe outcome.
             Initialize-HyperVMocks
-            Set-ExpiredDeadline
-            Mock Test-Path  { $true }    # ISO present on disk
-            Mock Remove-Item { }
-
-            { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
-                Should -Throw
-
-            Should -Invoke Remove-Item -Times 1 -Exactly -ParameterFilter {
-                $Path  -eq 'C:\VMs\node-01\node-01-seed.iso' -and
-                $Force -eq $true
+            # Stateful Get-VM: Off (post-creation guard) then Running
+            # (so the wait-for-SSH stub's OnPoll forward does not throw).
+            $script:_getVmCallCount = 0
+            Mock Get-VM {
+                $script:_getVmCallCount++
+                $state = if ($script:_getVmCallCount -eq 1) { 'Off' } else { 'Running' }
+                [PSCustomObject]@{ State = $state }
             }
-        }
 
-        It 'does not call Remove-Item when the seed ISO file is already gone' {
-            Initialize-HyperVMocks
-            Set-ExpiredDeadline
-            Mock Test-Path   { $false }    # ISO already deleted
-            Mock Remove-Item { }
+            Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN'
 
-            { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
-                Should -Throw
-
-            Should -Invoke Remove-Item -Times 0
-        }
-
-        It 'skips Remove-VMDvdDrive when no matching DVD drive is found' {
-            # If Add-VMDvdDrive failed before throwing, Get-VMDvdDrive returns
-            # nothing. The finally block must handle a $null drive gracefully.
-            Initialize-HyperVMocks
-            Set-ExpiredDeadline
-            Mock Get-VMDvdDrive    { }    # no drives attached
-            Mock Remove-VMDvdDrive { }
-
-            { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
-                Should -Throw
-
-            Should -Invoke Remove-VMDvdDrive -Times 0
+            Should -Invoke Remove-VmSeedIso -Times 1 -Exactly -ParameterFilter {
+                $VmName      -eq 'node-01' -and
+                $SeedIsoPath -eq 'C:\VMs\node-01\node-01-seed.iso'
+            }
         }
     }
 }

@@ -51,6 +51,9 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common\config\Read-VmProvisionerConfig.ps1"
 . "$PSScriptRoot\common\network\Assert-WorkloadReachableViaRouter.ps1"
 . "$PSScriptRoot\common\network\Remove-LegacySingletonNat.ps1"
+. "$PSScriptRoot\common\network\Resolve-ExistingRouterIp.ps1"
+. "$PSScriptRoot\common\ssh\Wait-VmSshBannerReachable.ps1"
+. "$PSScriptRoot\common\ui\Format-ElapsedBudgetWithGradient.ps1"
 # SSH jump-host helpers (New-VmSshTunnel, New-VmSshClientWithJump,
 # Test-SshBanner) and the upstream-host-IP discovery (Get-VmSwitchHostIp)
 # live in Infrastructure.HyperV >= 0.11.0 - imported by
@@ -116,6 +119,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\network\Ensure-ExternalSwitch.ps1"
 . "$PSScriptRoot\up\network\Ensure-PrivateSwitch.ps1"
 . "$PSScriptRoot\up\network\setup-network.ps1"
+. "$PSScriptRoot\up\vm\Remove-VmSeedIso.ps1"
 . "$PSScriptRoot\up\vm\create-vm.ps1"
 . "$PSScriptRoot\up\timing\Initialize-PhaseTimings.ps1"
 . "$PSScriptRoot\up\timing\Invoke-WithPhaseTimer.ps1"
@@ -327,39 +331,13 @@ try {
                                 -WorkloadVms $env.WorkloadVms
 
             # Router-IP availability for the workload stamping below.
-            #
-            # When the router is _state == 'new' the VM does not exist
-            # in Hyper-V yet; step 8 (create-vm.ps1) runs first for
-            # the router, KVP-discovers its IP, and writes it back onto
-            # this same $routerVm object so the workload's reference
-            # below sees the populated value when its own wait-for-SSH
-            # iterates.
-            #
-            # When the router is _state == 'existing' (the case that
-            # surfaces on every phase after Phase 1, where the router
-            # persists across provision runs) create-vm.ps1 is skipped
-            # for it - the workload would then read $_RouterVm.ipAddress
-            # before anyone populated it and throw the property-not-found
-            # we just regressed on. Discover here to close that gap.
-            # KVP needs the VM running; an existing-but-Off router is
-            # an operator error (the workload cannot reach its jump
-            # anyway) so surface a directed message rather than the
-            # raw timeout.
-            $isExistingRouter = $routerVm.PSObject.Properties['_state'] -and
-                                $routerVm._state -eq 'existing'
-            $hasRouterIp      = $routerVm.PSObject.Properties['ipAddress'] -and
-                                $routerVm.ipAddress
-            if ($isExistingRouter -and -not $hasRouterIp) {
-                Write-Host "  Resolving existing router '$($routerVm.vmName)' upstream IP via KVP ..." `
-                    -NoNewline -ForegroundColor Cyan
-                $discoveredIp = Get-VmKvpIpAddress `
-                                    -VmName     $routerVm.vmName `
-                                    -SwitchName $routerVm.externalSwitchName `
-                                    -OnPoll     { Write-Host '.' -NoNewline -ForegroundColor Cyan }
-                Add-Member -InputObject $routerVm -MemberType NoteProperty `
-                           -Name 'ipAddress' -Value $discoveredIp -Force
-                Write-Host " $discoveredIp" -ForegroundColor Green
-            }
+            # new-state routers get their IP populated by create-vm.ps1's
+            # own KVP discovery at step 8; existing-state routers need
+            # this helper to close the gap, otherwise the workload's
+            # $_RouterVm.ipAddress would be unread/unset when its own
+            # wait-for-SSH opens the tunnel. See the helper docstring
+            # for the full state matrix.
+            Resolve-ExistingRouterIp -RouterVm $routerVm
 
             # Stamp the env's router VM onto every workload as
             # _RouterVm so downstream SSH paths (wait-for-SSH probe,
