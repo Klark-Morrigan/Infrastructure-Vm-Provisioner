@@ -299,6 +299,15 @@ function Invoke-VmCreation {
                     -DiagFolder      $diagFolder `
                     -OnPoll          $gateOnPoll
             } catch {
+                # Output ordering: end the unterminated dot line,
+                # surface the actual error message, THEN fire the
+                # diag. Without these the dots run into the diag-log
+                # path on the same line, and the error appears later
+                # in the timing report instead of right above the
+                # diag pointer.
+                Write-Host ''
+                Write-Host ('  [ERROR] ' + $_.Exception.Message) `
+                    -ForegroundColor Red
                 # Same host+guest snapshot as the wait-for-SSH path.
                 # Assert-WorkloadReachableViaRouter already writes its
                 # own router-side-probe.log into $diagFolder; this adds
@@ -357,6 +366,18 @@ function Invoke-VmCreation {
                               -Succeeded      $sshReady))
 
         if (-not $sshReady) {
+            # Headline error first so the operator sees it before the
+            # diag log path - mirrors the router-side reachability
+            # catch above for output consistency. The Format-Elapsed
+            # gradient line above already terminated the dot line.
+            $sshTimeoutMessage = (
+                "SSH on '$($Vm.vmName)' did not become reachable within " +
+                "$timeoutMinutes minutes. Check the Hyper-V console for " +
+                "boot errors."
+            )
+            Write-Host ('  [ERROR] ' + $sshTimeoutMessage) `
+                -ForegroundColor Red
+
             # Capture host-side networking truth before throwing.
             # This is exactly the diag we hand-ran for the WiFi-MAC
             # collision and ICS DHCP-drift cases: side-by-side
@@ -375,11 +396,7 @@ function Invoke-VmCreation {
                 Write-Host "  [diag] runtime-diag capture failed: $($_.Exception.Message)" `
                     -ForegroundColor Yellow
             }
-            throw (
-                "SSH on '$($Vm.vmName)' did not become reachable within " +
-                "$timeoutMinutes minutes. Check the Hyper-V console for " +
-                "boot errors."
-            )
+            throw $sshTimeoutMessage
         }
 
         Write-Host "  [OK] SSH reachable on $($Vm.vmName)." -ForegroundColor Green

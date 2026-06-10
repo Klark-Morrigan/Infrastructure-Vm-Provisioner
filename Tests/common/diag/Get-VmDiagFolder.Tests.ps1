@@ -5,12 +5,12 @@ BeforeAll {
 Describe 'Get-VmDiagFolder' {
 
     It 'joins VmConfigPath, "diagnostics", VmName, Timestamp in order' {
-        $result = Get-VmDiagFolder -VmConfigPath 'E:\a_VMs\Hyper-V\Config' `
+        $result = Get-VmDiagFolder -VmConfigPath 'C:\a_VMs\Hyper-V\Config' `
                                    -VmName       'router-e2e' `
                                    -Timestamp    '2026-06-10_16-00-00'
 
         $result | Should -Be (
-            'E:\a_VMs\Hyper-V\Config\diagnostics\router-e2e\2026-06-10_16-00-00'
+            'C:\a_VMs\Hyper-V\Config\diagnostics\router-e2e\2026-06-10_16-00-00'
         )
     }
 
