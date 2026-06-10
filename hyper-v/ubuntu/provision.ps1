@@ -49,6 +49,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common\config\Get-SanitizedVmDisplay.ps1"
 . "$PSScriptRoot\common\config\Group-VmsByEnvironment.ps1"
 . "$PSScriptRoot\common\config\Read-VmProvisionerConfig.ps1"
+. "$PSScriptRoot\common\diag\Get-VmDiagFolder.ps1"
 . "$PSScriptRoot\common\network\Assert-WorkloadReachableViaRouter.ps1"
 . "$PSScriptRoot\common\network\Remove-LegacySingletonNat.ps1"
 . "$PSScriptRoot\common\network\Resolve-ExistingRouterIp.ps1"

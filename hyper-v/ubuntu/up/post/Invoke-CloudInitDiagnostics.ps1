@@ -116,9 +116,9 @@ function Invoke-CloudInitDiagnostics {
     #     Invoke-VmCreation as $Vm._diagTimestamp) so console.log from
     #     Start-SerialConsoleCapture and the dumps below land in the
     #     SAME folder for a given run.
-    $diagDir = Join-Path $VmConfigPath 'diagnostics'
-    $diagDir = Join-Path $diagDir      $VmName
-    $diagDir = Join-Path $diagDir      $Timestamp
+    $diagDir = Get-VmDiagFolder -VmConfigPath $VmConfigPath `
+                                -VmName       $VmName `
+                                -Timestamp    $Timestamp
     if (-not (Test-Path -Path $diagDir -PathType Container)) {
         New-Item -ItemType Directory -Path $diagDir -Force | Out-Null
     }

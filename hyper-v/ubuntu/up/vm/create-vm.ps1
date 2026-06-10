@@ -270,9 +270,9 @@ function Invoke-VmCreation {
         # throw still disposes the tunnel + serial console capture
         # via the finally below.
         if ($hasRouter) {
-            $diagFolder = Join-Path $Vm.vmConfigPath 'diagnostics'
-            $diagFolder = Join-Path $diagFolder $Vm.vmName
-            $diagFolder = Join-Path $diagFolder $Vm._diagTimestamp
+            $diagFolder = Get-VmDiagFolder -VmConfigPath $Vm.vmConfigPath `
+                                           -VmName       $Vm.vmName `
+                                           -Timestamp    $Vm._diagTimestamp
             # Hyper-V VM-state check is the caller's concern; the
             # helper stays generic. A non-Running state means the
             # workload crashed / shut itself off before its sshd could

@@ -56,9 +56,9 @@ function New-DiagnosticSshClientWrapper {
     # Invoke-CloudInitDiagnostics and Invoke-SerialConsoleCapture, so
     # ssh.log lands next to console.log and the cloud-init dumps from
     # the same provisioning run.
-    $diagDir = Join-Path $VmConfigPath 'diagnostics'
-    $diagDir = Join-Path $diagDir      $VmName
-    $diagDir = Join-Path $diagDir      $Timestamp
+    $diagDir = Get-VmDiagFolder -VmConfigPath $VmConfigPath `
+                                -VmName       $VmName `
+                                -Timestamp    $Timestamp
     if (-not (Test-Path -Path $diagDir -PathType Container)) {
         New-Item -ItemType Directory -Path $diagDir -Force | Out-Null
     }

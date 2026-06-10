@@ -52,9 +52,9 @@ function Start-SerialConsoleCapture {
     # timestamp here would split them across two folders separated by
     # the cloud-init wall-clock (~6 minutes), which made matching
     # console + diag outputs visually confusing.
-    $diagDir   = Join-Path $VmConfigPath 'diagnostics'
-    $diagDir   = Join-Path $diagDir      $VmName
-    $diagDir   = Join-Path $diagDir      $timestamp
+    $diagDir = Get-VmDiagFolder -VmConfigPath $VmConfigPath `
+                                -VmName       $VmName `
+                                -Timestamp    $timestamp
     if (-not (Test-Path -Path $diagDir -PathType Container)) {
         New-Item -ItemType Directory -Path $diagDir -Force | Out-Null
     }
