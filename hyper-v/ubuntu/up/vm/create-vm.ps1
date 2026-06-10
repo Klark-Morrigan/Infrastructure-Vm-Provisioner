@@ -290,13 +290,32 @@ function Invoke-VmCreation {
                     )
                 }
             }.GetNewClosure()
-            Assert-WorkloadReachableViaRouter `
-                -JumpClient      $sshTunnel.JumpClient `
-                -WorkloadIp      $Vm.ipAddress `
-                -WorkloadVmName  $Vm.vmName `
-                -RouterVmName    $Vm._RouterVm.vmName `
-                -DiagFolder      $diagFolder `
-                -OnPoll          $gateOnPoll
+            try {
+                Assert-WorkloadReachableViaRouter `
+                    -JumpClient      $sshTunnel.JumpClient `
+                    -WorkloadIp      $Vm.ipAddress `
+                    -WorkloadVmName  $Vm.vmName `
+                    -RouterVmName    $Vm._RouterVm.vmName `
+                    -DiagFolder      $diagFolder `
+                    -OnPoll          $gateOnPoll
+            } catch {
+                # Same host+guest snapshot as the wait-for-SSH path.
+                # Assert-WorkloadReachableViaRouter already writes its
+                # own router-side-probe.log into $diagFolder; this adds
+                # the host-side network truth + (if SSH opens) the
+                # workload's own runtime state, both of which the
+                # router-side probe alone cannot see.
+                try {
+                    Invoke-VmRuntimeDiag -Vm           $Vm `
+                                         -VmConfigPath $Vm.vmConfigPath `
+                                         -Timestamp    $Vm._diagTimestamp |
+                        Out-Null
+                } catch {
+                    Write-Host "  [diag] runtime-diag capture failed: $($_.Exception.Message)" `
+                        -ForegroundColor Yellow
+                }
+                throw
+            }
         }
 
         Write-Host "  Polling SSH on $($Vm.vmName) ..." -NoNewline
@@ -338,6 +357,24 @@ function Invoke-VmCreation {
                               -Succeeded      $sshReady))
 
         if (-not $sshReady) {
+            # Capture host-side networking truth before throwing.
+            # This is exactly the diag we hand-ran for the WiFi-MAC
+            # collision and ICS DHCP-drift cases: side-by-side
+            # Get-VMNetworkAdapter / Get-NetNeighbor / arp -a / route
+            # tables make duplicate or drifted IPs obvious at a glance.
+            # Guest-side capture is best-effort - if SSH happens to
+            # work post-timeout we get a bonus inside-VM dump; if not,
+            # we still have the host-side log. Wrapped in try/catch so
+            # a diag failure does not mask the headline timeout.
+            try {
+                Invoke-VmRuntimeDiag -Vm           $Vm `
+                                     -VmConfigPath $Vm.vmConfigPath `
+                                     -Timestamp    $Vm._diagTimestamp |
+                    Out-Null
+            } catch {
+                Write-Host "  [diag] runtime-diag capture failed: $($_.Exception.Message)" `
+                    -ForegroundColor Yellow
+            }
             throw (
                 "SSH on '$($Vm.vmName)' did not become reachable within " +
                 "$timeoutMinutes minutes. Check the Hyper-V console for " +

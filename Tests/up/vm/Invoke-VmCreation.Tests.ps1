@@ -151,6 +151,16 @@ BeforeAll {
         param([string] $VmName, [string] $SeedIsoPath)
     }
 
+    # Pure path helper - dot-source the real implementation so the
+    # diag-folder shape under test matches production exactly.
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\common\diag\Get-VmDiagFolder.ps1"
+    # Invoke-VmRuntimeDiag fires from create-vm.ps1's timeout-path
+    # catches; stub at file scope so the diag-fire is a no-op in
+    # tests that exercise those paths.
+    function Invoke-VmRuntimeDiag {
+        param($Vm, $VmConfigPath, $Timestamp, $SshOpenTimeout)
+    }
+
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\vm\create-vm.ps1"
 
     # Standard VM object satisfying all Invoke-VmCreation requirements.

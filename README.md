@@ -19,6 +19,7 @@
   - [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables)
   - [Router VM (kind: router)](#router-vm-kind-router)
 - [provision.ps1](#provisionps1)
+- [Get-VmRuntimeDiag.ps1](#get-vmruntimediagps1)
 - [start-vms.ps1](#start-vmsps1)
 - [deprovision.ps1](#deprovisionps1)
 - [CI](#ci)
@@ -832,7 +833,14 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
    second NIC on `privateSwitchName`, and both NICs are pinned to
    deterministic MACs that match the seed's netplan blocks. Polls
    port 22 until cloud-init finishes, then detaches and deletes the
-   seed ISO.
+   seed ISO. On wait-for-SSH timeout (and on router-side
+   reachability-gate timeout for workloads behind a router VM), a
+   host-side + best-effort guest-side runtime snapshot is captured
+   to `runtime-diag.log` next to `console.log` so a failed run
+   leaves forensic data without operator intervention. See
+   [`Get-VmRuntimeDiag.ps1`](#get-vmruntimediagps1) for the manual
+   entry point and the on-disk layout under
+   `<vhdPath>/diagnostics/<vmName>/<timestamp>/`.
 9. **(new AND existing VMs)** Runs post-provisioning. Opens one host file server and
     one SSH session per VM, waits once for cloud-init to finish, then
     dispatches each enabled step:
@@ -925,6 +933,55 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
     sourcing `/etc/profile.d/`. Login shells pick the same dir up
     automatically because `DotnetSdkProvider`'s `/etc/profile.d/dotnet.sh`
     prepends `DOTNET_TOOLS_ROOT` to `PATH`.
+
+---
+
+## Get-VmRuntimeDiag.ps1
+
+Run as Administrator to capture host-side networking truth plus
+(best-effort) inside-VM runtime state for a named VM, written next
+to `console.log` under
+`<vhdPath>/diagnostics/<vmName>/<timestamp>/runtime-diag.log`.
+
+```powershell
+.\scripts\Get-VmRuntimeDiag.ps1 -VmName router-e2e -SecretSuffix '-E2E'
+```
+
+Same helper (`Invoke-VmRuntimeDiag`) that fires automatically from
+`create-vm.ps1`'s wait-for-SSH and router-side reachability timeout
+paths - this script is the manual entry point for probing a VM
+without aborting an in-flight run, or for diagnosing VMs that have
+drifted IPs / lost connectivity after a successful provision.
+
+**Captures (always; no SSH required):**
+
+- `Get-VM` state, uptime, CPU/memory utilization
+- `Get-VMNetworkAdapter` for every NIC: switch, IPs (from Hyper-V
+  integration services), MAC, status
+- `Get-NetIPConfiguration` for each host vEthernet the VM is
+  attached to
+- `Get-NetNeighbor` for every IPv4 the VM has held (catches the
+  IP-drift case where Hyper-V reports one IP but the host's ARP
+  cache shows another)
+- `Get-NetRoute` for the /24 derived from each VM IP
+- `arp -a` full dump
+
+**Captures (best-effort; only when SSH opens within 30s):**
+
+- `ip -4 addr show` and `ip route` (current netplan state)
+- `ss -tln` (what's listening)
+- `cat /etc/resolv.conf` + `resolvectl status` (DNS resolution path)
+- `sudo nft list ruleset` (router NAT + filter rules)
+- `journalctl -u systemd-networkd` excerpt filtered to ext0 / priv0 /
+  DHCP / lease / address (catches DHCP-drift via netplan double-apply)
+- `journalctl -u cloud-init` excerpt filtered to netplan / network /
+  apply / reboot / error (catches cloud-init mid-run reconfigures)
+
+SSH-open failures are logged into the same file rather than thrown,
+so the host-side capture always lands.
+
+`SecretSuffix` matches `provision.ps1` / `deprovision.ps1` -
+appended to `VmProvisionerConfig` to form the vault entry name.
 
 ---
 
@@ -1048,6 +1105,9 @@ Infrastructure-VM-Provisioner/
 |     |  |  |- Get-SanitizedVmDisplay.ps1    # Masks password in diagnostic output
 |     |  |  |- Group-VmsByEnvironment.ps1    # Per-environment view: groups VM defs by privateSwitchName and partitions each group into RouterVms / WorkloadVms. Single source of truth shared by preflight, provision step 7, and deprovision teardown.
 |     |  |  `- Read-VmProvisionerConfig.ps1  # Shared bootstrap helper: vault read + schema validation, reused by provision / start-vms / deprovision
+|     |  |- diag/
+|     |  |  |- Get-VmDiagFolder.ps1          # Pure helper: the single source of truth for <vhdPath>/diagnostics/<vmName>/<timestamp>/ - every diag artifact (console.log, cloud-init-*.txt, ssh.log, runtime-diag.log) lands at the same path.
+|     |  |  `- Invoke-VmRuntimeDiag.ps1      # Host-side + best-effort guest-side runtime snapshot. Auto-fires from create-vm.ps1's wait-for-SSH and router-side reachability timeout paths. Manual entry point: scripts\Get-VmRuntimeDiag.ps1.
 |     |  `- network/
 |     |     `- Remove-LegacySingletonNat.ps1 # Idempotent NetNat + host vNIC cleanup at a given gateway IP. Shared by Invoke-NetworkSetup (provision) and Invoke-NetworkTeardown (deprovision); also exports Test-IpInPrefix.
 |     |- up/
@@ -1103,6 +1163,7 @@ Infrastructure-VM-Provisioner/
 |- Tests/
 |  |- common/
 |  |  |- config/             # Unit tests for common/config helpers
+|  |  |- diag/               # Unit tests for common/diag helpers
 |  |  `- network/            # Unit tests for common/network helpers
 |  |- up/
 |  |  |- config/             # Unit tests for up/config helpers
@@ -1118,6 +1179,7 @@ Infrastructure-VM-Provisioner/
 |  |- Run-Tests.ps1                       # Unit-test runner (delegates to PowerShell-Common)
 |  |- Run-IntegrationTests.ps1            # Docker-host integration runner (delegates to PowerShell-Common)
 |  `- Run-IntegrationTests-AgainstDockerTarget.ps1  # Docker-target integration runner
+|  `- Get-VmRuntimeDiag.ps1               # Manual entry point: host + guest runtime diag snapshot (Invoke-VmRuntimeDiag)
 `- README.md
 ```
 
