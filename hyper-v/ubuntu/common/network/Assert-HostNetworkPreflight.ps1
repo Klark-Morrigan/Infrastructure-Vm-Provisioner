@@ -74,11 +74,27 @@ function Assert-HostNetworkPreflight {
     Write-Host ""
     Write-Host "--- Host network preflight: $SwitchName ---" -ForegroundColor Cyan
 
+    # 0. Admin check. Hyper-V / Get-Net* cmdlets need admin (or
+    #    Hyper-V Administrators group). Without it, Get-VMSwitch
+    #    silently returns nothing, which the rest of the script
+    #    would misread as "switch missing". Catching it here gives
+    #    the operator an actionable error instead of a misleading
+    #    one. Delegates to Test-IsCurrentSessionElevated so tests
+    #    can mock the admin state without invoking the real
+    #    WindowsPrincipal API.
+    if (-not (Test-IsCurrentSessionElevated)) {
+        Add-Finding FAIL "PowerShell session is elevated" `
+            "Hyper-V and Get-Net* cmdlets need admin (or Hyper-V Administrators group). Re-run from an elevated PowerShell."
+        Assert-PreflightFindings -Findings $findings -SwitchName $SwitchName
+        return
+    }
+    Add-Finding PASS "PowerShell session is elevated" "Hyper-V cmdlets are reachable."
+
     # 1. Switch existence + type.
     $sw = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
     if (-not $sw) {
         Add-Finding FAIL "VMSwitch '$SwitchName' exists" `
-            "Switch is missing. Expected to have been created by Ensure-ExternalSwitch."
+            "Switch is missing. Expected to have been created by Ensure-ExternalSwitch, OR (if you migrated from External to Internal+ICS earlier) the switch was torn down by a Hyper-V service restart / Windows update. Recreate via: New-VMSwitch -Name '$SwitchName' -SwitchType Internal  (then re-enable ICS on WiFi -> vEthernet)."
         # No point running downstream checks - they all depend on the switch.
         Assert-PreflightFindings -Findings $findings -SwitchName $SwitchName
         return
@@ -189,6 +205,15 @@ function Assert-HostNetworkPreflight {
     }
 
     Assert-PreflightFindings -Findings $findings -SwitchName $SwitchName
+}
+
+function Test-IsCurrentSessionElevated {
+    # Pure pass-through to the WindowsPrincipal API. Lifted out so
+    # Pester can Mock the predicate; the .NET static call cannot be
+    # mocked directly.
+    [Security.Principal.WindowsPrincipal]::new(
+        [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
 function Assert-PreflightFindings {

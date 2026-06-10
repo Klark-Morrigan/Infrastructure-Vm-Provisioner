@@ -35,7 +35,9 @@ BeforeAll {
     }
 
     function Initialize-HappyMocks {
-        # Default = clean Internal+ICS setup, no VMs on switch.
+        # Default = clean Internal+ICS setup, elevated session,
+        # no VMs on switch.
+        Mock Test-IsCurrentSessionElevated { $true }
         Mock Get-VMSwitch         { [PSCustomObject]@{ Name = 'ExternalSwitch-Shared'; SwitchType = 'Internal' } }
         Mock Get-NetAdapter       {
             if ($Name) { New-IcsVNic } else { @(New-WifiAdapter) }
@@ -71,6 +73,34 @@ Describe 'Assert-HostNetworkPreflight' {
             Should -Invoke Get-VMSwitch -Times 1 -Exactly -ParameterFilter {
                 $Name -eq 'ExternalSwitch-Shared'
             }
+        }
+    }
+
+    Context 'non-elevated PowerShell session' {
+
+        It 'throws with the elevation hint when the session is not admin' {
+            # Without elevation, Hyper-V cmdlets silently return
+            # nothing, so the script would otherwise misread it as
+            # "switch missing". The elevation check fails first
+            # with an actionable error.
+            Initialize-HappyMocks
+            Mock Test-IsCurrentSessionElevated { $false }
+
+            { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } |
+                Should -Throw -ExpectedMessage "*elevated PowerShell*"
+        }
+
+        It 'short-circuits all Hyper-V probes when not elevated' {
+            Initialize-HappyMocks
+            Mock Test-IsCurrentSessionElevated { $false }
+            Mock Get-VMSwitch   { throw 'should not be called' }
+            Mock Get-NetAdapter { throw 'should not be called' }
+
+            { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } |
+                Should -Throw
+
+            Should -Invoke Get-VMSwitch   -Times 0
+            Should -Invoke Get-NetAdapter -Times 0
         }
     }
 
