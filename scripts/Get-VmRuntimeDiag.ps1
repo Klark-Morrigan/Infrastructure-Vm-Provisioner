@@ -43,16 +43,25 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $ubuntu   = Join-Path $repoRoot 'hyper-v\ubuntu'
 
+# Install-ModuleDependencies.ps1 is a script BODY, not a function:
+# dot-sourcing it executes the install + import directly into the
+# caller's scope (the docstring on the file explains why - chicken-
+# and-egg with PowerShell.Common). No explicit invocation needed.
 . (Join-Path $ubuntu 'Install-ModuleDependencies.ps1')
-Install-ModuleDependencies
 
 . (Join-Path $ubuntu 'common\config\Read-VmProvisionerConfig.ps1')
 . (Join-Path $ubuntu 'common\config\ConvertFrom-VmConfigJson.ps1')
 . (Join-Path $ubuntu 'common\config\Get-SanitizedVmDisplay.ps1')
+# Pure helpers Invoke-VmRuntimeDiag depends on. Provision.ps1
+# dot-sources them too; this script mirrors the order.
+. (Join-Path $ubuntu 'common\diag\Get-VmDiagFolder.ps1')
+. (Join-Path $ubuntu 'common\network\Get-VmAdapterIPv4.ps1')
 . (Join-Path $ubuntu 'common\diag\Invoke-VmRuntimeDiag.ps1')
 
-$config = Read-VmProvisionerConfig -SecretSuffix $SecretSuffix
-$vms    = ConvertFrom-VmConfigJson -Config $config
+# Read-VmProvisionerConfig already routes the JSON through
+# ConvertFrom-VmConfigJson + ConvertTo-Array, so the return is the
+# validated VM-def array. No second conversion needed.
+$vms = Read-VmProvisionerConfig -SecretSuffix $SecretSuffix
 
 $vm = $vms | Where-Object vmName -eq $VmName
 if (-not $vm) {
@@ -72,7 +81,7 @@ if ($vm.kind -ne 'router' -and $routerVm) {
 }
 
 $diagFolder = Invoke-VmRuntimeDiag -Vm           $vm `
-                                   -VmConfigPath $config.vmConfigPath
+                                   -VmConfigPath $vm.vmConfigPath
 
 Write-Host ""
 Write-Host "Runtime diag captured under:" -ForegroundColor Green

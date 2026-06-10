@@ -134,12 +134,23 @@ function Get-VmRuntimeDiagHostSide {
     # This is what reveals the WiFi-MAC-collision and ICS-drift cases:
     # the host vEthernet's IP sits next to the VM's reported IP in the
     # log and the duplicate (or drifted) value is obvious.
+    #
+    # Private switches do NOT get a host vNIC (that is the design).
+    # Probe with Get-NetAdapter first - it returns $null silently for
+    # missing interfaces. Get-NetIPConfiguration would otherwise emit
+    # a non-terminating error from its inner Get-NetIPInterface call
+    # that leaks to stderr even with -ErrorAction SilentlyContinue.
     $switches = @($vmNics | Select-Object -ExpandProperty SwitchName -Unique)
     foreach ($sw in $switches) {
         $alias = "vEthernet ($sw)"
         "=== host vNIC config: $alias ===" | Out-File $OutputPath -Append
-        Get-NetIPConfiguration -InterfaceAlias $alias -ErrorAction SilentlyContinue |
-            Format-List | Out-File $OutputPath -Append
+        if (Get-NetAdapter -Name $alias -ErrorAction SilentlyContinue) {
+            Get-NetIPConfiguration -InterfaceAlias $alias |
+                Format-List | Out-File $OutputPath -Append
+        } else {
+            "(no host vNIC bound - typical for Private switches)" |
+                Out-File $OutputPath -Append
+        }
     }
 
     # Walk every IPv4 the VM has held (per Hyper-V integration services)

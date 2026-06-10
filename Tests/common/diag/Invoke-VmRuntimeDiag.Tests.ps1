@@ -4,6 +4,7 @@ BeforeAll {
     # Stubs return nothing; per-test Mocks supply the per-case fakes.
     function Get-VM                 { param([string]$Name, $ErrorAction) }
     function Get-VMNetworkAdapter   { param([string]$VMName, $ErrorAction) }
+    function Get-NetAdapter         { param([string]$Name, $ErrorAction) }
     function Get-NetIPConfiguration { param([string]$InterfaceAlias, $ErrorAction) }
     function Get-NetNeighbor        { param([string]$IPAddress, $ErrorAction) }
     function Get-NetRoute           { param([string]$DestinationPrefix, $ErrorAction) }
@@ -59,6 +60,11 @@ Describe 'Get-VmRuntimeDiagHostSide' {
         # same name and Mock that.
         function arp { param([string]$Switches) "arp-output-stub" }
         Mock arp { 'arp-output-stub' }
+        # Default Get-NetAdapter: "interface exists" so existing tests
+        # that assert Get-NetIPConfiguration was called still see the
+        # call go through. The Private-switch test overrides this to
+        # return $null for the missing-vNIC alias.
+        Mock Get-NetAdapter { [PSCustomObject]@{ Name = $Name; Status = 'Up' } }
     }
 
     It 'writes a host-side header banner to the output file' {
@@ -89,6 +95,48 @@ Describe 'Get-VmRuntimeDiagHostSide' {
         $log = Get-Content $script:logPath -Raw
         $log | Should -Match '=== Get-VM ==='
         $log | Should -Match '=== Get-VMNetworkAdapter ==='
+    }
+
+    It 'skips Get-NetIPConfiguration when the host has no vNIC for the switch (Private switch case)' {
+        # Private switches have no host vNIC by design. The host-side
+        # capture probes with Get-NetAdapter first (returns $null
+        # silently) so Get-NetIPConfiguration is not called at all.
+        # That avoids the non-terminating Get-NetIPInterface error
+        # that would otherwise leak to stderr under
+        # $ErrorActionPreference='Stop'.
+        Mock Get-VM               { [PSCustomObject]@{ Name = 'router-e2e' } }
+        Mock Get-VMNetworkAdapter {
+            @(
+                New-TestVmAdapter -SwitchName 'ExternalSwitch-Shared'
+                New-TestVmAdapter -SwitchName 'PrivateSwitch-E2E' `
+                                  -IPAddresses @('10.99.0.1')
+            )
+        }
+        Mock Get-NetAdapter {
+            # Only the External switch's vEthernet exists; the
+            # Private switch returns $null (no host vNIC).
+            param($Name)
+            if ($Name -eq 'vEthernet (ExternalSwitch-Shared)') {
+                [PSCustomObject]@{ Name = $Name; Status = 'Up' }
+            }
+        }
+        Mock Get-NetIPConfiguration {
+            [PSCustomObject]@{ InterfaceAlias = $InterfaceAlias; IPv4Address = '192.168.137.1' }
+        }
+        Mock Get-NetNeighbor { }
+        Mock Get-NetRoute    { }
+
+        { Get-VmRuntimeDiagHostSide -Vm (New-TestVm) -OutputPath $script:logPath } |
+            Should -Not -Throw
+
+        Should -Invoke Get-NetIPConfiguration -Times 1 -Exactly -ParameterFilter {
+            $InterfaceAlias -eq 'vEthernet (ExternalSwitch-Shared)'
+        }
+        Should -Invoke Get-NetIPConfiguration -Times 0 -ParameterFilter {
+            $InterfaceAlias -eq 'vEthernet (PrivateSwitch-E2E)'
+        }
+        $log = Get-Content $script:logPath -Raw
+        $log | Should -Match 'no host vNIC bound'
     }
 
     It 'queries the host vEthernet for each switch the VM is attached to' {

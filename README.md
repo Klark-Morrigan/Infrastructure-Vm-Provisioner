@@ -989,7 +989,7 @@ to `console.log` under
 `<vhdPath>/diagnostics/<vmName>/<timestamp>/runtime-diag.log`.
 
 ```powershell
-.\scripts\Get-VmRuntimeDiag.ps1 -VmName router-e2e -SecretSuffix '-E2E'
+.\scripts\Get-VmRuntimeDiag.ps1 -VmName router-e2e -SecretSuffix 'E2E'
 ```
 
 Same helper (`Invoke-VmRuntimeDiag`) that fires automatically from
