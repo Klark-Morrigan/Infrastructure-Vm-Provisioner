@@ -18,15 +18,22 @@
 #   strand the host (and the operator) the moment New-VMSwitch returns.
 #
 #   Idempotent:
-#     - If no switch with that name exists, create it bound to
-#       NetAdapterName.
-#     - If an External switch with that name already exists, log and
-#       return - the bound adapter is the operator's choice and we do
-#       not second-guess it.
-#     - If a switch with that name exists but is type Internal or
-#       Private, throw - silently reusing a wrong-type switch would
-#       change traffic semantics (no upstream egress) and the operator
-#       has to resolve the collision.
+#     - If no switch with that name exists, create it as External bound
+#       to NetAdapterName.
+#     - If a switch with that name already exists AND its type is
+#       External OR Internal, log and return. Both can carry the
+#       router's upstream traffic: External bridges to a physical NIC,
+#       Internal pairs with Windows Internet Connection Sharing (ICS)
+#       to NAT the router's egress through the host. The ICS path is
+#       the durable answer on Wi-Fi-only hosts where the External
+#       bridge collides VM IPs with the host (memory:
+#       hyperv-internal-plus-ics). The bound adapter (External) or
+#       ICS pairing (Internal) is the operator's choice and we do not
+#       second-guess it.
+#     - If a switch with that name exists but is type Private, throw -
+#       Private switches have no upstream egress at all, and silently
+#       reusing one would strand the router. The operator has to
+#       resolve the collision.
 #     - If the named NetAdapter is missing when creation is needed,
 #       throw with the Get-NetAdapter hint so the operator can find the
 #       correct name on the host.
@@ -49,14 +56,16 @@ function Ensure-ExternalSwitch {
 
     $existing = Get-VMSwitch -Name $Name -ErrorAction SilentlyContinue
     if ($null -ne $existing) {
-        if ($existing.SwitchType -ne 'External') {
+        if ($existing.SwitchType -notin @('External', 'Internal')) {
             throw (
                 "A switch named '$Name' already exists but is type " +
-                "'$($existing.SwitchType)', expected 'External'. Rename " +
-                "or remove it before re-running."
+                "'$($existing.SwitchType)', expected 'External' or " +
+                "'Internal' (External for direct bridging, Internal " +
+                "paired with Windows ICS for the Wi-Fi-only NAT path). " +
+                "Rename or remove it before re-running."
             )
         }
-        Write-Host "  Switch '$Name' already exists - skipping." `
+        Write-Host "  Switch '$Name' already exists (type: $($existing.SwitchType)) - skipping." `
             -ForegroundColor Green
         return
     }

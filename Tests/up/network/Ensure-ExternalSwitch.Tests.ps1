@@ -55,8 +55,11 @@ Describe 'Ensure-ExternalSwitch' {
     }
 
     # ------------------------------------------------------------------
-    Context 'switch already present with matching type' {
+    Context 'switch already present with an acceptable type' {
     # ------------------------------------------------------------------
+        # External and Internal are both acceptable: External bridges
+        # directly to a physical NIC; Internal is the Wi-Fi-only ICS
+        # path where Windows NATs the router's egress through the host.
 
         It 'reuses an existing External switch without recreating it' {
             Mock Get-VMSwitch   { [PSCustomObject]@{ SwitchType = 'External' } }
@@ -68,9 +71,20 @@ Describe 'Ensure-ExternalSwitch' {
             Should -Invoke New-VMSwitch -Times 0
         }
 
+        It 'reuses an existing Internal switch without recreating it (ICS path)' {
+            Mock Get-VMSwitch   { [PSCustomObject]@{ SwitchType = 'Internal' } }
+            Mock Get-NetAdapter { New-TestAdapter }
+            Mock New-VMSwitch   { }
+
+            Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet'
+
+            Should -Invoke New-VMSwitch -Times 0
+        }
+
         It 'does not consult the adapter when the switch already exists' {
             # The existing switch has its own binding chosen by whoever
-            # created it; we do not second-guess it.
+            # created it (External -> NIC, Internal -> ICS); we do not
+            # second-guess either.
             Mock Get-VMSwitch   { [PSCustomObject]@{ SwitchType = 'External' } }
             Mock Get-NetAdapter { }
             Mock New-VMSwitch   { }
@@ -85,19 +99,8 @@ Describe 'Ensure-ExternalSwitch' {
     # ------------------------------------------------------------------
     Context 'switch present with wrong type' {
     # ------------------------------------------------------------------
-        # Silently reusing the wrong-type switch would silently change
-        # traffic semantics (no upstream egress) and the operator needs
-        # to resolve the collision.
-
-        It 'throws when the existing switch is Internal' {
-            Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'Internal' } }
-            Mock New-VMSwitch { }
-
-            { Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet' } |
-                Should -Throw -ExpectedMessage "*Internal*"
-
-            Should -Invoke New-VMSwitch -Times 0
-        }
+        # Private has no upstream egress at all, so reusing it would
+        # strand the router. The operator has to resolve the collision.
 
         It 'throws when the existing switch is Private' {
             Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'Private' } }
@@ -110,7 +113,7 @@ Describe 'Ensure-ExternalSwitch' {
         }
 
         It 'includes the requested switch name in the error message' {
-            Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'Internal' } }
+            Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'Private' } }
 
             { Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared-prod' -NetAdapterName 'Ethernet' } |
                 Should -Throw -ExpectedMessage "*ExternalSwitch-Shared-prod*"
