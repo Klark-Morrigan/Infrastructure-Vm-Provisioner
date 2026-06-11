@@ -277,6 +277,18 @@ RestartSec=5
     # Without the reload the drop-in's After=/Wants=/Restart= settings
     # would not be in effect at first start and the bind-race could
     # still leave dnsmasq inactive.
+    #
+    # DNS-ready poll: between `netplan apply` and `apt-get update` we
+    # poll `getent hosts archive.ubuntu.com` until it resolves. netplan
+    # apply reloads networkd synchronously but the DNS update to
+    # systemd-resolved is propagated asynchronously, so apt's first
+    # query can fire before resolved has the new uplink server. The
+    # 2026-06 dnsmasq-not-installed regression was this race - apt
+    # failed with "Temporary failure resolving 'archive.ubuntu.com'"
+    # even though the diag captured 30s later showed DNS configured
+    # correctly. `timeout 60` bounds the wait so a genuinely broken
+    # DNS path still fails fast (the apt-get below would fail anyway,
+    # this just makes the cause visible in the log).
     # ------------------------------------------------------------------
     $userBlock        = New-CloudInitUserBlock -Username $Vm.username -Password $Vm.password
     $disableEntry     = New-CloudInitDisableNetworkConfigEntry
@@ -334,6 +346,7 @@ runcmd:
   - netplan apply
   - sh -c "echo '--- [diag] networkctl post-apply ---'; networkctl --no-pager 2>&1 || true; echo '--- [diag] ip -4 addr ---'; ip -4 -o addr; echo '--- [diag] ip -4 route ---'; ip -4 route"
   - sysctl --system
+  - timeout 60 sh -c 'until getent hosts archive.ubuntu.com >/dev/null 2>&1; do echo "  [wait-dns] DNS not ready yet, retrying ..."; sleep 2; done'
   - apt-get update
   - DEBIAN_FRONTEND=noninteractive apt-get install -y nftables dnsmasq
   - systemctl enable --now nftables.service
