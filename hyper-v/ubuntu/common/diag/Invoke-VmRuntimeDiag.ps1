@@ -213,6 +213,14 @@ function Get-VmRuntimeDiagGuestSide {
     # at the tail. Each command is wrapped in sh -c '... 2>&1' so
     # stderr is merged server-side; SSH.NET has no stream-merge option.
     # Single-quote escape is the standard '\'' dance.
+    #
+    # The systemd-* and cloud-init-output captures exist to surface
+    # service-state failures that the assertion phase otherwise
+    # discovers (the 2026-06 dnsmasq.service=inactive case is the
+    # motivator). They cover ANY provisioned VM - non-router VMs
+    # legitimately lack nftables/dnsmasq and `systemctl status` of
+    # absent units is a clean "Unit not found" record, not an
+    # exception.
     $captures = [ordered]@{
         'ip-addr'           = 'ip -4 addr show; echo; ip -6 addr show'
         'ip-route'          = 'ip route; echo; ip -6 route 2>&1'
@@ -220,6 +228,12 @@ function Get-VmRuntimeDiagGuestSide {
         'resolv'            =
             'cat /etc/resolv.conf; echo "---"; ' +
             'resolvectl status 2>&1 | head -40'
+        'systemd-failed'    =
+            'systemctl --failed --no-pager 2>&1'
+        'systemd-services'  =
+            'systemctl status --no-pager ssh.service ssh.socket ' +
+            'nftables.service dnsmasq.service ' +
+            'systemd-networkd.service cloud-init.service 2>&1'
         'nftables'          = 'sudo nft list ruleset 2>/dev/null'
         'networkd-recent'   =
             'journalctl -u systemd-networkd --since "1 hour ago" ' +
@@ -229,6 +243,8 @@ function Get-VmRuntimeDiagGuestSide {
             'sudo journalctl -u cloud-init --since "1 hour ago" ' +
             '--no-pager 2>&1 | ' +
             'grep -iE "netplan|network|apply|reboot|error" | tail -60'
+        'cloud-init-output' =
+            'sudo tail -n 200 /var/log/cloud-init-output.log 2>&1'
     }
 
     foreach ($name in $captures.Keys) {

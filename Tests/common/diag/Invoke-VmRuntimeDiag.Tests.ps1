@@ -282,14 +282,16 @@ Describe 'Get-VmRuntimeDiagGuestSide' {
         $fakeClient = [PSCustomObject]@{ Connected = $true }
         Get-VmRuntimeDiagGuestSide -SshClient $fakeClient -OutputPath $script:logPath
 
-        # All seven captures must have fired.
-        $script:_invokedCommands.Count | Should -BeGreaterOrEqual 7
+        # All ten captures must have fired.
+        $script:_invokedCommands.Count | Should -BeGreaterOrEqual 10
 
         # And every capture name should appear as a section header in
         # the log so an operator can grep for the section they want.
         $log = Get-Content $script:logPath -Raw
         foreach ($name in @('ip-addr', 'ip-route', 'ss-listen', 'resolv',
-                             'nftables', 'networkd-recent', 'cloud-init-recent')) {
+                             'systemd-failed', 'systemd-services',
+                             'nftables', 'networkd-recent',
+                             'cloud-init-recent', 'cloud-init-output')) {
             $log | Should -Match "=== $name ==="
         }
     }
@@ -305,7 +307,7 @@ Describe 'Get-VmRuntimeDiagGuestSide' {
         # Spot-check: every call goes through sh -c '<body> 2>&1'.
         Should -Invoke Invoke-SshClientCommand -ParameterFilter {
             $Command -like "sh -c '*2>&1'"
-        } -Times 7
+        } -Times 10
     }
 }
 
