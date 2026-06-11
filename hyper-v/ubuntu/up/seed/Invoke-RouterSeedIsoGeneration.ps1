@@ -259,12 +259,16 @@ RestartSec=5
 '@
 
     # ------------------------------------------------------------------
-    # user-data. The structure mirrors Invoke-SeedIsoGeneration (users,
-    # ssh_pwauth, write_files, runcmd) with one extra `packages:` block
-    # for nftables and dnsmasq. Packages installation is feasible here
-    # but not on workload VMs because the router VM has a real upstream
-    # NIC with internet egress from first boot, while workload VMs have
-    # to wait for the router to come up before apt can resolve mirrors.
+    # user-data. The structure mirrors Invoke-SeedIsoGeneration
+    # (users, ssh_pwauth, write_files, runcmd). No `packages:` block:
+    # cloud-init's `packages:` runs in the init stage BEFORE runcmd's
+    # `netplan apply`, which on a static-ext0 router means apt tries
+    # to resolve archive.ubuntu.com over an interface with no IPv4
+    # yet and times out. The 2026-06 dnsmasq-not-installed regression
+    # was this exact race. nftables and dnsmasq are instead
+    # installed via apt-get in runcmd AFTER `netplan apply`, with
+    # `DEBIAN_FRONTEND=noninteractive` so any post-install prompts
+    # do not hang the runcmd.
     #
     # runcmd ordering note: `systemctl daemon-reload` sits BETWEEN the
     # nftables enable and the dnsmasq enable so systemd picks up the
@@ -286,10 +290,6 @@ RestartSec=5
 #cloud-config
 
 $userBlock
-
-packages:
-  - nftables
-  - dnsmasq
 
 write_files:
 $disableEntry
@@ -334,6 +334,8 @@ runcmd:
   - netplan apply
   - sh -c "echo '--- [diag] networkctl post-apply ---'; networkctl --no-pager 2>&1 || true; echo '--- [diag] ip -4 addr ---'; ip -4 -o addr; echo '--- [diag] ip -4 route ---'; ip -4 route"
   - sysctl --system
+  - apt-get update
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y nftables dnsmasq
   - systemctl enable --now nftables.service
   - systemctl daemon-reload
   - systemctl enable --now dnsmasq.service

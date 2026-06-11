@@ -156,15 +156,45 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
     }
 
     # ------------------------------------------------------------------
-    Context 'user-data packages' {
+    Context 'user-data package install (runcmd, not packages:)' {
     # ------------------------------------------------------------------
+        # cloud-init's `packages:` block runs in the init stage,
+        # BEFORE runcmd's `netplan apply` brings up the static IP.
+        # On static-ext0 routers the install times out resolving
+        # archive.ubuntu.com (no IPv4 yet) and the units never
+        # land, surfacing later as
+        # "Unit dnsmasq.service could not be found." The fix is
+        # to install via runcmd AFTER `netplan apply` so DNS works.
 
-        It 'declares a packages: block listing nftables and dnsmasq' {
+        It 'does not declare a top-level packages: block' {
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
             Should -Invoke New-SeedIso -ParameterFilter {
-                $Files['user-data'] -match '(?ms)^packages:\s*\r?\n\s*-\s*nftables\s*\r?\n\s*-\s*dnsmasq'
+                # Multiline / case-sensitive: a literal `packages:`
+                # at column 0 anywhere in user-data.
+                $Files['user-data'] -notmatch '(?m)^packages:'
+            }
+        }
+
+        It 'installs nftables and dnsmasq via apt-get in runcmd, after netplan apply' {
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                # netplan apply must precede apt-get install so the
+                # install runs against a configured ext0 with DNS.
+                $Files['user-data'] -match `
+                    "(?s)netplan apply.+?apt-get update.+?apt-get install -y nftables dnsmasq"
+            }
+        }
+
+        It 'wraps apt-get install with DEBIAN_FRONTEND=noninteractive to suppress prompts' {
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match 'DEBIAN_FRONTEND=noninteractive apt-get install'
             }
         }
     }
@@ -453,7 +483,7 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
         # above) before `enable --now dnsmasq.service` starts the
         # unit for the first time.
 
-        It 'orders runcmd entries: diag -> netplan -> diag -> sysctl -> nftables -> daemon-reload -> dnsmasq' {
+        It 'orders runcmd: diag -> netplan -> diag -> sysctl -> apt-install -> nftables -> daemon-reload -> dnsmasq' {
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
@@ -464,6 +494,8 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
                     '\s*-\s*netplan apply\s*\r?\n' +
                     '\s*-\s*sh -c "echo ''--- \[diag\] networkctl.+?"\s*\r?\n' +
                     '\s*-\s*sysctl --system\s*\r?\n' +
+                    '\s*-\s*apt-get update\s*\r?\n' +
+                    '\s*-\s*DEBIAN_FRONTEND=noninteractive apt-get install -y nftables dnsmasq\s*\r?\n' +
                     '\s*-\s*systemctl enable --now nftables\.service\s*\r?\n' +
                     '\s*-\s*systemctl daemon-reload\s*\r?\n' +
                     '\s*-\s*systemctl enable --now dnsmasq\.service'
