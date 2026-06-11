@@ -55,6 +55,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common\network\ics\Reset-IcsSharing.ps1"
 . "$PSScriptRoot\common\network\Get-NetshPortProxyRules.ps1"
 . "$PSScriptRoot\common\network\Set-RouterSshPortProxy.ps1"
+. "$PSScriptRoot\common\network\Set-RouterSshPortProxyFirewall.ps1"
 . "$PSScriptRoot\common\network\Invoke-WslShell.ps1"
 . "$PSScriptRoot\common\network\Test-WslRouterReachability.ps1"
 . "$PSScriptRoot\common\network\preflight\checks\Test-IcsDnsReachable.ps1"
@@ -291,6 +292,12 @@ try {
                 $routerVm.ipAddress) {
                 Set-RouterSshPortProxy -ConnectAddress $routerVm.ipAddress
             }
+            # Firewall companion: without an inbound allow rule on
+            # the WSL vEthernet, the portproxy listens but Windows
+            # silently drops WSL's packets, surfacing later as the
+            # "Connection timed out during banner exchange" Ansible
+            # UNREACHABLE error.
+            Set-RouterSshPortProxyFirewall
 
             foreach ($workload in $env.WorkloadVms) {
                 Add-Member -InputObject $workload `
@@ -405,6 +412,7 @@ try {
         foreach ($vm in $newVms | Where-Object { $_.kind -eq 'router' }) {
             if ($vm.PSObject.Properties['ipAddress'] -and $vm.ipAddress) {
                 Set-RouterSshPortProxy -ConnectAddress $vm.ipAddress
+                Set-RouterSshPortProxyFirewall
             }
         }
     }
