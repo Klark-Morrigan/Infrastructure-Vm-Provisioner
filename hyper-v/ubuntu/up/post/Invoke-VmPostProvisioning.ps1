@@ -107,9 +107,15 @@ function Invoke-VmPostProvisioning {
     # entirely - the variables themselves are preserved by GetNewClosure().
     # Module-exported cmdlets (e.g. Copy-VmFiles) work the same way under
     # this approach, so the dispatch is uniform.
-    $copyVmFiles             = ${function:Copy-VmFiles}
-    $copyVmFilesByPattern    = ${function:Copy-VmFilesByPattern}
     $setEnvironmentVariables = ${function:Set-EnvironmentVariables}
+    # Files-dispatch helper. Captured as a closure local so the
+    # orchestrator's closure can invoke it across the module
+    # boundary; lives in its own file (Invoke-VmFilesDispatch.ps1)
+    # so the single-vs-bulk routing + optional-flag defaults are
+    # independently testable. Copy-VmFiles / Copy-VmFilesByPattern
+    # are now resolved by Invoke-VmFilesDispatch itself - the
+    # orchestrator no longer captures them.
+    $invokeVmFilesDispatch   = ${function:Invoke-VmFilesDispatch}
     # Reconciler entry points - same capture pattern as the per-step
     # functions above for the same reason (closure does not see
     # provision.ps1's script scope at invocation time).
@@ -256,59 +262,21 @@ function Invoke-VmPostProvisioning {
             # not depend on each other's outputs - if a future install needs
             # an artefact, it acquires its own copy.
             if ($hasFiles) {
-                # Provisioner policy: every user file lands as root:root, 0644.
-                # User-owned files belong in Vm-Users (which runs after the
-                # users exist). Each entry is dispatched in JSON order so
-                # operator-visible logging and any later side effects appear
-                # in the same order the operator wrote them - per-entry
-                # routing (not "all singles then all bulks") keeps that
-                # contract while letting each bulk entry surface its
-                # resolver errors (zero matches, target collisions) against
-                # the specific files entry that triggered them, so the
-                # operator knows which entry to fix.
-                Write-Host "  [files] processing $(@($vmRef.files).Count) entry(s) ..."
+                # Per-entry routing (single vs bulk), optional-flag
+                # defaults, and ordering contract all live in
+                # Invoke-VmFilesDispatch.ps1; see its docstring for
+                # the policy + rationale.
                 & $invokeWithSubStepTimer `
                     -Parent 'Post-provisioning' `
                     -Name   'files' `
                     -Action {
-                        foreach ($entry in @($vmRef.files)) {
-                            # Discriminator: presence of 'pattern' => bulk form,
-                            # otherwise the existing single-file form. Step 2's
-                            # schema guarantees the entry is well-formed for
-                            # whichever branch matches.
-                            if ($entry.PSObject.Properties['pattern']) {
-                                $pattern   = $entry.pattern
-                                $targetDir = $entry.targetDir
-                                # Optional booleans default to $false when absent so
-                                # the JSON round-trip in the schema stays a pure
-                                # pass-through (default applied here, not in the
-                                # validator).
-                                $recurseProp = $entry.PSObject.Properties['recurse']
-                                $recurse = if ($null -ne $recurseProp) {
-                                    [bool]$recurseProp.Value
-                                } else { $false }
-                                $preserveProp = $entry.PSObject.Properties['preserveRelativePath']
-                                $preserveRelativePath = if ($null -ne $preserveProp) {
-                                    [bool]$preserveProp.Value
-                                } else { $false }
-                                Write-Host "  [files] bulk: $pattern -> $targetDir"
-                                & $copyVmFilesByPattern -SshClient $sshClient `
-                                                        -Server $server `
-                                                        -Pattern $pattern `
-                                                        -TargetDir $targetDir `
-                                                        -Recurse:$recurse `
-                                                        -PreserveRelativePath:$preserveRelativePath
-                            } else {
-                                $singleEntries = @(
-                                    [PSCustomObject]@{ Source = $entry.source; Target = $entry.target }
-                                )
-                                Write-Host "  [files] single: $($entry.source) -> $($entry.target)"
-                                & $copyVmFiles -SshClient $sshClient -Server $server -Entries $singleEntries
-                            }
-                        }
-                        Write-Host "  [files] [OK] all copies complete." -ForegroundColor Green
+                        & $invokeVmFilesDispatch `
+                            -SshClient $sshClient `
+                            -Server    $server `
+                            -Entries   @($vmRef.files)
                     }
             }
+            
             # Reconciler dispatch. Get-Providers is parameterised by the
             # VM so each provider can capture VM-scoped state (e.g. the
             # JDK provider closes over _jdkTarballPath / _jdkResolvedVersion

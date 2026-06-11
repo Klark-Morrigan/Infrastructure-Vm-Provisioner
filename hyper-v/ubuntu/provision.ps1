@@ -108,6 +108,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\post\Invoke-SerialConsoleCapture.ps1"
 . "$PSScriptRoot\up\post\New-DiagnosticSshClientWrapper.ps1"
 . "$PSScriptRoot\up\post\Wait-CloudInitFinished.ps1"
+. "$PSScriptRoot\up\post\Invoke-VmFilesDispatch.ps1"
 . "$PSScriptRoot\up\post\Invoke-VmPostProvisioning.ps1"
 . "$PSScriptRoot\up\seed\New-StaticNetplanYaml.ps1"
 . "$PSScriptRoot\up\seed\Get-RouterNicStaticMac.ps1"

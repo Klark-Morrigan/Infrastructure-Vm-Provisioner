@@ -262,6 +262,38 @@ BeforeAll {
                          else { 'error' }
         }
     }
+    # Files-dispatch helper. Stubbed at global scope so the
+    # orchestrator's ${function:Invoke-VmFilesDispatch} capture
+    # resolves. The stub delegates to the Copy-VmFiles /
+    # Copy-VmFilesByPattern stubs (already tracked in
+    # _PostProv_Calls) so the orchestrator's per-entry routing
+    # tests keep observing Copy-VmFiles* calls the same way.
+    # Real per-entry routing behaviour is tested in
+    # Invoke-VmFilesDispatch.Tests.ps1, not here.
+    function global:Invoke-VmFilesDispatch {
+        param($SshClient, $Server, [object[]] $Entries)
+        foreach ($entry in @($Entries)) {
+            if ($entry.PSObject.Properties['pattern']) {
+                $recurseProp = $entry.PSObject.Properties['recurse']
+                $recurse = if ($null -ne $recurseProp) {
+                    [bool]$recurseProp.Value
+                } else { $false }
+                $preserveProp = $entry.PSObject.Properties['preserveRelativePath']
+                $preserveRelativePath = if ($null -ne $preserveProp) {
+                    [bool]$preserveProp.Value
+                } else { $false }
+                Copy-VmFilesByPattern -SshClient $SshClient -Server $Server `
+                    -Pattern $entry.pattern -TargetDir $entry.targetDir `
+                    -Recurse:$recurse -PreserveRelativePath:$preserveRelativePath
+            } else {
+                $singleEntries = @(
+                    [PSCustomObject]@{ Source = $entry.source; Target = $entry.target }
+                )
+                Copy-VmFiles -SshClient $SshClient -Server $Server `
+                    -Entries $singleEntries
+            }
+        }
+    }
     # Router-only service check the orchestrator runs after
     # cloud-init wait. Stubbed at global scope and tracked so tests
     # can assert it fires for routers AND does not fire for workloads.
