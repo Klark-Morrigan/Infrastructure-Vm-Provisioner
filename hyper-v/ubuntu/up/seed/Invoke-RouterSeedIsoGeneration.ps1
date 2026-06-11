@@ -346,7 +346,8 @@ runcmd:
   - netplan apply
   - sh -c "echo '--- [diag] networkctl post-apply ---'; networkctl --no-pager 2>&1 || true; echo '--- [diag] ip -4 addr ---'; ip -4 -o addr; echo '--- [diag] ip -4 route ---'; ip -4 route"
   - sysctl --system
-  - timeout 60 sh -c 'until getent hosts archive.ubuntu.com >/dev/null 2>&1; do echo "  [wait-dns] DNS not ready yet, retrying ..."; sleep 2; done'
+  - systemctl restart systemd-resolved
+  - timeout 120 sh -c 'until getent hosts archive.ubuntu.com >/dev/null 2>&1; do echo "  [wait-dns] DNS not ready yet, retrying ..."; sleep 2; done'
   - apt-get update
   - DEBIAN_FRONTEND=noninteractive apt-get install -y nftables dnsmasq
   - systemctl enable --now nftables.service

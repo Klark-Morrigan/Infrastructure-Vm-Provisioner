@@ -189,19 +189,20 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
             }
         }
 
-        It 'polls DNS readiness with a bounded timeout before apt-get update' {
+        It 'restarts systemd-resolved and polls DNS readiness before apt-get update' {
             # 2026-06: even after `netplan apply` ran, apt's first DNS
             # query fired before systemd-resolved had the new uplink
             # propagated, and the install failed with "Temporary
-            # failure resolving 'archive.ubuntu.com'". The poll waits
-            # up to 60s for DNS to actually resolve so the apt-get
-            # step only runs against a live resolver.
+            # failure resolving 'archive.ubuntu.com'". The restart
+            # forces resolved to re-read networkd's config
+            # synchronously; the poll then waits up to 120s for
+            # the new uplink to actually answer queries.
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
             Should -Invoke New-SeedIso -ParameterFilter {
                 $Files['user-data'] -match `
-                    "timeout 60 sh -c 'until getent hosts archive\.ubuntu\.com"
+                    "(?s)systemctl restart systemd-resolved.+?timeout 120 sh -c 'until getent hosts archive\.ubuntu\.com"
             }
         }
 
@@ -499,7 +500,7 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
         # above) before `enable --now dnsmasq.service` starts the
         # unit for the first time.
 
-        It 'orders runcmd: diag -> netplan -> diag -> sysctl -> wait-dns -> apt-install -> nftables -> daemon-reload -> dnsmasq' {
+        It 'orders runcmd: diag -> netplan -> diag -> sysctl -> resolved-restart -> wait-dns -> apt -> nftables -> reload -> dnsmasq' {
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
@@ -510,7 +511,8 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
                     '\s*-\s*netplan apply\s*\r?\n' +
                     '\s*-\s*sh -c "echo ''--- \[diag\] networkctl.+?"\s*\r?\n' +
                     '\s*-\s*sysctl --system\s*\r?\n' +
-                    '\s*-\s*timeout 60 sh -c ''until getent hosts archive\.ubuntu\.com.+?''\s*\r?\n' +
+                    '\s*-\s*systemctl restart systemd-resolved\s*\r?\n' +
+                    '\s*-\s*timeout 120 sh -c ''until getent hosts archive\.ubuntu\.com.+?''\s*\r?\n' +
                     '\s*-\s*apt-get update\s*\r?\n' +
                     '\s*-\s*DEBIAN_FRONTEND=noninteractive apt-get install -y nftables dnsmasq\s*\r?\n' +
                     '\s*-\s*systemctl enable --now nftables\.service\s*\r?\n' +
