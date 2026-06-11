@@ -53,6 +53,10 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common\diag\Invoke-VmRuntimeDiag.ps1"
 . "$PSScriptRoot\common\network\Get-VmAdapterIPv4.ps1"
 . "$PSScriptRoot\common\network\ics\Reset-IcsSharing.ps1"
+. "$PSScriptRoot\common\network\Get-NetshPortProxyRules.ps1"
+. "$PSScriptRoot\common\network\Set-RouterSshPortProxy.ps1"
+. "$PSScriptRoot\common\network\Invoke-WslShell.ps1"
+. "$PSScriptRoot\common\network\Test-WslRouterReachability.ps1"
 . "$PSScriptRoot\common\network\preflight\checks\Test-IcsDnsReachable.ps1"
 . "$PSScriptRoot\common\network\preflight\checks\Test-IsCurrentSessionElevated.ps1"
 . "$PSScriptRoot\common\network\preflight\checks\Test-HostNetworkProfileSetting.ps1"
@@ -369,6 +373,24 @@ try {
             # for the full state matrix.
             Resolve-ExistingRouterIp -RouterVm $routerVm
 
+            # Ensure a host-side localhost portproxy so WSL-based
+            # tools (e.g. the Ansible flow in Infrastructure-Vm-Ansible
+            # invoked via `wsl -d <distro> -- ./ops/create-users.sh`)
+            # can reach the router VM. WSL2 runs as its own Hyper-V
+            # guest with its own NAT; outbound from WSL to the host's
+            # Internal-switch subnet is not forwarded through ICS NAT.
+            # The portproxy turns the cross-subnet hop into a same-host
+            # loopback (127.0.0.1:2222 -> <routerIp>:22) that WSL can
+            # always reach. Idempotent across runs; persistent across
+            # reboots. Skipped when the router IP is not yet known
+            # (DHCP routers at this stage); create-vm.ps1's KVP
+            # discovery will populate $routerVm.ipAddress in step 8,
+            # at which point a follow-up call covers them too.
+            if ($routerVm.PSObject.Properties['ipAddress'] -and
+                $routerVm.ipAddress) {
+                Set-RouterSshPortProxy -ConnectAddress $routerVm.ipAddress
+            }
+
             # Stamp the env's router VM onto every workload as
             # _RouterVm so downstream SSH paths (wait-for-SSH probe,
             # post-provisioning session open) can find the jump host
@@ -403,6 +425,18 @@ try {
                 $vm.privateSwitchName
             }
             Invoke-VmCreation -Vm $vm -SwitchName $primarySwitch
+        }
+        # Follow-up portproxy pass for routers whose IP was unknown
+        # at step 7 (DHCP) and got populated by create-vm.ps1's KVP
+        # discovery just above. Static routers already had their
+        # portproxy set in step 7; the call is idempotent so a static
+        # router whose IP did not change is a no-op. New IP at the
+        # same listen target triggers a delete+re-add inside
+        # Set-RouterSshPortProxy.
+        foreach ($vm in $newVms | Where-Object { $_.kind -eq 'router' }) {
+            if ($vm.PSObject.Properties['ipAddress'] -and $vm.ipAddress) {
+                Set-RouterSshPortProxy -ConnectAddress $vm.ipAddress
+            }
         }
     }
 
