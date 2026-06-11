@@ -50,7 +50,16 @@ function Wait-CloudInitFinished {
         # Cadence between cloud-init status probes. 5s is the smallest
         # value that does not flood the SSH session for a 6-minute
         # boot (~70 lines of output) while still feeling responsive.
-        [int] $PollIntervalSeconds = 5
+        [int] $PollIntervalSeconds = 5,
+
+        # Wrap the dot stream after this many dots so a slow boot
+        # does not produce one long terminal-overflowing line. 60
+        # dots at the 5s default cadence = 5 minutes per visual
+        # row, which lines up with cloud-init's typical first-boot
+        # apt window. The wrap inserts a newline + 4-space indent
+        # so each continuation line stays aligned with the
+        # orchestrator's "  Waiting for cloud-init ..." header.
+        [int] $WrapAfterDots = 60
     )
 
     # Output style: dots streamed for every "nothing changed" poll,
@@ -59,8 +68,15 @@ function Wait-CloudInitFinished {
     # elapsed/budget summary on the same line after we return; the
     # returned object carries ElapsedSeconds + BudgetSeconds so the
     # caller does not have to recompute them.
+    #
+    # Wrap the dot stream every $WrapAfterDots polls so a slow boot
+    # does not produce a 100+ char single line that overflows the
+    # terminal. The wrap injects a newline + 4-space indent + a brief
+    # elapsed-seconds marker so the next line is easy to align
+    # visually against the rest of the post-provisioning log.
     $started    = Get-Date
     $lastStatus = $null
+    $dotsOnLine = 0
     while ($true) {
         $elapsed = [int]((Get-Date) - $started).TotalSeconds
         $statusResult = Invoke-SshClientCommand -SshClient $SshClient `
@@ -100,8 +116,20 @@ function Wait-CloudInitFinished {
         # whatever it is", so we start with a dot.
         if ($null -eq $lastStatus -or $status -eq $lastStatus) {
             Write-Host '.' -NoNewline
+            $dotsOnLine++
+            if ($dotsOnLine -ge $WrapAfterDots) {
+                # Newline + indent so the next dot stream visually
+                # aligns under the orchestrator's header.
+                Write-Host ''
+                Write-Host '    ' -NoNewline
+                $dotsOnLine = 0
+            }
         } else {
             Write-Host " [$status]" -NoNewline
+            # Reset wrap counter on a transition: the inline status
+            # marker already broke the visual cadence, so let the
+            # next batch of dots start fresh.
+            $dotsOnLine = 0
         }
         $lastStatus = $status
 
