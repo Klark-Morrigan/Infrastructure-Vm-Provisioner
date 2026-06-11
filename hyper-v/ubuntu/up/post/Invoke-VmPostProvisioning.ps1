@@ -194,13 +194,15 @@ function Invoke-VmPostProvisioning {
             # cloud-init may still be running its later modules (apt holding
             # the dpkg lock, runcmd not yet started). Wait once, here, so no
             # downstream step has to know about it. The polling helper
-            # (Wait-CloudInitFinished.ps1) emits a per-iteration heartbeat
-            # so a slow runcmd does not look like the script hung.
+            # (Wait-CloudInitFinished.ps1) streams dots while status is
+            # unchanged and injects " [<state>]" inline on a transition;
+            # the elapsed/budget summary below is stamped on the same
+            # line after it returns. SSH-polling output style.
             #
             # Sub-step timer wraps just the wait so the report attributes
             # cloud-init's late-module duration to its own row rather
             # than blending it with the file/reconcile/env work.
-            Write-Host "  Waiting for cloud-init to finish ..."
+            Write-Host "  Waiting for cloud-init to finish ..." -NoNewline
             & $invokeWithSubStepTimer `
                 -Parent 'Post-provisioning' `
                 -Name   'cloud-init wait' `
@@ -208,17 +210,38 @@ function Invoke-VmPostProvisioning {
                     $waitResult = & $waitCloudInitFinished `
                         -SshClient $sshClient `
                         -VmName    $vmName
+                    Write-Host (" {0}s / {1}s ({2})" -f `
+                        $waitResult.ElapsedSeconds,
+                        $waitResult.BudgetSeconds,
+                        $waitResult.Output)
                     if ($waitResult.ExitStatus -ne 0) {
-                        # Non-zero here is most often unrelated to our steps
-                        # (cloud-init may have logged a warning in some
-                        # module). Proceed and let downstream assertions
-                        # surface a real problem rather than abort here on
-                        # a false positive. Logged, not thrown, so the
-                        # sub-step's status stays OK - the wait completed,
-                        # cloud-init merely flagged an internal concern.
-                        Write-Warning ("cloud-init reported a non-zero status " +
-                            "($($waitResult.ExitStatus)) on $vmName. Proceeding " +
-                            "with post-provisioning steps.")
+                        # Fatal. cloud-init reports non-zero specifically
+                        # when a runcmd, write_files, or packages step
+                        # failed - the operator-facing seed contract. The
+                        # 2026-06 dnsmasq-not-installed regression rode in
+                        # under a previous "warn and continue" policy that
+                        # let a broken VM cascade into the assertion
+                        # phase. Better to fail here with a clear
+                        # cloud-init-side cause than to debug a
+                        # downstream symptom.
+                        #
+                        # Diagnostic data: the cloud-init-output.log and
+                        # cloud-init.log captures from
+                        # Invoke-CloudInitDiagnostics (run above) sit in
+                        # <vmConfigPath>/diagnostics/<vmName>/<timestamp>/
+                        # next to console.log; the message points the
+                        # operator at them so they do not have to know
+                        # where to look.
+                        $diagHint = if ($vmConfigPath) {
+                            " Check cloud-init-output.log and cloud-init.log under $vmConfigPath\diagnostics\$vmName\$($vmRef._diagTimestamp)\."
+                        } else { '' }
+                        throw (
+                            "cloud-init on '$vmName' completed with " +
+                            "ExitStatus=$($waitResult.ExitStatus) " +
+                            "(status: $($waitResult.Output)). One of the " +
+                            "seed's write_files / runcmd steps failed." +
+                            $diagHint
+                        )
                     }
                 }
 

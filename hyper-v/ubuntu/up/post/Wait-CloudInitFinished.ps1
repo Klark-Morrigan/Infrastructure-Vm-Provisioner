@@ -53,7 +53,14 @@ function Wait-CloudInitFinished {
         [int] $PollIntervalSeconds = 5
     )
 
-    $started = Get-Date
+    # Output style: dots streamed for every "nothing changed" poll,
+    # inline " [<status>]" injected on a status transition. Matches
+    # the SSH-polling cadence in create-vm.ps1. The caller stamps an
+    # elapsed/budget summary on the same line after we return; the
+    # returned object carries ElapsedSeconds + BudgetSeconds so the
+    # caller does not have to recompute them.
+    $started    = Get-Date
+    $lastStatus = $null
     while ($true) {
         $elapsed = [int]((Get-Date) - $started).TotalSeconds
         $statusResult = Invoke-SshClientCommand -SshClient $SshClient `
@@ -68,23 +75,36 @@ function Wait-CloudInitFinished {
             ($statusLine -replace '.*status:\s*', '').Trim().ToLower()
         } else { 'unknown' }
 
-        Write-Host "  [cloud-init] $($elapsed)s elapsed - status: $status"
-
         if ($status -in @('done', 'error', 'disabled')) {
             $exitCode = if ($status -eq 'error') { 1 } else { 0 }
             return [PSCustomObject]@{
-                ExitStatus = $exitCode
-                Output     = $status
+                ExitStatus     = $exitCode
+                Output         = $status
+                ElapsedSeconds = $elapsed
+                BudgetSeconds  = $BudgetSeconds
             }
         }
         if ($elapsed -ge $BudgetSeconds) {
-            Write-Host ("  [cloud-init] $($elapsed)s elapsed - " +
-                "budget exhausted; continuing.")
             return [PSCustomObject]@{
-                ExitStatus = 124
-                Output     = $status
+                ExitStatus     = 124
+                Output         = $status
+                ElapsedSeconds = $elapsed
+                BudgetSeconds  = $BudgetSeconds
             }
         }
+
+        # Useful info on transition, dot otherwise. First iteration's
+        # $lastStatus is $null, so we suppress the initial transition
+        # marker too - the caller's header (e.g. "Waiting for
+        # cloud-init to finish ...") already implies "status is
+        # whatever it is", so we start with a dot.
+        if ($null -eq $lastStatus -or $status -eq $lastStatus) {
+            Write-Host '.' -NoNewline
+        } else {
+            Write-Host " [$status]" -NoNewline
+        }
+        $lastStatus = $status
+
         Start-Sleep -Seconds $PollIntervalSeconds
     }
 }

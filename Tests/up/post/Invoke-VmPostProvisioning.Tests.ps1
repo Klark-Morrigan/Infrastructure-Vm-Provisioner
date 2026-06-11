@@ -257,9 +257,12 @@ BeforeAll {
     function global:Wait-CloudInitFinished {
         param($SshClient, $VmName, $BudgetSeconds, $PollIntervalSeconds)
         [PSCustomObject]@{
-            ExitStatus = $global:_PostProv_SshExitStatus
-            Output     = if ($global:_PostProv_SshExitStatus -eq 0) { 'done' }
-                         else { 'error' }
+            ExitStatus     = $global:_PostProv_SshExitStatus
+            Output         = if ($global:_PostProv_SshExitStatus -eq 0) {
+                                 'done'
+                             } else { 'error' }
+            ElapsedSeconds = 0
+            BudgetSeconds  = 600
         }
     }
     # Files-dispatch helper. Stubbed at global scope so the
@@ -545,7 +548,12 @@ Describe 'Invoke-VmPostProvisioning' {
             function global:Wait-CloudInitFinished {
                 param($SshClient, $VmName, $BudgetSeconds, $PollIntervalSeconds)
                 $script:_waitCalls += @{ VmName = $VmName }
-                [PSCustomObject]@{ ExitStatus = 0; Output = 'done' }
+                [PSCustomObject]@{
+                    ExitStatus     = 0
+                    Output         = 'done'
+                    ElapsedSeconds = 0
+                    BudgetSeconds  = 600
+                }
             }
             try {
                 Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
@@ -559,10 +567,12 @@ Describe 'Invoke-VmPostProvisioning' {
                 function global:Wait-CloudInitFinished {
                     param($SshClient, $VmName, $BudgetSeconds, $PollIntervalSeconds)
                     [PSCustomObject]@{
-                        ExitStatus = $global:_PostProv_SshExitStatus
-                        Output     = if ($global:_PostProv_SshExitStatus -eq 0) {
+                        ExitStatus     = $global:_PostProv_SshExitStatus
+                        Output         = if ($global:_PostProv_SshExitStatus -eq 0) {
                             'done'
                         } else { 'error' }
+                        ElapsedSeconds = 0
+                        BudgetSeconds  = 600
                     }
                 }
             }
@@ -861,15 +871,37 @@ Describe 'Invoke-VmPostProvisioning' {
             }
         }
 
-        It 'still dispatches steps when cloud-init wait reports non-zero' {
-            # Non-zero cloud-init status is most often unrelated to our
-            # steps - dispatch and let downstream assertions catch real
-            # problems.
+        It 'throws fatally when cloud-init wait reports non-zero' {
+            # Previous policy was "warn and proceed" - the 2026-06
+            # dnsmasq-not-installed regression rode in under it. A
+            # cloud-init exit 1 specifically means a runcmd /
+            # write_files / packages step failed; better to abort
+            # here with a clear cloud-init-side cause than to debug
+            # a downstream symptom (assertion-phase failure on a
+            # service that never got installed).
             $global:_PostProv_SshExitStatus = 1
 
-            Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
+            { Invoke-VmPostProvisioning -Vm (New-VmWithJdk) } |
+                Should -Throw -ExpectedMessage "*cloud-init on 'node-01'*ExitStatus=1*"
 
-            $global:_PostProv_Calls['Invoke-ToolchainReconciliation'].Count | Should -Be 1
+            # And no downstream step runs after the throw.
+            $global:_PostProv_Calls['Invoke-ToolchainReconciliation'].Count |
+                Should -Be 0
+        }
+
+        It 'includes a pointer to the diagnostics folder in the throw message' {
+            # The orchestrator's Invoke-CloudInitDiagnostics call (above
+            # the wait) drops cloud-init-output.log and cloud-init.log
+            # under <vmConfigPath>/diagnostics/<vmName>/<timestamp>/.
+            # The throw should name that path so the operator does
+            # not have to guess where to look.
+            $global:_PostProv_SshExitStatus = 1
+            $vm = New-VmWithJdk
+            $vm | Add-Member -NotePropertyName vmConfigPath `
+                              -NotePropertyValue 'C:\diag-root' -Force
+
+            { Invoke-VmPostProvisioning -Vm $vm } |
+                Should -Throw -ExpectedMessage '*cloud-init-output.log*C:\diag-root\diagnostics\node-01*'
         }
     }
 
