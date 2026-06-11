@@ -208,6 +208,12 @@ $reconcileSubSteps = @(
 )
 
 Initialize-PhaseTimings -Phases @(
+    # Hoisted to the front so a misconfigured host (missing switch,
+    # Public profile, broken ICS DNS proxy) fails in seconds instead
+    # of after minutes of disk copy + tarball download. Owns every
+    # host-deterministic operation: switch ensures, legacy-NAT
+    # cleanup, preflight checks, router-IP discovery, portproxy.
+    'Host network setup',
     # Hashtable items pre-declare their sub-steps so the report shows
     # them as SKIPPED on runs where the work did not apply (e.g.
     # base-image cache hit suppresses the 'download base image' row,
@@ -225,7 +231,6 @@ Initialize-PhaseTimings -Phases @(
         SubSteps = @('JDK', 'dotnet SDK', 'dotnet tools')
     },
     'Cloud-init seed ISO',
-    'Virtual switch + NAT',
     @{
         Name     = 'VM creation'
         SubSteps = @('create + start', 'wait for SSH')
@@ -241,7 +246,64 @@ Initialize-PhaseTimings -Phases @(
 try {
 
     # -----------------------------------------------------------------------
-    # 4. Disk image acquisition (new VMs only)
+    # 4. Host network setup
+    #    Per-env: everything host-side and deterministic that has to be
+    #    in place before any VM-touching work. Hoisted to phase 4 so a
+    #    misconfigured host fails in seconds instead of after disk
+    #    copy + tarball downloads. Order matters:
+    #      a. Legacy NetNat / vNIC cleanup (Invoke-NetworkSetup) FIRST
+    #         so stale state cannot falsely fail the preflight's
+    #         IP-collision check.
+    #      b. External + Private switches before the preflight - the
+    #         preflight's first check is "switch exists".
+    #      c. Assert-HostNetworkPreflight: checks 1-7 with auto-repair
+    #         ON (no VMs alive yet, ICS toggle disrupts nothing).
+    #      d. Router-IP discovery (existing-state routers only - new
+    #         routers get their IP at step 8's KVP discovery).
+    #      e. Localhost portproxy 127.0.0.1:2222 -> <routerIp>:22 so
+    #         WSL-based tools (Ansible) can reach the router. Static
+    #         path runs now; the DHCP follow-up runs in step 8 once
+    #         create-vm.ps1 has populated $routerVm.ipAddress.
+    #      f. Workload _RouterVm stamping so step 8's wait-for-SSH
+    #         and step 9's post-provisioning find the jump host.
+    # -----------------------------------------------------------------------
+
+    Invoke-WithPhaseTimer -Name 'Host network setup' -Action {
+        foreach ($env in (Group-VmsByEnvironment -VmDefs $vmsToProcess)) {
+            if ($env.RouterVms.Count -eq 0) { continue }
+            $routerVm = $env.RouterVms[0]
+
+            Invoke-NetworkSetup -RouterVm    $routerVm `
+                                -WorkloadVms $env.WorkloadVms
+
+            Ensure-ExternalSwitch -Name           $routerVm.externalSwitchName `
+                                  -NetAdapterName $routerVm.externalAdapterName
+            Ensure-PrivateSwitch -Name $routerVm.privateSwitchName
+
+            Assert-HostNetworkPreflight `
+                -SwitchName      $routerVm.externalSwitchName `
+                -WanAdapterName  $routerVm.externalAdapterName `
+                -DnsProbeTarget  $routerVm.gateway
+
+            Resolve-ExistingRouterIp -RouterVm $routerVm
+
+            if ($routerVm.PSObject.Properties['ipAddress'] -and
+                $routerVm.ipAddress) {
+                Set-RouterSshPortProxy -ConnectAddress $routerVm.ipAddress
+            }
+
+            foreach ($workload in $env.WorkloadVms) {
+                Add-Member -InputObject $workload `
+                           -MemberType NoteProperty `
+                           -Name '_RouterVm' `
+                           -Value $routerVm `
+                           -Force
+            }
+        }
+    }
+
+    # -----------------------------------------------------------------------
+    # 5. Disk image acquisition (new VMs only)
     #    Downloads, converts, patches, and copies the per-VM VHDX.
     #    Sets $vm._vhdxPath on each object for use in step 8. Skipped for
     #    existing VMs - their disks already exist and re-copying would lose
@@ -274,7 +336,7 @@ try {
     }
 
     # -----------------------------------------------------------------------
-    # 5. Host-side acquisitions (per VM - new AND existing)
+    # 6. Host-side acquisitions (per VM - new AND existing)
     #    Per-VM orchestrator that dispatches each per-software acquirer whose
     #    opt-in field is set on the VM definition. Self-skips for VMs with no
     #    opt-in fields. Adding a new acquirer is one dispatch line in
@@ -293,7 +355,7 @@ try {
     }
 
     # -----------------------------------------------------------------------
-    # 6. Cloud-init seed ISO generation (new VMs only)
+    # 7. Cloud-init seed ISO generation (new VMs only)
     #    Builds meta-data, user-data, and network-config; writes the ISO.
     #    Sets $vm._seedIsoPath on each object for use in the VM-creation step.
     #    Skipped for existing VMs - cloud-init already ran on their first boot.
@@ -310,99 +372,6 @@ try {
             }
             else {
                 Invoke-SeedIsoGeneration -Vm $vm
-            }
-        }
-    }
-
-    # -----------------------------------------------------------------------
-    # 7. Per-environment network setup
-    #    Group-VmsByEnvironment is the single source of truth for the
-    #    per-environment view. For each environment in the batch:
-    #      - Ensure its router VM's External and Private switches exist.
-    #      - Idempotently clean up any leftover singleton-NAT state for
-    #        the environment's gateway (legacy NetNat + host vNIC IP).
-    #    Preflight (Select-VmsForProvisioning -> Assert-EnvironmentConsistency)
-    #    has already guaranteed every environment with workloads has a
-    #    matching router VM, so an env without a router here can only mean
-    #    the router was dropped during classification (IP conflict /
-    #    offline VM); that env is skipped with the router itself.
-    #    All operations are idempotent so a re-run against a partially-
-    #    migrated host converges on the router-VM topology.
-    # -----------------------------------------------------------------------
-
-    Invoke-WithPhaseTimer -Name 'Virtual switch + NAT' -Action {
-        foreach ($env in (Group-VmsByEnvironment -VmDefs $vmsToProcess)) {
-            if ($env.RouterVms.Count -eq 0) { continue }
-            $routerVm = $env.RouterVms[0]
-
-            # External switch first - if it cannot be created, there is
-            # no point creating the private switch that depends on it.
-            Ensure-ExternalSwitch -Name           $routerVm.externalSwitchName `
-                                  -NetAdapterName $routerVm.externalAdapterName
-
-            # Gate on host-side network sanity BEFORE Invoke-NetworkSetup
-            # / Resolve-ExistingRouterIp / VM creation. Catches the
-            # WiFi-MAC-collision and ICS-DHCP-drift failure modes (plus
-            # any other obviously-broken host state) in seconds, instead
-            # of after a 10-minute wait-for-SSH timeout. Throws on FAIL
-            # with an actionable message; PASS/WARN do not abort.
-            # Auto-repair ON by default in the provisioner gate: nothing
-            # else is running yet (we are pre-VM-creation), so a brief
-            # ICS toggle disrupts nothing. The DNS-via-ICS check uses
-            # the router's own gateway address as the probe target -
-            # same path the VM is about to traverse.
-            Assert-HostNetworkPreflight `
-                -SwitchName      $routerVm.externalSwitchName `
-                -WanAdapterName  $routerVm.externalAdapterName `
-                -DnsProbeTarget  $routerVm.gateway
-
-            Ensure-PrivateSwitch -Name $routerVm.privateSwitchName
-
-            # Cleanup runs even for a router-only env so a stale host-
-            # side NetNat / vNIC IP gets cleaned up the first time the
-            # router VM is provisioned.
-            Invoke-NetworkSetup -RouterVm    $routerVm `
-                                -WorkloadVms $env.WorkloadVms
-
-            # Router-IP availability for the workload stamping below.
-            # new-state routers get their IP populated by create-vm.ps1's
-            # own KVP discovery at step 8; existing-state routers need
-            # this helper to close the gap, otherwise the workload's
-            # $_RouterVm.ipAddress would be unread/unset when its own
-            # wait-for-SSH opens the tunnel. See the helper docstring
-            # for the full state matrix.
-            Resolve-ExistingRouterIp -RouterVm $routerVm
-
-            # Ensure a host-side localhost portproxy so WSL-based
-            # tools (e.g. the Ansible flow in Infrastructure-Vm-Ansible
-            # invoked via `wsl -d <distro> -- ./ops/create-users.sh`)
-            # can reach the router VM. WSL2 runs as its own Hyper-V
-            # guest with its own NAT; outbound from WSL to the host's
-            # Internal-switch subnet is not forwarded through ICS NAT.
-            # The portproxy turns the cross-subnet hop into a same-host
-            # loopback (127.0.0.1:2222 -> <routerIp>:22) that WSL can
-            # always reach. Idempotent across runs; persistent across
-            # reboots. Skipped when the router IP is not yet known
-            # (DHCP routers at this stage); create-vm.ps1's KVP
-            # discovery will populate $routerVm.ipAddress in step 8,
-            # at which point a follow-up call covers them too.
-            if ($routerVm.PSObject.Properties['ipAddress'] -and
-                $routerVm.ipAddress) {
-                Set-RouterSshPortProxy -ConnectAddress $routerVm.ipAddress
-            }
-
-            # Stamp the env's router VM onto every workload as
-            # _RouterVm so downstream SSH paths (wait-for-SSH probe,
-            # post-provisioning session open) can find the jump host
-            # without re-running the per-env grouping. The router's
-            # NoteProperties carry its SSH credentials, which the
-            # tunnel needs to authenticate the jump leg.
-            foreach ($workload in $env.WorkloadVms) {
-                Add-Member -InputObject $workload `
-                           -MemberType NoteProperty `
-                           -Name '_RouterVm' `
-                           -Value $routerVm `
-                           -Force
             }
         }
     }
@@ -427,9 +396,9 @@ try {
             Invoke-VmCreation -Vm $vm -SwitchName $primarySwitch
         }
         # Follow-up portproxy pass for routers whose IP was unknown
-        # at step 7 (DHCP) and got populated by create-vm.ps1's KVP
+        # at step 4 (DHCP) and got populated by create-vm.ps1's KVP
         # discovery just above. Static routers already had their
-        # portproxy set in step 7; the call is idempotent so a static
+        # portproxy set in step 4; the call is idempotent so a static
         # router whose IP did not change is a no-op. New IP at the
         # same listen target triggers a delete+re-add inside
         # Set-RouterSshPortProxy.

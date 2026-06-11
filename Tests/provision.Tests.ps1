@@ -357,13 +357,13 @@ Describe 'provision.ps1 - jump host wiring (feature 53 step 3 follow-up)' {
         $text | Should -Match "-Value\s+\`$routerVm"
     }
 
-    It 'places the _RouterVm stamping inside the network setup phase' {
-        # The router VM is mintable only inside the network-setup loop
-        # (Group-VmsByEnvironment is what surfaces it). Anywhere else
-        # in the file is a sign the loop's per-env router context was
-        # lost. This pins the Add-Member's surrounding phase header.
+    It 'places the _RouterVm stamping inside the host network setup phase' {
+        # The router VM is mintable only inside the host-network-setup
+        # loop (Group-VmsByEnvironment is what surfaces it). Anywhere
+        # else in the file is a sign the loop's per-env router context
+        # was lost. This pins the Add-Member's surrounding phase header.
         $text       = Get-Content -Path $script:provisionPath -Raw
-        $phaseAt    = $text.IndexOf("Invoke-WithPhaseTimer -Name 'Virtual switch + NAT'")
+        $phaseAt    = $text.IndexOf("Invoke-WithPhaseTimer -Name 'Host network setup'")
         $addMember  = $text.IndexOf("-Name '_RouterVm'")
         $phaseAt    | Should -BeGreaterThan -1
         $addMember  | Should -BeGreaterThan $phaseAt

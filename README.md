@@ -814,40 +814,45 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
    Router VMs (`kind: router`) take the router-seed path instead - see
    [Router VM](#router-vm-kind-router) for the dual-NIC netplan and
    the nftables / dnsmasq / sysctl payload it lands.
-7. **(always)** Per-environment network setup. For each router VM in
-   the batch, ensures the External switch named in
-   `externalSwitchName` exists (created on demand bound to
-   `externalAdapterName`). Immediately after, **gates on a
-   host-side network preflight** (`Assert-HostNetworkPreflight`)
-   that throws on any of: missing/wrong-type switch, host vNIC down
-   or unbound, Internal vSwitch sharing MAC with a Wi-Fi adapter
-   (stale config from an unfinished External -> Internal+ICS
-   migration), External vSwitch bridged to Wi-Fi (guaranteed
-   host-vs-VM IP collision via shared MAC at the AP), missing
-   connected route, IP collision between host vNIC and any VM on
-   that switch, vEthernet's network profile being `Public` (which
-   blocks ICS's DNS-In firewall rule and silently breaks VM DNS),
-   or the ICS DNS proxy not answering at `192.168.137.1`. The last
-   two are **auto-repaired** in the provisioner gate: profile
-   gets flipped to `Private`, and ICS sharing is toggled off+on via
-   the `HNetCfg` COM API to kick a hung DNS proxy. One repair
-   attempt per check; if it doesn't take, that surfaces as a clean
-   FAIL with the next steps named in the error. Failing fast here
-   saves the 10-minute wait-for-SSH burn the misconfigured host
-   would otherwise pay.
-   See [`Test-HostNetworkPreflight.ps1`](#test-hostnetworkpreflightps1)
-   for the manual entry point with the same checks. Then ensures
-   the per-environment Private switch named in `privateSwitchName`
-   exists, and runs an idempotent cleanup of any legacy
-   singleton-NAT state for the environment's gateway IP - any
-   `New-NetNat` whose prefix covers the gateway, and any host vNIC
-   carrying that IP, are removed. Safe to re-run against a
-   partially-migrated host. The whole step is idempotent, so it
-   runs even when only existing VMs are being reconciled so a
-   rebuilt host gets the network re-applied. See
-   [Networking](#networking) for the resulting topology.
+7. **(always)** **Host network setup.** Hoisted to fire **before**
+   disk acquisition and host-side downloads so a misconfigured host
+   fails in seconds instead of after minutes of wasted setup. For
+   each router VM in the batch, in dependency order:
+   1. **Legacy NetNat / vNIC cleanup** first, so stale state from a
+      partially-migrated host cannot falsely fail the preflight's
+      IP-collision check.
+   2. **External + Private switch ensures** (the preflight's first
+      check is "switch exists").
+   3. **`Assert-HostNetworkPreflight`** — throws on any of:
+      missing/wrong-type switch, host vNIC down or unbound, Internal
+      vSwitch sharing MAC with a Wi-Fi adapter (stale config from
+      an unfinished External -> Internal+ICS migration), External
+      vSwitch bridged to Wi-Fi (guaranteed host-vs-VM IP collision
+      via shared MAC at the AP), missing connected route, IP
+      collision between host vNIC and any VM on that switch,
+      vEthernet's network profile being `Public` (which blocks ICS's
+      DNS-In firewall rule and silently breaks VM DNS), or the ICS
+      DNS proxy not answering at `192.168.137.1`. The last two are
+      **auto-repaired** in the provisioner gate: profile gets
+      flipped to `Private`, and ICS sharing is toggled off+on via
+      the `HNetCfg` COM API to kick a hung DNS proxy. One repair
+      attempt per check; if it doesn't take, surfaces as a clean
+      FAIL with the next steps named in the error. See
+      [`Test-HostNetworkPreflight.ps1`](#test-hostnetworkpreflightps1)
+      for the manual entry point with the same checks.
+   4. **Router-IP discovery** for existing routers
+      (`Resolve-ExistingRouterIp` — looks up the IP via Hyper-V
+      KVP; new-state routers get theirs at step 8's create-vm.ps1
+      KVP discovery, then a follow-up portproxy pass closes the
+      loop).
+   5. **Localhost portproxy** `127.0.0.1:2222 -> <routerIp>:22` so
+      WSL-based tools (the Ansible flow) can reach the router VM
+      without crossing ICS NAT. Static routers get theirs now; DHCP
+      routers get theirs at the end of step 8.
+   6. **Workload `_RouterVm` stamping** so step 8's wait-for-SSH
+      and step 9's post-provisioning can find the jump host.
 8. **(new VMs only)** Creates each VM (Gen 2, static RAM, VHDX from
-   step 4), sets Secure Boot to `MicrosoftUEFICertificateAuthority`
+   step 5), sets Secure Boot to `MicrosoftUEFICertificateAuthority`
    (required for Ubuntu), attaches the seed ISO, connects to its
    `privateSwitchName` (workload VMs) or `externalSwitchName`
    (router VMs), and starts the VM. Router VMs additionally get a
@@ -978,7 +983,7 @@ change (switch recreate, ICS toggle, Wi-Fi LAN change).
 ```
 
 Thin wrapper around `Assert-HostNetworkPreflight` that
-`provision.ps1` step 7 already fires automatically before VM
+`provision.ps1`'s `Host network preflight` phase already fires automatically as the very first network operation, before any disk acquisition or VM
 creation. Surfaces the same checks as a standalone command so the
 operator can confirm a clean host without committing to a full
 provisioning run.
