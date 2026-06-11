@@ -42,6 +42,7 @@ BeforeAll {
         'Initialize-VmManifestStore'       = @()
         'Get-Providers'                    = @()
         'Invoke-ToolchainReconciliation'   = @()
+        'Assert-RouterServicesActive'      = @()
     }
     function global:Reset-PostProvCallLog {
         foreach ($k in @($global:_PostProv_Calls.Keys)) {
@@ -233,6 +234,16 @@ BeforeAll {
     function global:Invoke-CloudInitDiagnostics {
         param($SshClient, $VmConfigPath, $VmName, $Timestamp)
     }
+    # Router-only service check the orchestrator runs after
+    # cloud-init wait. Stubbed at global scope and tracked so tests
+    # can assert it fires for routers AND does not fire for workloads.
+    function global:Assert-RouterServicesActive {
+        param($SshClient, $VmName, $RequiredServices)
+        $global:_PostProv_Calls['Assert-RouterServicesActive'] += @{
+            VmName           = $VmName
+            RequiredServices = $RequiredServices
+        }
+    }
     function global:New-DiagnosticSshClientWrapper {
         param($RealClient, $VmConfigPath, $VmName, $Timestamp)
         return $RealClient
@@ -258,6 +269,16 @@ BeforeAll {
             username  = 'admin'
             password  = 'unit-test-password-not-real'
         }
+    }
+
+    function New-RouterVm {
+        # Minimal router VM def: no files / javaDevKit / envVars
+        # (routers do not get any opt-in fields by design) but with
+        # kind='router'. Mirrors what New-RouterEntry produces in the
+        # E2E test path - schema-valid for the orchestrator to act on.
+        $vm = New-PlainVm
+        $vm | Add-Member -NotePropertyName 'kind' -NotePropertyValue 'router' -Force
+        $vm
     }
 
     function New-VmWithJdk {
@@ -380,6 +401,40 @@ Describe 'Invoke-VmPostProvisioning' {
     BeforeEach {
         Reset-PostProvCallLog
         $global:_PostProv_SshExitStatus = 0
+    }
+
+    Context 'router VMs (kind = router)' {
+        # Router VMs intentionally have no files / javaDevKit /
+        # envVars; the per-field early-return must NOT short-
+        # circuit on them because Assert-RouterServicesActive
+        # is the fail-fast gate for the seed's nftables / dnsmasq
+        # services. Without these tests, the 2026-06 regression
+        # where the strict check silently never ran could come
+        # back the next time someone tweaks the gate.
+
+        It 'does NOT short-circuit on a router VM with no opt-in fields' {
+            Invoke-VmPostProvisioning -Vm (New-RouterVm)
+
+            # File server + SSH session must open; reconciler /
+            # files / envVars are not gated to router, they just
+            # don't apply, so we assert specifically on the
+            # router-only check that's the reason post runs at all.
+            $global:_PostProv_Calls['Invoke-WithVmFileServer'].Count | Should -BeGreaterThan 0
+            $global:_PostProv_Calls['Assert-RouterServicesActive'].Count | Should -Be 1
+        }
+
+        It 'calls Assert-RouterServicesActive with the router vmName' {
+            Invoke-VmPostProvisioning -Vm (New-RouterVm)
+
+            $call = $global:_PostProv_Calls['Assert-RouterServicesActive'][0]
+            $call.VmName | Should -Be 'node-01'
+        }
+
+        It 'does NOT call Assert-RouterServicesActive for a workload VM' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
+
+            $global:_PostProv_Calls['Assert-RouterServicesActive'].Count | Should -Be 0
+        }
     }
 
     Context 'no opt-in fields' {

@@ -43,7 +43,15 @@ function Invoke-VmPostProvisioning {
     # operator's explicit "remove the managed block" intent, so it must
     # still route through to the transport.
     $hasEnvVars = $Vm.PSObject.Properties['envVars']
-    if (-not ($hasFiles -or $hasJdk -or $hasEnvVars)) {
+    # Router VMs MUST run post-provisioning even with no opt-in fields:
+    # Assert-RouterServicesActive (below) is the fail-fast gate for
+    # nftables / dnsmasq service state, and the cloud-init wait gives
+    # those services time to bind interfaces before the check fires.
+    # Without this branch, router VMs short-circuit out and a dead
+    # dnsmasq is only caught later by the E2E assertion phase.
+    $isRouter   = $Vm.PSObject.Properties['kind'] -and
+                  $Vm.kind -eq 'router'
+    if (-not ($hasFiles -or $hasJdk -or $hasEnvVars -or $isRouter)) {
         return
     }
 
