@@ -52,7 +52,13 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common\diag\Get-VmDiagFolder.ps1"
 . "$PSScriptRoot\common\diag\Invoke-VmRuntimeDiag.ps1"
 . "$PSScriptRoot\common\network\Get-VmAdapterIPv4.ps1"
-. "$PSScriptRoot\common\network\Assert-HostNetworkPreflight.ps1"
+. "$PSScriptRoot\common\network\ics\Reset-IcsSharing.ps1"
+. "$PSScriptRoot\common\network\preflight\checks\Test-IcsDnsReachable.ps1"
+. "$PSScriptRoot\common\network\preflight\checks\Test-IsCurrentSessionElevated.ps1"
+. "$PSScriptRoot\common\network\preflight\checks\Test-HostNetworkProfileSetting.ps1"
+. "$PSScriptRoot\common\network\preflight\checks\Test-IcsDnsProxyReachable.ps1"
+. "$PSScriptRoot\common\network\preflight\Assert-PreflightFindings.ps1"
+. "$PSScriptRoot\common\network\preflight\Assert-HostNetworkPreflight.ps1"
 . "$PSScriptRoot\common\network\Assert-WorkloadReachableViaRouter.ps1"
 . "$PSScriptRoot\common\network\Remove-LegacySingletonNat.ps1"
 . "$PSScriptRoot\common\network\Resolve-ExistingRouterIp.ps1"
@@ -336,7 +342,15 @@ try {
             # any other obviously-broken host state) in seconds, instead
             # of after a 10-minute wait-for-SSH timeout. Throws on FAIL
             # with an actionable message; PASS/WARN do not abort.
-            Assert-HostNetworkPreflight -SwitchName $routerVm.externalSwitchName
+            # Auto-repair ON by default in the provisioner gate: nothing
+            # else is running yet (we are pre-VM-creation), so a brief
+            # ICS toggle disrupts nothing. The DNS-via-ICS check uses
+            # the router's own gateway address as the probe target -
+            # same path the VM is about to traverse.
+            Assert-HostNetworkPreflight `
+                -SwitchName      $routerVm.externalSwitchName `
+                -WanAdapterName  $routerVm.externalAdapterName `
+                -DnsProbeTarget  $routerVm.gateway
 
             Ensure-PrivateSwitch -Name $routerVm.privateSwitchName
 

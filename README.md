@@ -233,7 +233,7 @@ discovered via Hyper-V KVP after boot - inspect with
 | `ipAddress`     | string | Static IPv4 address inside the VM. **Required** for workload VMs, and for router VMs only when `externalDhcp: false`. Router VMs with `externalDhcp: true` (the default) get their upstream IP via DHCP and discover it through Hyper-V KVP after boot. |
 | `subnetMask`    | string | CIDR prefix length, e.g. `"24"`. Required on every VM - workloads use it for their NIC; router VMs use it for the priv0 (downstream) NIC even under DHCP. |
 | `gateway`       | string | Default gateway for the VM. **Required** for workload VMs (and **must equal** the matching router VM's `privateIpAddress` - preflight enforced). For router VMs, required only when `externalDhcp: false`. |
-| `dns`           | string | DNS server IP. On workloads this is the resolver (set to the router VM's `privateIpAddress`); on routers this is dnsmasq's upstream forwarder. |
+| `dns`           | string | DNS server IP. On workloads this is the resolver (set to the router VM's `privateIpAddress`); on routers this is netplan's nameserver AND dnsmasq's upstream forwarder. **Topology note:** when the host is on Internal+ICS, set router `dns` to the **ICS gateway** (typically `192.168.137.1`), NOT a public resolver like `8.8.8.8` — ICS NAT for outbound UDP/53 to public IPs is unreliable, whereas the ICS gateway's built-in DNS proxy is a local hop. |
 | `vmConfigPath`  | string | Windows path where seed ISO is written             |
 | `vhdPath`       | string | Windows path where VHDX files are stored           |
 | `privateSwitchName`  | string  | Per-environment Hyper-V Private switch this VM attaches to. Required on both VM kinds (workloads attach their only NIC to it; router VMs attach their downstream NIC to it). Created on demand by `Ensure-PrivateSwitch` when absent. |
@@ -824,9 +824,17 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
    (stale config from an unfinished External -> Internal+ICS
    migration), External vSwitch bridged to Wi-Fi (guaranteed
    host-vs-VM IP collision via shared MAC at the AP), missing
-   connected route, or IP collision between host vNIC and any VM
-   on that switch. Failing fast here saves the 10-minute
-   wait-for-SSH burn the misconfigured host would otherwise pay.
+   connected route, IP collision between host vNIC and any VM on
+   that switch, vEthernet's network profile being `Public` (which
+   blocks ICS's DNS-In firewall rule and silently breaks VM DNS),
+   or the ICS DNS proxy not answering at `192.168.137.1`. The last
+   two are **auto-repaired** in the provisioner gate: profile
+   gets flipped to `Private`, and ICS sharing is toggled off+on via
+   the `HNetCfg` COM API to kick a hung DNS proxy. One repair
+   attempt per check; if it doesn't take, that surfaces as a clean
+   FAIL with the next steps named in the error. Failing fast here
+   saves the 10-minute wait-for-SSH burn the misconfigured host
+   would otherwise pay.
    See [`Test-HostNetworkPreflight.ps1`](#test-hostnetworkpreflightps1)
    for the manual entry point with the same checks. Then ensures
    the per-environment Private switch named in `privateSwitchName`
@@ -855,7 +863,17 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
    entry point and the on-disk layout under
    `<vhdPath>/diagnostics/<vmName>/<timestamp>/`.
 9. **(new AND existing VMs)** Runs post-provisioning. Opens one host file server and
-    one SSH session per VM, waits once for cloud-init to finish, then
+    one SSH session per VM, **waits for cloud-init to finish** by
+    polling `cloud-init status` every 5s and streaming a dot per
+    poll (line wraps every 60 dots = 5 min) so a slow first-boot
+    looks like progress, not a hang. Wall-clock cap is 600s. When
+    cloud-init terminates with **non-zero exit** (its way of
+    reporting a `runcmd` / `write_files` / `packages` failure), the
+    provisioner **throws fatally** with a message pointing at the
+    `<vhdPath>/diagnostics/<vmName>/<timestamp>/` folder where
+    `Invoke-CloudInitDiagnostics` already dropped
+    `cloud-init-output.log` + `cloud-init.log` + the network
+    snapshot, so the underlying failure is one Read away. Then
     dispatches each enabled step:
     - **`files`** copies host files to declared VM paths (each entry is
       dispatched in JSON order: single entries via `Copy-VmFiles`, bulk
@@ -974,10 +992,17 @@ provisioning run.
 | 3 | Switch-type-specific MAC story | **Internal**: vEthernet MAC matches a Wi-Fi NIC -> stale config (forgot to recreate as Internal after External -> ICS migration). **External**: vEthernet MAC matches a Wi-Fi NIC -> Hyper-V is MAC-translating every VM's egress to the host's Wi-Fi MAC, so the AP gives the host vNIC and every VM the same DHCP lease and they collide on the same IP. |
 | 4 | Connected route to host vNIC subnet via that vNIC | Route missing -> host routes VM-subnet traffic out the Wi-Fi default gateway by mistake (the "duplicate-IP / SourceAddress=WiFi" symptom). |
 | 5 | No IP collision between host vNIC and any VM on the switch | The Wi-Fi External-bridge MAC-sharing smoking gun -> host steals VM traffic via local routing. |
+| 6 | vEthernet network profile = Private (Internal switches only) | `Public` blocks ICS's auto-generated DNS-In firewall rule so VM DNS queries silently drop. Auto-repaired when `-AutoRepair` is set (only toggles when current is Public; never redundantly). |
+| 7 | ICS DNS proxy answers at `$DnsProbeTarget` | The proxy's known broken state: it answers UDP/53 queries with TCP RSTs. Auto-repaired via `Reset-IcsSharing` (the programmatic equivalent of toggling the WiFi Sharing checkbox), one attempt + one re-probe; failure surfaces as a clean FAIL pointing at `Get-Service SharedAccess` + firewall rules. |
 
-`SwitchName` defaults to `ExternalSwitch-Shared` to match the
-provisioner's secret.json convention; override with
-`-SwitchName <name>` when probing a custom-named switch.
+**Parameters:**
+
+| Param | Default | Effect |
+|---|---|---|
+| `-SwitchName` | `ExternalSwitch-Shared` | The External vSwitch to inspect (matches `secret.json`'s `externalSwitchName`). |
+| `-DnsProbeTarget` | `192.168.137.1` | Address the DNS-via-ICS check probes (the host-side ICS gateway IP). |
+| `-WanAdapterName` | `Wi-Fi` | WAN side passed to `Reset-IcsSharing` during auto-repair. |
+| `-AutoRepair` | off | Opt INTO check 6/7 auto-repair. Default off for the manual entry point because an interactive operator may have other VMs alive that would lose their default route during an ICS toggle. The provisioner gate calls `Assert-HostNetworkPreflight` directly with auto-repair on (no live VMs at preflight time). |
 
 ---
 
@@ -1154,8 +1179,20 @@ Infrastructure-VM-Provisioner/
 |     |  |  |- Get-VmDiagFolder.ps1          # Pure helper: the single source of truth for <vhdPath>/diagnostics/<vmName>/<timestamp>/ - every diag artifact (console.log, cloud-init-*.txt, ssh.log, runtime-diag.log) lands at the same path.
 |     |  |  `- Invoke-VmRuntimeDiag.ps1      # Host-side + best-effort guest-side runtime snapshot. Auto-fires from create-vm.ps1's wait-for-SSH and router-side reachability timeout paths. Manual entry point: scripts\Get-VmRuntimeDiag.ps1.
 |     |  `- network/
-|     |     |- Assert-HostNetworkPreflight.ps1 # Five host-side network checks (switch type, vNIC up + IP, MAC story, connected route, host-vs-VM IP collision). Throws on FAIL. Gate at provision.ps1 step 7; manual entry point: scripts\Test-HostNetworkPreflight.ps1.
-|     |     `- Remove-LegacySingletonNat.ps1 # Idempotent NetNat + host vNIC cleanup at a given gateway IP. Shared by Invoke-NetworkSetup (provision) and Invoke-NetworkTeardown (deprovision); also exports Test-IpInPrefix.
+|     |     |- preflight/
+|     |     |  |- Assert-HostNetworkPreflight.ps1   # Orchestrator: seven host-side network checks (switch type, vNIC up + IP, MAC story, connected route, host-vs-VM IP collision, vEthernet profile, ICS DNS proxy reachability). Throws on FAIL via Assert-PreflightFindings. Gate at provision.ps1 step 7; manual entry: scripts\Test-HostNetworkPreflight.ps1.
+|     |     |  |- Assert-PreflightFindings.ps1      # Multi-line throw collector: consolidates every FAIL finding into one operator-facing error.
+|     |     |  `- checks/
+|     |     |     |- Test-HostNetworkProfileSetting.ps1  # Check 6: vEthernet profile must be Private (Public blocks ICS DNS-In). Only-toggles-when-Public auto-repair.
+|     |     |     |- Test-IcsDnsProxyReachable.ps1       # Check 7: probes ICS DNS proxy via the gateway IP; one-shot Reset-IcsSharing auto-repair on FAIL.
+|     |     |     |- Test-IcsDnsReachable.ps1            # Pure predicate: Resolve-DnsName wrapper used by check 7.
+|     |     |     `- Test-IsCurrentSessionElevated.ps1   # Pure predicate: WindowsPrincipal admin check used by check 0.
+|     |     |- ics/
+|     |     |  `- Reset-IcsSharing.ps1              # HNetCfg COM-API equivalent of toggling the WiFi adapter's Sharing checkbox off+on. The canonical kick for a hung ICS DNS proxy (Restart-Service alone doesn't do it).
+|     |     |- Assert-WorkloadReachableViaRouter.ps1 # Workload-side reachability gate: SSHs through the router VM jump host to a workload's private IP. Surfaces dead workloads before per-VM dispatch.
+|     |     |- Get-VmAdapterIPv4.ps1                # Pure helper: extracts IPv4 from VMNetworkAdapter objects under StrictMode (PSObject.Properties guard + IPv4 anchor regex).
+|     |     |- Resolve-ExistingRouterIp.ps1        # Router-IP lookup from existing Hyper-V state when the router is already up (reconcile path).
+|     |     `- Remove-LegacySingletonNat.ps1       # Idempotent NetNat + host vNIC cleanup at a given gateway IP. Shared by Invoke-NetworkSetup (provision) and Invoke-NetworkTeardown (deprovision); also exports Test-IpInPrefix.
 |     |- up/
 |     |  |- config/
 |     |  |  |- Assert-EnvironmentConsistency.ps1 # Per-env preflight: shared gateway/subnet, exactly-one router per env, gateway = router's privateIpAddress. Built on Group-VmsByEnvironment.
@@ -1191,7 +1228,13 @@ Infrastructure-VM-Provisioner/
 |     |  |- acquire/
 |     |  |  `- Invoke-VmAcquisitions.ps1        # Per-VM host-side acquisition orchestrator; dispatches each per-software acquirer guarded by its opt-in field
 |     |  |- post/
-|     |  |  |- Invoke-VmPostProvisioning.ps1    # Per-VM transport orchestrator (file server + SSH + cloud-init wait), dispatches steps; calls Infrastructure.HyperV's Copy-VmFiles for the 'files' step
+|     |  |  |- Invoke-VmPostProvisioning.ps1    # Per-VM transport orchestrator (file server + SSH + cloud-init wait), dispatches steps; throws fatally on cloud-init non-zero exit with a pointer at the diagnostics folder
+|     |  |  |- Wait-CloudInitFinished.ps1       # Polls 'cloud-init status' over SSH; streams a dot per poll (line-wraps every 60), returns elapsed/budget/status so the caller stamps a summary line. 600s wall-clock cap.
+|     |  |  |- Invoke-VmFilesDispatch.ps1       # Single-vs-bulk router for the 'files' step entries (presence of 'pattern' = bulk). Owns the operator-visible "[files] processing N entry(s)" cadence and the JSON-order contract.
+|     |  |  |- Assert-RouterServicesActive.ps1  # Strict post-cloud-init check that nftables.service + dnsmasq.service are active on router VMs. Fail-fast for the dnsmasq-install regression.
+|     |  |  |- Invoke-CloudInitDiagnostics.ps1  # Captures cloud-init-output.log + cloud-init.log + netplan + reachability into <vhdPath>/diagnostics/<vmName>/<timestamp>/ alongside console.log. Fires on every post-provisioning run, not just failures.
+|     |  |  |- Invoke-SerialConsoleCapture.ps1  # Mirrors the VM's serial console to console.log during VM-creation wait.
+|     |  |  |- New-DiagnosticSshClientWrapper.ps1 # Wraps the real SshClient with a tee-to-file logger covering the whole post-provisioning phase (writes ssh.log next to console.log).
 |     |  |  `- Set-EnvironmentVariables.ps1     # Step: writes a managed block of NAME="VALUE" lines into /etc/environment via Infrastructure.HyperV's Set-VmEnvironmentVariables
 |     |  |- network/
 |     |  |  `- setup-network.ps1               # Per-env wrapper around Remove-LegacySingletonNat; switch creation lives in Ensure-PrivateSwitch / Ensure-ExternalSwitch

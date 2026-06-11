@@ -2,17 +2,29 @@ BeforeAll {
     # Stub Hyper-V / networking cmdlets unavailable outside a Hyper-V
     # host so the source file can be dot-sourced and the cmdlets mocked
     # per-test.
-    function Get-VMSwitch          { param([string]$Name, $ErrorAction) }
-    function Get-NetAdapter        { param([string]$Name, [switch]$Physical, $ErrorAction) }
-    function Get-NetIPAddress      { param([string]$InterfaceAlias, $AddressFamily, $ErrorAction) }
-    function Get-NetRoute          { param([string]$DestinationPrefix, $ErrorAction) }
-    function Get-VMNetworkAdapter  { param([switch]$All, $ErrorAction) }
+    function Get-VMSwitch              { param([string]$Name, $ErrorAction) }
+    function Get-NetAdapter            { param([string]$Name, [switch]$Physical, $ErrorAction) }
+    function Get-NetIPAddress          { param([string]$InterfaceAlias, $AddressFamily, $ErrorAction) }
+    function Get-NetRoute              { param([string]$DestinationPrefix, $ErrorAction) }
+    function Get-VMNetworkAdapter      { param([switch]$All, $ErrorAction) }
+    function Get-NetConnectionProfile  { param([string]$InterfaceAlias, $ErrorAction) }
+    function Set-NetConnectionProfile  { param([string]$InterfaceAlias, [string]$NetworkCategory) }
+    function Reset-IcsSharing          { param([string]$WanInterfaceName, [string]$LanInterfaceName) }
+    function Resolve-DnsName           { param([string]$Name, [string]$Server, [switch]$DnsOnly, $ErrorAction) }
 
     # Pure adapter-IPv4 extractor - dot-source the real one so the
     # IP-collision check's StrictMode-safety contract is exercised
     # end-to-end, not stubbed.
-    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\common\network\Get-VmAdapterIPv4.ps1"
-    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\common\network\Assert-HostNetworkPreflight.ps1"
+    $net       = "$PSScriptRoot\..\..\..\..\hyper-v\ubuntu\common\network"
+    $preflight = "$net\preflight"
+    $checks    = "$preflight\checks"
+    . "$net\Get-VmAdapterIPv4.ps1"
+    . "$checks\Test-IcsDnsReachable.ps1"
+    . "$checks\Test-IsCurrentSessionElevated.ps1"
+    . "$checks\Test-HostNetworkProfileSetting.ps1"
+    . "$checks\Test-IcsDnsProxyReachable.ps1"
+    . "$preflight\Assert-PreflightFindings.ps1"
+    . "$preflight\Assert-HostNetworkPreflight.ps1"
 
     function New-IcsVNic {
         param([string] $Mac = '00-15-5D-00-BB-FB')
@@ -40,7 +52,8 @@ BeforeAll {
 
     function Initialize-HappyMocks {
         # Default = clean Internal+ICS setup, elevated session,
-        # no VMs on switch.
+        # no VMs on switch, profile already Private, ICS DNS proxy
+        # answering. Anything more interesting flips one mock.
         Mock Test-IsCurrentSessionElevated { $true }
         Mock Get-VMSwitch         { [PSCustomObject]@{ Name = 'ExternalSwitch-Shared'; SwitchType = 'Internal' } }
         Mock Get-NetAdapter       {
@@ -55,6 +68,15 @@ BeforeAll {
             }
         }
         Mock Get-VMNetworkAdapter { }
+        Mock Get-NetConnectionProfile {
+            [PSCustomObject]@{
+                InterfaceAlias  = 'vEthernet (ExternalSwitch-Shared)'
+                NetworkCategory = 'Private'
+            }
+        }
+        Mock Set-NetConnectionProfile { }
+        Mock Reset-IcsSharing { }
+        Mock Test-IcsDnsReachable { $true }
     }
 }
 
@@ -382,6 +404,169 @@ Describe 'Assert-HostNetworkPreflight' {
                 $msg | Should -Match 'Host vNIC'
                 $msg | Should -Match 'has IPv4'
             }
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'network profile (only-toggle-when-Public)' {
+    # ------------------------------------------------------------------
+
+        It 'does NOT call Set-NetConnectionProfile when profile is already Private' {
+            # User contract: a toggle only when it is Public. Re-runs
+            # of the preflight against an already-Private profile
+            # must stay quiet, not redundantly Set-NetConnectionProfile.
+            Initialize-HappyMocks
+
+            Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared'
+
+            Should -Invoke Set-NetConnectionProfile -Times 0
+        }
+
+        It 'switches profile to Private when current is Public and auto-repair is allowed' {
+            Initialize-HappyMocks
+            Mock Get-NetConnectionProfile {
+                [PSCustomObject]@{
+                    InterfaceAlias  = 'vEthernet (ExternalSwitch-Shared)'
+                    NetworkCategory = 'Public'
+                }
+            }
+
+            Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared'
+
+            Should -Invoke Set-NetConnectionProfile -Times 1 -Exactly -ParameterFilter {
+                $InterfaceAlias  -eq 'vEthernet (ExternalSwitch-Shared)' -and
+                $NetworkCategory -eq 'Private'
+            }
+        }
+
+        It 'FAILs (does not mutate) when profile is Public AND -NoAutoRepair is set' {
+            Initialize-HappyMocks
+            Mock Get-NetConnectionProfile {
+                [PSCustomObject]@{
+                    InterfaceAlias  = 'vEthernet (ExternalSwitch-Shared)'
+                    NetworkCategory = 'Public'
+                }
+            }
+
+            { Assert-HostNetworkPreflight `
+                -SwitchName 'ExternalSwitch-Shared' `
+                -NoAutoRepair } | Should -Throw
+
+            Should -Invoke Set-NetConnectionProfile -Times 0
+        }
+
+        It 'skips the profile check entirely on External switches' {
+            # External bridges do not depend on the host-firewall
+            # profile for transparent bridging - profile is only
+            # actionable on Internal (ICS) switches.
+            Initialize-HappyMocks
+            Mock Get-VMSwitch { [PSCustomObject]@{ Name = 'ExternalSwitch-Shared'; SwitchType = 'External' } }
+            # Even with a hostile Public profile mock, the External
+            # path must not query / mutate it.
+            Mock Get-NetConnectionProfile {
+                [PSCustomObject]@{
+                    InterfaceAlias  = 'vEthernet (ExternalSwitch-Shared)'
+                    NetworkCategory = 'Public'
+                }
+            }
+
+            # An External switch with a clean MAC will still pass
+            # the External MAC-collision check, but profile is
+            # off-topic and must not be touched.
+            try { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } catch {}
+
+            Should -Invoke Get-NetConnectionProfile -Times 0
+            Should -Invoke Set-NetConnectionProfile -Times 0
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'ICS DNS probe + auto-repair' {
+    # ------------------------------------------------------------------
+
+        It 'PASSes silently when the probe succeeds on first try' {
+            Initialize-HappyMocks   # Test-IcsDnsReachable -> $true
+
+            { Assert-HostNetworkPreflight `
+                -SwitchName     'ExternalSwitch-Shared' `
+                -DnsProbeTarget '192.168.137.1' `
+                -WanAdapterName 'Wi-Fi' } | Should -Not -Throw
+
+            Should -Invoke Reset-IcsSharing -Times 0
+        }
+
+        It 'calls Reset-IcsSharing then re-probes when first probe fails' {
+            Initialize-HappyMocks
+            # Probe fails once, then succeeds after Reset-IcsSharing.
+            $script:_dnsCalls = 0
+            Mock Test-IcsDnsReachable {
+                $script:_dnsCalls++
+                # Fail on first call, succeed on second.
+                $script:_dnsCalls -gt 1
+            }
+
+            { Assert-HostNetworkPreflight `
+                -SwitchName     'ExternalSwitch-Shared' `
+                -DnsProbeTarget '192.168.137.1' `
+                -WanAdapterName 'Wi-Fi' } | Should -Not -Throw
+
+            Should -Invoke Reset-IcsSharing -Times 1 -Exactly -ParameterFilter {
+                $WanInterfaceName -eq 'Wi-Fi' -and
+                $LanInterfaceName -eq 'vEthernet (ExternalSwitch-Shared)'
+            }
+            $script:_dnsCalls | Should -Be 2   # initial + post-repair re-probe
+        }
+
+        It 'FAILs after one Reset-IcsSharing attempt - no retry loop' {
+            # If the re-probe still fails it is a genuine ICS bug,
+            # not a state flap. The preflight surfaces FAIL once;
+            # the operator inspects, does not get a retry spiral.
+            Initialize-HappyMocks
+            Mock Test-IcsDnsReachable { $false }
+
+            { Assert-HostNetworkPreflight `
+                -SwitchName     'ExternalSwitch-Shared' `
+                -DnsProbeTarget '192.168.137.1' `
+                -WanAdapterName 'Wi-Fi' } | Should -Throw
+
+            Should -Invoke Reset-IcsSharing -Times 1
+        }
+
+        It 'FAILs without calling Reset-IcsSharing when -NoAutoRepair is set' {
+            Initialize-HappyMocks
+            Mock Test-IcsDnsReachable { $false }
+
+            { Assert-HostNetworkPreflight `
+                -SwitchName     'ExternalSwitch-Shared' `
+                -DnsProbeTarget '192.168.137.1' `
+                -WanAdapterName 'Wi-Fi' `
+                -NoAutoRepair } | Should -Throw
+
+            Should -Invoke Reset-IcsSharing -Times 0
+        }
+
+        It 'skips the probe entirely when DnsProbeTarget is unset' {
+            Initialize-HappyMocks
+            Mock Test-IcsDnsReachable { $false }   # hostile - must not be called
+
+            { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } |
+                Should -Not -Throw
+
+            Should -Invoke Test-IcsDnsReachable -Times 0
+            Should -Invoke Reset-IcsSharing     -Times 0
+        }
+
+        It 'FAILs (no Reset) when probe fails but WanAdapterName is unset' {
+            # Can't auto-repair without knowing which WAN to share -
+            # surface FAIL with a clear hint instead of guessing.
+            Initialize-HappyMocks
+            Mock Test-IcsDnsReachable { $false }
+
+            { Assert-HostNetworkPreflight `
+                -SwitchName     'ExternalSwitch-Shared' `
+                -DnsProbeTarget '192.168.137.1' } | Should -Throw
+
+            Should -Invoke Reset-IcsSharing -Times 0
         }
     }
 }

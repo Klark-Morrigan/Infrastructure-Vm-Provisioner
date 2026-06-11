@@ -43,7 +43,30 @@ function Assert-HostNetworkPreflight {
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
-        [string] $SwitchName
+        [string] $SwitchName,
+
+        # ICS DNS-proxy probe target (typically the host-side ICS
+        # gateway IP, e.g. 192.168.137.1 = the LAN-side vEthernet's
+        # address). When set, the preflight verifies the host can
+        # resolve via this IP - the same UDP/53 path the VM is
+        # about to use. When omitted, the DNS-via-ICS check + its
+        # auto-repair are skipped (the rest of the preflight still
+        # runs).
+        [string] $DnsProbeTarget,
+
+        # WAN-side adapter name for Reset-IcsSharing's auto-repair
+        # path (e.g. 'Wi-Fi'). When omitted, auto-repair is skipped
+        # even if the DNS probe fails. The LAN-side adapter is
+        # derived from $SwitchName so we don't take both.
+        [string] $WanAdapterName,
+
+        # Skip all auto-repair attempts. Profile/DNS check still
+        # runs and FAILs are reported, but no Set-NetConnectionProfile
+        # or Reset-IcsSharing fires. Use from Test-HostNetworkPreflight
+        # when an operator wants to inspect state without mutating
+        # it, or when another VM is mid-flight and an ICS toggle
+        # would disrupt it.
+        [switch] $NoAutoRepair
     )
 
     # Per-call verdict accumulator. Findings array drives both the
@@ -202,40 +225,29 @@ function Assert-HostNetworkPreflight {
         }
     }
 
-    Assert-PreflightFindings -Findings $findings -SwitchName $SwitchName
-}
-
-function Test-IsCurrentSessionElevated {
-    # Pure pass-through to the WindowsPrincipal API. Lifted out so
-    # Pester can Mock the predicate; the .NET static call cannot be
-    # mocked directly.
-    [Security.Principal.WindowsPrincipal]::new(
-        [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-        [Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
-function Assert-PreflightFindings {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [System.Collections.Generic.List[object]] $Findings,
-
-        [Parameter(Mandatory)]
-        [string] $SwitchName
-    )
-
-    $fails = @($Findings | Where-Object Status -eq 'FAIL')
-    if ($fails.Count -gt 0) {
-        # Multi-line throw consolidates every FAIL into a single
-        # operator-facing error. Each finding's Detail is the
-        # "what to do" hint so the message is actionable, not just
-        # a count.
-        $details = ($fails | ForEach-Object {
-            "    - $($_.Label): $($_.Detail)"
-        }) -join "`n"
-        throw (
-            "Host network preflight failed for switch '$SwitchName' " +
-            "($($fails.Count) FAIL):`n$details"
-        )
+    # 6. Network profile (only relevant on Internal/ICS switches).
+    #    Logic + auto-repair lives in Test-HostNetworkProfileSetting.ps1.
+    if ($sw.SwitchType -eq 'Internal' -and $vAdapter) {
+        $profileFinding = Test-HostNetworkProfileSetting `
+            -InterfaceAlias $alias `
+            -NoAutoRepair:$NoAutoRepair
+        if ($profileFinding) {
+            Add-Finding $profileFinding.Status `
+                        $profileFinding.Label `
+                        $profileFinding.Detail
+        }
     }
+
+    # 7. DNS-via-ICS reachability + one-shot auto-repair. Logic
+    #    lives in Test-IcsDnsProxyReachable.ps1.
+    if ($DnsProbeTarget) {
+        $dnsFinding = Test-IcsDnsProxyReachable `
+            -DnsProbeTarget $DnsProbeTarget `
+            -LanAdapterName $alias `
+            -WanAdapterName $WanAdapterName `
+            -NoAutoRepair:$NoAutoRepair
+        Add-Finding $dnsFinding.Status $dnsFinding.Label $dnsFinding.Detail
+    }
+
+    Assert-PreflightFindings -Findings $findings -SwitchName $SwitchName
 }
