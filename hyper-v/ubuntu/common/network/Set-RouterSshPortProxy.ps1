@@ -29,9 +29,16 @@
 function Set-RouterSshPortProxy {
     [CmdletBinding()]
     param(
-        # Host-side listen target. 127.0.0.1 keeps the proxy private
-        # to the host (no other machine on any LAN can reach it).
-        [string] $ListenAddress = '127.0.0.1',
+        # Host-side listen target. 0.0.0.0 (all interfaces) is the
+        # default because WSL2 in default NAT mode cannot reach the
+        # host's 127.0.0.1 - from inside WSL, `127.0.0.1` is WSL's
+        # own loopback, NOT the host's. WSL can reach the host on
+        # its WSL-side vEthernet IP, which 0.0.0.0 covers. Operators
+        # who don't need WSL access can pin it back to 127.0.0.1 for
+        # tighter isolation. Windows Firewall still gates inbound on
+        # 2222 - the LAN-facing surface is only as open as the
+        # firewall profile allows.
+        [string] $ListenAddress = '0.0.0.0',
 
         [int]    $ListenPort    = 2222,
 

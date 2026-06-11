@@ -47,7 +47,7 @@ Describe 'Set-RouterSshPortProxy' {
         It 'skips the add when a matching rule is already present' {
             $global:_NetshOutput = New-NetshShowOutput @(
                 [PSCustomObject]@{
-                    ListenAddress  = '127.0.0.1'
+                    ListenAddress  = '0.0.0.0'
                     ListenPort     = 2222
                     ConnectAddress = '192.168.137.10'
                     ConnectPort    = 22
@@ -71,7 +71,7 @@ Describe 'Set-RouterSshPortProxy' {
         It 'deletes the stale rule and adds the new one' {
             $global:_NetshOutput = New-NetshShowOutput @(
                 [PSCustomObject]@{
-                    ListenAddress  = '127.0.0.1'
+                    ListenAddress  = '0.0.0.0'
                     ListenPort     = 2222
                     ConnectAddress = '10.0.0.99'      # stale
                     ConnectPort    = 22
