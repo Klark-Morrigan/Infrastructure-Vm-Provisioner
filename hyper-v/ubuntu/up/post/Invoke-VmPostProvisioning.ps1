@@ -79,7 +79,12 @@ function Invoke-VmPostProvisioning {
     $vmConfigPath               = if ($Vm.PSObject.Properties['vmConfigPath']) {
         $Vm.vmConfigPath
     } else { $null }
-    $invokeCloudInitDiagnostics = ${function:Invoke-CloudInitDiagnostics}
+    $invokeCloudInitDiagnostics  = ${function:Invoke-CloudInitDiagnostics}
+    # Router-only post-cloud-init service check. Captured by the
+    # closure below for the same scope reason as the other per-step
+    # functions; the call is gated on $vmRef.kind -eq 'router' so
+    # workload VMs skip it.
+    $assertRouterServicesActive  = ${function:Assert-RouterServicesActive}
 
     # Capture the per-step functions as scriptblock locals so the closure
     # below can invoke them via the call operator. Name-based command
@@ -207,6 +212,22 @@ function Invoke-VmPostProvisioning {
                 -VmConfigPath  $vmConfigPath `
                 -VmName        $vmName `
                 -Timestamp     $vmRef._diagTimestamp
+
+            # Router-only: assert load-bearing services are active
+            # NOW so a service that ended up inactive (the 2026-06
+            # dnsmasq race is the motivator) surfaces at provision
+            # time with a clear message, not later in the E2E
+            # assertion phase. Workload VMs skip this - they have
+            # no router-specific services. PSObject.Properties
+            # guard because tests may build a VM def without kind.
+            $kind = if ($vmRef.PSObject.Properties['kind']) {
+                $vmRef.kind
+            } else { '' }
+            if ($kind -eq 'router') {
+                & $assertRouterServicesActive `
+                    -SshClient $sshClient `
+                    -VmName    $vmName
+            }
 
             # Manifest store init runs unconditionally near the top of
             # the per-VM loop: it costs one cheap mkdir + chown + chmod
