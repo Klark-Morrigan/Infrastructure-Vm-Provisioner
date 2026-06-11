@@ -164,6 +164,20 @@ BeforeAll {
         $global:_PostProv_Calls['Invoke-SshClientCommand'] += @{
             Command = $Command
         }
+        # cloud-init status poll: the post-provisioning loop expects
+        # 'status: done' / 'status: error' to exit. Without that line
+        # the loop spins forever. _PostProv_SshExitStatus piggybacks
+        # the cloud-init status: 0 -> done, non-zero -> error. Other
+        # commands fall through to the original empty-output shape.
+        if ($Command -match 'cloud-init status') {
+            $ciStatus = if ($global:_PostProv_SshExitStatus -eq 0) { 'done' }
+                        else { 'error' }
+            return [PSCustomObject]@{
+                ExitStatus = 0
+                Output     = "status: $ciStatus"
+                Error      = ''
+            }
+        }
         [PSCustomObject]@{
             ExitStatus = $global:_PostProv_SshExitStatus
             Output     = ''
@@ -233,6 +247,20 @@ BeforeAll {
     # SshClient the tests injected.
     function global:Invoke-CloudInitDiagnostics {
         param($SshClient, $VmConfigPath, $VmName, $Timestamp)
+    }
+    # Cloud-init poll helper. Stubbed at global scope so the
+    # orchestrator's ${function:Wait-CloudInitFinished} capture
+    # resolves to this no-op (real polling behaviour is tested in
+    # Wait-CloudInitFinished.Tests.ps1, not here). _PostProv_SshExitStatus
+    # piggybacks the return so the "still dispatches steps when
+    # cloud-init wait reports non-zero" test keeps working.
+    function global:Wait-CloudInitFinished {
+        param($SshClient, $VmName, $BudgetSeconds, $PollIntervalSeconds)
+        [PSCustomObject]@{
+            ExitStatus = $global:_PostProv_SshExitStatus
+            Output     = if ($global:_PostProv_SshExitStatus -eq 0) { 'done' }
+                         else { 'error' }
+        }
     }
     # Router-only service check the orchestrator runs after
     # cloud-init wait. Stubbed at global scope and tracked so tests
@@ -476,12 +504,36 @@ Describe 'Invoke-VmPostProvisioning' {
             $calls[0].Password  | Should -Be 'unit-test-password-not-real'
         }
 
-        It 'waits for cloud-init exactly once, capped with timeout(1)' {
-            Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
+        It 'delegates the cloud-init wait to Wait-CloudInitFinished' {
+            # Polling behaviour (heartbeat, status parsing, budget
+            # timeout) is exercised in Wait-CloudInitFinished.Tests.ps1.
+            # The orchestrator's contract is "call it exactly once
+            # per VM with the same SshClient + vmName" - track that.
+            $script:_waitCalls = @()
+            function global:Wait-CloudInitFinished {
+                param($SshClient, $VmName, $BudgetSeconds, $PollIntervalSeconds)
+                $script:_waitCalls += @{ VmName = $VmName }
+                [PSCustomObject]@{ ExitStatus = 0; Output = 'done' }
+            }
+            try {
+                Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
 
-            $calls = $global:_PostProv_Calls['Invoke-SshClientCommand']
-            $calls.Count | Should -Be 1
-            $calls[0].Command | Should -Match '^timeout \d+ cloud-init status --wait'
+                $script:_waitCalls.Count        | Should -Be 1
+                $script:_waitCalls[0].VmName    | Should -Be 'node-01'
+            }
+            finally {
+                # Restore the shared stub so subsequent tests in this
+                # Describe block see the global behaviour again.
+                function global:Wait-CloudInitFinished {
+                    param($SshClient, $VmName, $BudgetSeconds, $PollIntervalSeconds)
+                    [PSCustomObject]@{
+                        ExitStatus = $global:_PostProv_SshExitStatus
+                        Output     = if ($global:_PostProv_SshExitStatus -eq 0) {
+                            'done'
+                        } else { 'error' }
+                    }
+                }
+            }
         }
 
         It 'opens the file server when javaDevKit is set even with no other opt-in field' {

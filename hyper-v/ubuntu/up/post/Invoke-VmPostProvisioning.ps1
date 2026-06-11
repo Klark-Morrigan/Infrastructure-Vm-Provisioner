@@ -88,6 +88,11 @@ function Invoke-VmPostProvisioning {
         $Vm.vmConfigPath
     } else { $null }
     $invokeCloudInitDiagnostics  = ${function:Invoke-CloudInitDiagnostics}
+    # Cloud-init poll-with-progress wait. Captured as a closure local
+    # for the same scope reason as the other per-step functions; lives
+    # in its own file (Wait-CloudInitFinished.ps1) so the polling
+    # loop, parse, and budget logic is independently testable.
+    $waitCloudInitFinished       = ${function:Wait-CloudInitFinished}
     # Router-only post-cloud-init service check. Captured by the
     # closure below for the same scope reason as the other per-step
     # functions; the call is gated on $vmRef.kind -eq 'router' so
@@ -182,8 +187,9 @@ function Invoke-VmPostProvisioning {
 
             # cloud-init may still be running its later modules (apt holding
             # the dpkg lock, runcmd not yet started). Wait once, here, so no
-            # downstream step has to know about it. timeout(1) caps the wait
-            # server-side because SSH.NET has no client-side command timeout.
+            # downstream step has to know about it. The polling helper
+            # (Wait-CloudInitFinished.ps1) emits a per-iteration heartbeat
+            # so a slow runcmd does not look like the script hung.
             #
             # Sub-step timer wraps just the wait so the report attributes
             # cloud-init's late-module duration to its own row rather
@@ -193,8 +199,9 @@ function Invoke-VmPostProvisioning {
                 -Parent 'Post-provisioning' `
                 -Name   'cloud-init wait' `
                 -Action {
-                    $waitResult = Invoke-SshClientCommand -SshClient $sshClient `
-                        -Command 'timeout 600 cloud-init status --wait'
+                    $waitResult = & $waitCloudInitFinished `
+                        -SshClient $sshClient `
+                        -VmName    $vmName
                     if ($waitResult.ExitStatus -ne 0) {
                         # Non-zero here is most often unrelated to our steps
                         # (cloud-init may have logged a warning in some
