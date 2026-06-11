@@ -278,31 +278,27 @@ RestartSec=5
     # would not be in effect at first start and the bind-race could
     # still leave dnsmasq inactive.
     #
-    # DNS path: we overwrite /etc/resolv.conf directly with
-    # `nameserver 8.8.8.8` + `nameserver 1.1.1.1` so libc queries
-    # the upstream resolvers itself instead of going through
-    # systemd-resolved's stub on 127.0.0.53. Two layers of trouble
-    # we are sidestepping:
-    #   1. resolved is slow to pick up netplan's DNS update after
-    #      `netplan apply` - the queue between networkd and resolved
-    #      is asynchronous and we saw `getent` succeed (cache or
-    #      stub hit) immediately followed by apt failing with
-    #      "Temporary failure resolving".
-    #   2. The stub adds an extra UDP hop per query (libc ->
-    #      127.0.0.53 -> 8.8.8.8) which intermittently times out
-    #      over ICS NAT during the early-boot window.
-    # Going direct cuts both issues. /etc/resolv.conf is normally a
-    # symlink to /run/systemd/resolve/stub-resolv.conf; `rm -f`
-    # before the write removes the symlink so the file is the truth.
-    # A second nameserver (1.1.1.1) is the standard libc resolver
-    # failover when the primary times out, halving the apt budget
-    # under flap.
+    # DNS path: the operator's Vm.dns is consumed in two places:
+    # netplan's nameserver for ext0 (so the router VM itself uses
+    # it) and dnsmasq's `server=` upstream (so workloads on priv0
+    # use it transitively). For the Internal+ICS topology, the
+    # right value is the host's ICS-gateway address (typically
+    # 192.168.137.1) - that hop is local on the Internal switch
+    # (no NAT) and ICS's built-in DNS proxy on the host forwards
+    # to whatever DNS the host's WiFi is configured with. Earlier
+    # iterations tried `8.8.8.8` directly; UDP/53 outbound over
+    # ICS NAT to public resolvers is unreliable in the cloud-init
+    # window (the diag history captured "Temporary failure
+    # resolving" against an apt request seconds after `getent`
+    # against the SAME host succeeded). Pointing at the ICS proxy
+    # sidesteps the NAT entirely - see
+    # feedback_router_seed_resolvconf_bypass memory for the deeper
+    # write-up of the broken path we abandoned.
     #
-    # DNS-ready poll: the `getent` loop is kept as a belt-and-
-    # suspenders sanity check - even with /etc/resolv.conf written,
-    # we wait until at least one resolver actually answers before
-    # firing apt. `timeout 120` bounds the wait so a genuinely
-    # broken DNS path fails predictably.
+    # DNS-ready poll: belt-and-suspenders sanity check that at
+    # least one resolver answers before firing apt. `timeout 120`
+    # bounds the wait so a genuinely broken DNS path fails
+    # predictably instead of hanging.
     # ------------------------------------------------------------------
     $userBlock        = New-CloudInitUserBlock -Username $Vm.username -Password $Vm.password
     $disableEntry     = New-CloudInitDisableNetworkConfigEntry
@@ -360,7 +356,6 @@ runcmd:
   - netplan apply
   - sh -c "echo '--- [diag] networkctl post-apply ---'; networkctl --no-pager 2>&1 || true; echo '--- [diag] ip -4 addr ---'; ip -4 -o addr; echo '--- [diag] ip -4 route ---'; ip -4 route"
   - sysctl --system
-  - sh -c 'rm -f /etc/resolv.conf && printf "nameserver 8.8.8.8\nnameserver 1.1.1.1\n" > /etc/resolv.conf'
   - timeout 120 sh -c 'until getent hosts archive.ubuntu.com >/dev/null 2>&1; do echo "  [wait-dns] DNS not ready yet, retrying ..."; sleep 2; done'
   - apt-get update
   - DEBIAN_FRONTEND=noninteractive apt-get install -y nftables dnsmasq
