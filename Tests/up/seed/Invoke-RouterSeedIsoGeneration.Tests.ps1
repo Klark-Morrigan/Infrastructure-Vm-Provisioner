@@ -189,20 +189,34 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
             }
         }
 
-        It 'restarts systemd-resolved and polls DNS readiness before apt-get update' {
-            # 2026-06: even after `netplan apply` ran, apt's first DNS
-            # query fired before systemd-resolved had the new uplink
-            # propagated, and the install failed with "Temporary
-            # failure resolving 'archive.ubuntu.com'". The restart
-            # forces resolved to re-read networkd's config
-            # synchronously; the poll then waits up to 120s for
-            # the new uplink to actually answer queries.
+        It 'overwrites /etc/resolv.conf with direct upstream resolvers before the DNS poll' {
+            # 2026-06: even after `netplan apply` + `systemctl restart
+            # systemd-resolved`, apt's queries failed intermittently
+            # with "Temporary failure resolving 'archive.ubuntu.com'".
+            # The stub-resolver layer (127.0.0.53) was the
+            # unreliable link. Writing /etc/resolv.conf with
+            # nameserver 8.8.8.8 (and 1.1.1.1 as failover) makes libc
+            # query the upstreams itself, sidestepping resolved
+            # entirely for the apt phase.
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
             Should -Invoke New-SeedIso -ParameterFilter {
                 $Files['user-data'] -match `
-                    "(?s)systemctl restart systemd-resolved.+?timeout 120 sh -c 'until getent hosts archive\.ubuntu\.com"
+                    "rm -f /etc/resolv\.conf.+?nameserver 8\.8\.8\.8.+?nameserver 1\.1\.1\.1.+?/etc/resolv\.conf"
+            }
+        }
+
+        It 'polls DNS readiness with a bounded timeout before apt-get update' {
+            # Belt-and-suspenders: even with /etc/resolv.conf written
+            # we still wait until at least one resolver answers
+            # before firing apt. timeout 120 bounds the wait.
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match `
+                    "timeout 120 sh -c 'until getent hosts archive\.ubuntu\.com"
             }
         }
 
@@ -500,7 +514,7 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
         # above) before `enable --now dnsmasq.service` starts the
         # unit for the first time.
 
-        It 'orders runcmd: diag -> netplan -> diag -> sysctl -> resolved-restart -> wait-dns -> apt -> nftables -> reload -> dnsmasq' {
+        It 'orders runcmd: diag -> netplan -> diag -> sysctl -> resolv-write -> wait-dns -> apt -> nftables -> reload -> dnsmasq' {
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
@@ -511,7 +525,7 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
                     '\s*-\s*netplan apply\s*\r?\n' +
                     '\s*-\s*sh -c "echo ''--- \[diag\] networkctl.+?"\s*\r?\n' +
                     '\s*-\s*sysctl --system\s*\r?\n' +
-                    '\s*-\s*systemctl restart systemd-resolved\s*\r?\n' +
+                    '\s*-\s*sh -c ''rm -f /etc/resolv\.conf.+?''\s*\r?\n' +
                     '\s*-\s*timeout 120 sh -c ''until getent hosts archive\.ubuntu\.com.+?''\s*\r?\n' +
                     '\s*-\s*apt-get update\s*\r?\n' +
                     '\s*-\s*DEBIAN_FRONTEND=noninteractive apt-get install -y nftables dnsmasq\s*\r?\n' +
