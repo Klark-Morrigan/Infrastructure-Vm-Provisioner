@@ -229,19 +229,58 @@ server=$($Vm.dns)
     $sysctlConf = 'net.ipv4.ip_forward = 1'
 
     # ------------------------------------------------------------------
+    # dnsmasq systemd drop-in. Fixes a startup race observed in 2026-06:
+    # dnsmasq starts at runcmd time and tries to bind to priv0's static
+    # IP (listen-address=10.99.0.1 above), but networkd has not finished
+    # applying the netplan yet, so the IP is not bound. dnsmasq's
+    # 'failed to create listening socket: Cannot assign requested
+    # address' fires, the unit exits 2, systemd marks it inactive
+    # (dead), and the E2E assertion phase later reports
+    # dnsmasq.service=inactive.
+    #
+    # Two-line fix:
+    #   - After=systemd-networkd-wait-online.service: do not start
+    #     until networkd has at least one configured interface ready.
+    #     The unit is in the default boot target on Ubuntu cloud
+    #     images so we do not need to enable it ourselves.
+    #   - Restart=on-failure / RestartSec=5: if the bind still races
+    #     (networkd-wait-online completes on ext0 alone before priv0
+    #     is up), systemd retries until priv0 is bound. Capped at
+    #     the default StartLimit so a true config error still surfaces.
+    # ------------------------------------------------------------------
+    $dnsmasqDropIn = @'
+[Unit]
+After=systemd-networkd-wait-online.service
+Wants=systemd-networkd-wait-online.service
+
+[Service]
+Restart=on-failure
+RestartSec=5
+'@
+
+    # ------------------------------------------------------------------
     # user-data. The structure mirrors Invoke-SeedIsoGeneration (users,
     # ssh_pwauth, write_files, runcmd) with one extra `packages:` block
     # for nftables and dnsmasq. Packages installation is feasible here
     # but not on workload VMs because the router VM has a real upstream
     # NIC with internet egress from first boot, while workload VMs have
     # to wait for the router to come up before apt can resolve mirrors.
+    #
+    # runcmd ordering note: `systemctl daemon-reload` sits BETWEEN the
+    # nftables enable and the dnsmasq enable so systemd picks up the
+    # dnsmasq.service.d/10-wait-network.conf drop-in (from write_files
+    # above) before the first `enable --now` triggers the unit start.
+    # Without the reload the drop-in's After=/Wants=/Restart= settings
+    # would not be in effect at first start and the bind-race could
+    # still leave dnsmasq inactive.
     # ------------------------------------------------------------------
     $userBlock        = New-CloudInitUserBlock -Username $Vm.username -Password $Vm.password
     $disableEntry     = New-CloudInitDisableNetworkConfigEntry
     $netplanIndented  = Format-CloudInitLiteralBlock -Body $netplanYaml
     $sysctlIndented   = Format-CloudInitLiteralBlock -Body $sysctlConf
-    $nftablesIndented = Format-CloudInitLiteralBlock -Body $nftablesConf
-    $dnsmasqIndented  = Format-CloudInitLiteralBlock -Body $dnsmasqConf
+    $nftablesIndented      = Format-CloudInitLiteralBlock -Body $nftablesConf
+    $dnsmasqIndented       = Format-CloudInitLiteralBlock -Body $dnsmasqConf
+    $dnsmasqDropInIndented = Format-CloudInitLiteralBlock -Body $dnsmasqDropIn
 
     $userData = @"
 #cloud-config
@@ -285,6 +324,10 @@ $nftablesIndented
     permissions: '0644'
     content: |
 $dnsmasqIndented
+  - path: /etc/systemd/system/dnsmasq.service.d/10-wait-network.conf
+    permissions: '0644'
+    content: |
+$dnsmasqDropInIndented
 
 runcmd:
   - sh -c "echo '--- [diag] /etc/netplan/ ---'; ls -la /etc/netplan/; for f in /etc/netplan/*.yaml /etc/netplan/*.yml; do [ -f \"`$f\" ] || continue; echo \"=== `$f ===\"; cat \"`$f\"; done; echo '--- [diag] netplan get ---'; netplan get 2>&1 || true"
@@ -292,6 +335,7 @@ runcmd:
   - sh -c "echo '--- [diag] networkctl post-apply ---'; networkctl --no-pager 2>&1 || true; echo '--- [diag] ip -4 addr ---'; ip -4 -o addr; echo '--- [diag] ip -4 route ---'; ip -4 route"
   - sysctl --system
   - systemctl enable --now nftables.service
+  - systemctl daemon-reload
   - systemctl enable --now dnsmasq.service
 "@
 

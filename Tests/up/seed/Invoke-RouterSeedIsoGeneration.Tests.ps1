@@ -246,6 +246,59 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
     }
 
     # ------------------------------------------------------------------
+    Context 'user-data dnsmasq drop-in (race-against-networkd fix)' {
+    # ------------------------------------------------------------------
+        # 2026-06: dnsmasq.service tried to bind 10.99.0.1 before
+        # networkd had brought priv0 up, exited 2, and the E2E
+        # assertion phase later reported the service as inactive.
+        # The seed now ships a systemd drop-in that adds the
+        # missing After= dependency plus Restart=on-failure, and
+        # runs daemon-reload before enable --now so the override
+        # is honoured at first start. These tests lock that in.
+
+        It 'writes /etc/systemd/system/dnsmasq.service.d/10-wait-network.conf' {
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match `
+                    "(?s)path: /etc/systemd/system/dnsmasq\.service\.d/10-wait-network\.conf.*?permissions: '0644'"
+            }
+        }
+
+        It 'orders dnsmasq after systemd-networkd-wait-online via the drop-in' {
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match 'After=systemd-networkd-wait-online\.service'
+            }
+        }
+
+        It 'declares Restart=on-failure in the drop-in' {
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match 'Restart=on-failure'
+            }
+        }
+
+        It 'runs systemctl daemon-reload between nftables and dnsmasq enable steps' {
+            # daemon-reload must come BEFORE enable --now dnsmasq, so
+            # systemd picks up the drop-in at first-start time. After
+            # nftables.enable is fine - nftables has no drop-in.
+            Mock Test-Path { $true }
+            Mock New-SeedIso {}
+            Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
+            Should -Invoke New-SeedIso -ParameterFilter {
+                $Files['user-data'] -match `
+                    "(?s)systemctl daemon-reload.*?systemctl enable --now dnsmasq\.service"
+            }
+        }
+    }
+
+    # ------------------------------------------------------------------
     Context 'user-data netplan payload' {
     # ------------------------------------------------------------------
 
@@ -394,10 +447,13 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
         # init-local did not apply the seed's network-config (Azure
         # base-image netplan defaults can shadow it). Then sysctl
         # before nftables (forwarding must be on before traffic is
-        # matched), nftables before dnsmasq (ruleset up before the
-        # resolver listens).
+        # matched), nftables before dnsmasq. systemctl daemon-reload
+        # sits between nftables and dnsmasq so systemd picks up
+        # dnsmasq's drop-in (Context "user-data dnsmasq drop-in"
+        # above) before `enable --now dnsmasq.service` starts the
+        # unit for the first time.
 
-        It 'orders runcmd entries as diag -> netplan -> diag -> sysctl -> nftables -> dnsmasq' {
+        It 'orders runcmd entries: diag -> netplan -> diag -> sysctl -> nftables -> daemon-reload -> dnsmasq' {
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
@@ -409,6 +465,7 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
                     '\s*-\s*sh -c "echo ''--- \[diag\] networkctl.+?"\s*\r?\n' +
                     '\s*-\s*sysctl --system\s*\r?\n' +
                     '\s*-\s*systemctl enable --now nftables\.service\s*\r?\n' +
+                    '\s*-\s*systemctl daemon-reload\s*\r?\n' +
                     '\s*-\s*systemctl enable --now dnsmasq\.service'
                 )
             }
