@@ -20,7 +20,7 @@
 
 We already opt VMs into a JDK or a .NET SDK by adding a block to the
 VM's JSON definition. This feature does the same thing for
-PowerShell 7 (`pwsh`). The motivation is the `DotNet-Common` reusable
+PowerShell 7 (`pwsh`). The motivation is the `Common-DotNet` reusable
 CI workflow: every step is a composite action whose script runs under
 `shell: pwsh`, and `pwsh` is not on the Ubuntu runner VMs today, so
 those steps fail with "pwsh: command not found" the moment the
@@ -137,7 +137,7 @@ to know about PowerShell.
 
 ## Why Now
 
-- The immediate blocker: `DotNet-Common`'s `ci-dotnet.yml` runs every
+- The immediate blocker: `Common-DotNet`'s `ci-dotnet.yml` runs every
   composite action under `shell: pwsh` and fails with `pwsh: command
   not found` on the runner VMs. The SynergyOps .NET CI rollout cannot
   finish until `pwsh` is on the runner image.
@@ -172,7 +172,7 @@ graph TD
     end
 
     subgraph Consumers ["Downstream consumers"]
-        CI["DotNet-Common ci-dotnet.yml\ncomposite actions use shell: pwsh"]
+        CI["Common-DotNet ci-dotnet.yml\ncomposite actions use shell: pwsh"]
         USERS["Infrastructure-Vm-Users\nnew users get pwsh for free via PATH"]
     end
 

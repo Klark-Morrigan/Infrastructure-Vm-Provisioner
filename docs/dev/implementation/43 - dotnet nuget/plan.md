@@ -704,7 +704,7 @@ this step covers the inverse - parent + child both registered, full
 install / change / uninstall lifecycle - against a real VM and a
 real `nuget.org` round-trip. Uses `dotnet-reportgenerator-globaltool`
 because it is the concrete driver named in problem.md and the only
-tool the `DotNet-Common` CI workflow requires today.
+tool the `Common-DotNet` CI workflow requires today.
 
 **Files**
 

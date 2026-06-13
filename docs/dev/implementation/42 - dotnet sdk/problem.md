@@ -50,7 +50,7 @@ Two existing features established the install half of this pattern:
 consequence of the spec: a JDK that is no longer in the JSON is no
 longer on the VM. No flag needed.
 
-Downstream motivation: `DotNet-Common`'s reusable workflow
+Downstream motivation: `Common-DotNet`'s reusable workflow
 `ci-dotnet.yml` asserts `dotnet --version` at the top of every job and
 fails fast when the SDK is missing. The SynergyOps .NET CI rollout is
 blocked until runner VMs ship with the SDK baked in. The same workflow
@@ -328,7 +328,7 @@ behind the `dotnetSdk` opt-in guard.
 
 ## Why Now
 
-- `DotNet-Common`'s `ci-dotnet.yml` will fail every consumer's CI until
+- `Common-DotNet`'s `ci-dotnet.yml` will fail every consumer's CI until
   the SDK is baked into the runner image, blocking the SynergyOps .NET
   CI rollout.
 - The JDK feature has matured the host-prefetch + out-of-band-install
