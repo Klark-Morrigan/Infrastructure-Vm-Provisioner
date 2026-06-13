@@ -52,16 +52,13 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common\diag\Get-VmDiagFolder.ps1"
 . "$PSScriptRoot\common\diag\Invoke-VmRuntimeDiag.ps1"
 . "$PSScriptRoot\common\network\Get-VmAdapterIPv4.ps1"
-. "$PSScriptRoot\common\network\ics\Reset-IcsSharing.ps1"
-. "$PSScriptRoot\common\network\Get-NetshPortProxyRules.ps1"
-. "$PSScriptRoot\common\network\Set-RouterSshPortProxy.ps1"
-. "$PSScriptRoot\common\network\Set-RouterSshPortProxyFirewall.ps1"
-. "$PSScriptRoot\common\network\Invoke-WslShell.ps1"
-. "$PSScriptRoot\common\network\Test-WslRouterReachability.ps1"
-. "$PSScriptRoot\common\network\preflight\checks\Test-IcsDnsReachable.ps1"
+# Eight host-network helpers (ICS toggle, netsh portproxy x2,
+# firewall, profile, DNS x2, WSL reachability probe) now ship
+# in the Infrastructure.Network.Windows module. Install-ModuleDependencies
+# imports it at agent startup; this file only consumes the
+# exported functions. Test-WslRouterReachability transitively
+# depends on Infrastructure.Wsl (auto-imported via RequiredModules).
 . "$PSScriptRoot\common\network\preflight\checks\Test-IsCurrentSessionElevated.ps1"
-. "$PSScriptRoot\common\network\preflight\checks\Test-HostNetworkProfileSetting.ps1"
-. "$PSScriptRoot\common\network\preflight\checks\Test-IcsDnsProxyReachable.ps1"
 . "$PSScriptRoot\common\network\preflight\Assert-PreflightFindings.ps1"
 . "$PSScriptRoot\common\network\preflight\Assert-HostNetworkPreflight.ps1"
 . "$PSScriptRoot\common\network\Assert-WorkloadReachableViaRouter.ps1"

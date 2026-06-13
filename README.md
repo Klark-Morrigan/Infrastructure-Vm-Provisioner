@@ -1185,15 +1185,10 @@ Infrastructure-VM-Provisioner/
 |     |  |  `- Invoke-VmRuntimeDiag.ps1      # Host-side + best-effort guest-side runtime snapshot. Auto-fires from create-vm.ps1's wait-for-SSH and router-side reachability timeout paths. Manual entry point: scripts\Get-VmRuntimeDiag.ps1.
 |     |  `- network/
 |     |     |- preflight/
-|     |     |  |- Assert-HostNetworkPreflight.ps1   # Orchestrator: seven host-side network checks (switch type, vNIC up + IP, MAC story, connected route, host-vs-VM IP collision, vEthernet profile, ICS DNS proxy reachability). Throws on FAIL via Assert-PreflightFindings. Gate at provision.ps1 step 7; manual entry: scripts\Test-HostNetworkPreflight.ps1.
+|     |     |  |- Assert-HostNetworkPreflight.ps1   # Orchestrator: seven host-side network checks (switch type, vNIC up + IP, MAC story, connected route, host-vs-VM IP collision, vEthernet profile, ICS DNS proxy reachability). The profile + DNS checks delegate to Infrastructure.Network.Windows (Test-HostNetworkProfileSetting / Test-IcsDnsProxyReachable). Throws on FAIL via Assert-PreflightFindings. Gate at provision.ps1 step 4; manual entry: scripts\Test-HostNetworkPreflight.ps1.
 |     |     |  |- Assert-PreflightFindings.ps1      # Multi-line throw collector: consolidates every FAIL finding into one operator-facing error.
 |     |     |  `- checks/
-|     |     |     |- Test-HostNetworkProfileSetting.ps1  # Check 6: vEthernet profile must be Private (Public blocks ICS DNS-In). Only-toggles-when-Public auto-repair.
-|     |     |     |- Test-IcsDnsProxyReachable.ps1       # Check 7: probes ICS DNS proxy via the gateway IP; one-shot Reset-IcsSharing auto-repair on FAIL.
-|     |     |     |- Test-IcsDnsReachable.ps1            # Pure predicate: Resolve-DnsName wrapper used by check 7.
-|     |     |     `- Test-IsCurrentSessionElevated.ps1   # Pure predicate: WindowsPrincipal admin check used by check 0.
-|     |     |- ics/
-|     |     |  `- Reset-IcsSharing.ps1              # HNetCfg COM-API equivalent of toggling the WiFi adapter's Sharing checkbox off+on. The canonical kick for a hung ICS DNS proxy (Restart-Service alone doesn't do it).
+|     |     |     `- Test-IsCurrentSessionElevated.ps1   # Pure predicate: WindowsPrincipal admin check used by check 0. (The Profile / DNS-reachable / ICS-DNS-proxy / Reset-IcsSharing checks moved to Infrastructure.Network.Windows.)
 |     |     |- Assert-WorkloadReachableViaRouter.ps1 # Workload-side reachability gate: SSHs through the router VM jump host to a workload's private IP. Surfaces dead workloads before per-VM dispatch.
 |     |     |- Get-VmAdapterIPv4.ps1                # Pure helper: extracts IPv4 from VMNetworkAdapter objects under StrictMode (PSObject.Properties guard + IPv4 anchor regex).
 |     |     |- Resolve-ExistingRouterIp.ps1        # Router-IP lookup from existing Hyper-V state when the router is already up (reconcile path).

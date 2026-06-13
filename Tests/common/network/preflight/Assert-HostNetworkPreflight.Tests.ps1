@@ -7,10 +7,12 @@ BeforeAll {
     function Get-NetIPAddress          { param([string]$InterfaceAlias, $AddressFamily, $ErrorAction) }
     function Get-NetRoute              { param([string]$DestinationPrefix, $ErrorAction) }
     function Get-VMNetworkAdapter      { param([switch]$All, $ErrorAction) }
-    function Get-NetConnectionProfile  { param([string]$InterfaceAlias, $ErrorAction) }
-    function Set-NetConnectionProfile  { param([string]$InterfaceAlias, [string]$NetworkCategory) }
-    function Reset-IcsSharing          { param([string]$WanInterfaceName, [string]$LanInterfaceName) }
-    function Resolve-DnsName           { param([string]$Name, [string]$Server, [switch]$DnsOnly, $ErrorAction) }
+    # Stubs for the two check functions that moved to
+    # Infrastructure.Network.Windows. Their own behavior has dedicated
+    # tests in that module; here we only care about the orchestrator's
+    # branching, so file-scope stubs let Pester Mock them per test.
+    function Test-IcsDnsProxyReachable      { param([string]$DnsProbeTarget, [string]$LanAdapterName, [string]$WanAdapterName, [switch]$NoAutoRepair) }
+    function Test-HostNetworkProfileSetting { param([string]$InterfaceAlias, [switch]$NoAutoRepair) }
 
     # Pure adapter-IPv4 extractor - dot-source the real one so the
     # IP-collision check's StrictMode-safety contract is exercised
@@ -19,10 +21,7 @@ BeforeAll {
     $preflight = "$net\preflight"
     $checks    = "$preflight\checks"
     . "$net\Get-VmAdapterIPv4.ps1"
-    . "$checks\Test-IcsDnsReachable.ps1"
     . "$checks\Test-IsCurrentSessionElevated.ps1"
-    . "$checks\Test-HostNetworkProfileSetting.ps1"
-    . "$checks\Test-IcsDnsProxyReachable.ps1"
     . "$preflight\Assert-PreflightFindings.ps1"
     . "$preflight\Assert-HostNetworkPreflight.ps1"
 
@@ -68,15 +67,24 @@ BeforeAll {
             }
         }
         Mock Get-VMNetworkAdapter { }
-        Mock Get-NetConnectionProfile {
+        # The four NetworkWindows check functions are stubbed at
+        # BeforeAll scope; Mock here so the orchestrator's calls
+        # produce a "happy" finding by default. Tests that exercise
+        # FAIL/auto-repair paths re-Mock them inline.
+        Mock Test-HostNetworkProfileSetting {
             [PSCustomObject]@{
-                InterfaceAlias  = 'vEthernet (ExternalSwitch-Shared)'
-                NetworkCategory = 'Private'
+                Status = 'PASS'
+                Label  = 'vEthernet profile = Private'
+                Detail = 'Current=Private. ICS DNS-In permitted.'
             }
         }
-        Mock Set-NetConnectionProfile { }
-        Mock Reset-IcsSharing { }
-        Mock Test-IcsDnsReachable { $true }
+        Mock Test-IcsDnsProxyReachable {
+            [PSCustomObject]@{
+                Status = 'PASS'
+                Label  = "ICS DNS proxy answers at $DnsProbeTarget"
+                Detail = 'Resolve-DnsName archive.ubuntu.com succeeded against the ICS gateway.'
+            }
+        }
     }
 }
 
@@ -408,165 +416,106 @@ Describe 'Assert-HostNetworkPreflight' {
     }
 
     # ------------------------------------------------------------------
-    Context 'network profile (only-toggle-when-Public)' {
+    Context 'delegation to NetworkWindows checks' {
     # ------------------------------------------------------------------
+    # The orchestrator's profile + ICS-DNS checks delegate to
+    # Test-HostNetworkProfileSetting + Test-IcsDnsProxyReachable
+    # respectively, both of which now ship in
+    # Infrastructure.Network.Windows with their own dedicated tests.
+    # Here we verify the orchestrator's call-site contract:
+    #   - calls the delegate with the right args under the right
+    #     conditions
+    #   - threads the returned finding through Add-Finding so the
+    #     overall PASS/FAIL verdict respects the delegate's verdict
+    # Internal behavior (auto-repair, only-toggle-when-Public,
+    # bounded retry) is covered in the NetworkWindows test suite.
 
-        It 'does NOT call Set-NetConnectionProfile when profile is already Private' {
-            # User contract: a toggle only when it is Public. Re-runs
-            # of the preflight against an already-Private profile
-            # must stay quiet, not redundantly Set-NetConnectionProfile.
+        It 'calls Test-HostNetworkProfileSetting for the vEthernet alias on Internal switches' {
             Initialize-HappyMocks
 
             Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared'
 
-            Should -Invoke Set-NetConnectionProfile -Times 0
-        }
-
-        It 'switches profile to Private when current is Public and auto-repair is allowed' {
-            Initialize-HappyMocks
-            Mock Get-NetConnectionProfile {
-                [PSCustomObject]@{
-                    InterfaceAlias  = 'vEthernet (ExternalSwitch-Shared)'
-                    NetworkCategory = 'Public'
+            Should -Invoke Test-HostNetworkProfileSetting -Times 1 -Exactly `
+                -ParameterFilter {
+                    $InterfaceAlias -eq 'vEthernet (ExternalSwitch-Shared)'
                 }
-            }
-
-            Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared'
-
-            Should -Invoke Set-NetConnectionProfile -Times 1 -Exactly -ParameterFilter {
-                $InterfaceAlias  -eq 'vEthernet (ExternalSwitch-Shared)' -and
-                $NetworkCategory -eq 'Private'
-            }
         }
 
-        It 'FAILs (does not mutate) when profile is Public AND -NoAutoRepair is set' {
-            Initialize-HappyMocks
-            Mock Get-NetConnectionProfile {
-                [PSCustomObject]@{
-                    InterfaceAlias  = 'vEthernet (ExternalSwitch-Shared)'
-                    NetworkCategory = 'Public'
-                }
-            }
-
-            { Assert-HostNetworkPreflight `
-                -SwitchName 'ExternalSwitch-Shared' `
-                -NoAutoRepair } | Should -Throw
-
-            Should -Invoke Set-NetConnectionProfile -Times 0
-        }
-
-        It 'skips the profile check entirely on External switches' {
-            # External bridges do not depend on the host-firewall
-            # profile for transparent bridging - profile is only
-            # actionable on Internal (ICS) switches.
+        It 'skips Test-HostNetworkProfileSetting on External switches' {
             Initialize-HappyMocks
             Mock Get-VMSwitch { [PSCustomObject]@{ Name = 'ExternalSwitch-Shared'; SwitchType = 'External' } }
-            # Even with a hostile Public profile mock, the External
-            # path must not query / mutate it.
-            Mock Get-NetConnectionProfile {
+
+            try { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } catch {}
+
+            Should -Invoke Test-HostNetworkProfileSetting -Times 0
+        }
+
+        It 'threads the delegate FAIL finding into the orchestrator throw' {
+            Initialize-HappyMocks
+            Mock Test-HostNetworkProfileSetting {
                 [PSCustomObject]@{
-                    InterfaceAlias  = 'vEthernet (ExternalSwitch-Shared)'
-                    NetworkCategory = 'Public'
+                    Status = 'FAIL'
+                    Label  = 'profile broken'
+                    Detail = 'simulated failure'
                 }
             }
 
-            # An External switch with a clean MAC will still pass
-            # the External MAC-collision check, but profile is
-            # off-topic and must not be touched.
-            try { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } catch {}
-
-            Should -Invoke Get-NetConnectionProfile -Times 0
-            Should -Invoke Set-NetConnectionProfile -Times 0
+            { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } |
+                Should -Throw -ExpectedMessage '*profile broken*'
         }
-    }
 
-    # ------------------------------------------------------------------
-    Context 'ICS DNS probe + auto-repair' {
-    # ------------------------------------------------------------------
+        It 'calls Test-IcsDnsProxyReachable with the WAN + LAN + DnsProbeTarget' {
+            Initialize-HappyMocks
 
-        It 'PASSes silently when the probe succeeds on first try' {
-            Initialize-HappyMocks   # Test-IcsDnsReachable -> $true
-
-            { Assert-HostNetworkPreflight `
+            Assert-HostNetworkPreflight `
                 -SwitchName     'ExternalSwitch-Shared' `
                 -DnsProbeTarget '192.168.137.1' `
-                -WanAdapterName 'Wi-Fi' } | Should -Not -Throw
+                -WanAdapterName 'Wi-Fi'
 
-            Should -Invoke Reset-IcsSharing -Times 0
+            Should -Invoke Test-IcsDnsProxyReachable -Times 1 -Exactly `
+                -ParameterFilter {
+                    $DnsProbeTarget -eq '192.168.137.1'                       -and
+                    $LanAdapterName -eq 'vEthernet (ExternalSwitch-Shared)'   -and
+                    $WanAdapterName -eq 'Wi-Fi'
+                }
         }
 
-        It 'calls Reset-IcsSharing then re-probes when first probe fails' {
+        It 'forwards -NoAutoRepair to Test-IcsDnsProxyReachable' {
             Initialize-HappyMocks
-            # Probe fails once, then succeeds after Reset-IcsSharing.
-            $script:_dnsCalls = 0
-            Mock Test-IcsDnsReachable {
-                $script:_dnsCalls++
-                # Fail on first call, succeed on second.
-                $script:_dnsCalls -gt 1
-            }
 
-            { Assert-HostNetworkPreflight `
-                -SwitchName     'ExternalSwitch-Shared' `
-                -DnsProbeTarget '192.168.137.1' `
-                -WanAdapterName 'Wi-Fi' } | Should -Not -Throw
-
-            Should -Invoke Reset-IcsSharing -Times 1 -Exactly -ParameterFilter {
-                $WanInterfaceName -eq 'Wi-Fi' -and
-                $LanInterfaceName -eq 'vEthernet (ExternalSwitch-Shared)'
-            }
-            $script:_dnsCalls | Should -Be 2   # initial + post-repair re-probe
-        }
-
-        It 'FAILs after one Reset-IcsSharing attempt - no retry loop' {
-            # If the re-probe still fails it is a genuine ICS bug,
-            # not a state flap. The preflight surfaces FAIL once;
-            # the operator inspects, does not get a retry spiral.
-            Initialize-HappyMocks
-            Mock Test-IcsDnsReachable { $false }
-
-            { Assert-HostNetworkPreflight `
-                -SwitchName     'ExternalSwitch-Shared' `
-                -DnsProbeTarget '192.168.137.1' `
-                -WanAdapterName 'Wi-Fi' } | Should -Throw
-
-            Should -Invoke Reset-IcsSharing -Times 1
-        }
-
-        It 'FAILs without calling Reset-IcsSharing when -NoAutoRepair is set' {
-            Initialize-HappyMocks
-            Mock Test-IcsDnsReachable { $false }
-
-            { Assert-HostNetworkPreflight `
+            Assert-HostNetworkPreflight `
                 -SwitchName     'ExternalSwitch-Shared' `
                 -DnsProbeTarget '192.168.137.1' `
                 -WanAdapterName 'Wi-Fi' `
-                -NoAutoRepair } | Should -Throw
+                -NoAutoRepair
 
-            Should -Invoke Reset-IcsSharing -Times 0
+            Should -Invoke Test-IcsDnsProxyReachable -Times 1 -Exactly `
+                -ParameterFilter { $NoAutoRepair.IsPresent }
         }
 
-        It 'skips the probe entirely when DnsProbeTarget is unset' {
+        It 'skips Test-IcsDnsProxyReachable when DnsProbeTarget is unset' {
             Initialize-HappyMocks
-            Mock Test-IcsDnsReachable { $false }   # hostile - must not be called
 
-            { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } |
-                Should -Not -Throw
+            Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared'
 
-            Should -Invoke Test-IcsDnsReachable -Times 0
-            Should -Invoke Reset-IcsSharing     -Times 0
+            Should -Invoke Test-IcsDnsProxyReachable -Times 0
         }
 
-        It 'FAILs (no Reset) when probe fails but WanAdapterName is unset' {
-            # Can't auto-repair without knowing which WAN to share -
-            # surface FAIL with a clear hint instead of guessing.
+        It 'threads the delegate FAIL finding into the orchestrator throw (DNS path)' {
             Initialize-HappyMocks
-            Mock Test-IcsDnsReachable { $false }
+            Mock Test-IcsDnsProxyReachable {
+                [PSCustomObject]@{
+                    Status = 'FAIL'
+                    Label  = 'ICS DNS proxy broken'
+                    Detail = 'simulated DNS probe failure'
+                }
+            }
 
             { Assert-HostNetworkPreflight `
                 -SwitchName     'ExternalSwitch-Shared' `
-                -DnsProbeTarget '192.168.137.1' } | Should -Throw
-
-            Should -Invoke Reset-IcsSharing -Times 0
+                -DnsProbeTarget '192.168.137.1' `
+                -WanAdapterName 'Wi-Fi' } |
+                Should -Throw -ExpectedMessage '*ICS DNS proxy broken*'
         }
     }
 }

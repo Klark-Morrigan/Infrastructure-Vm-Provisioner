@@ -52,11 +52,11 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $net       = Join-Path $repoRoot 'hyper-v\ubuntu\common\network'
 $preflight = Join-Path $net      'preflight'
 $checks    = Join-Path $preflight 'checks'
-. (Join-Path $net       'ics\Reset-IcsSharing.ps1')
-. (Join-Path $checks    'Test-IcsDnsReachable.ps1')
+# Reset-IcsSharing + the four Ics/Profile/DNS check functions now
+# ship in Infrastructure.Network.Windows. The orchestrator + its
+# elevation/findings helpers stay local to the provisioner.
+Import-Module Infrastructure.Network.Windows -MinimumVersion 0.1.0 -ErrorAction Stop
 . (Join-Path $checks    'Test-IsCurrentSessionElevated.ps1')
-. (Join-Path $checks    'Test-HostNetworkProfileSetting.ps1')
-. (Join-Path $checks    'Test-IcsDnsProxyReachable.ps1')
 . (Join-Path $preflight 'Assert-PreflightFindings.ps1')
 . (Join-Path $preflight 'Assert-HostNetworkPreflight.ps1')
 

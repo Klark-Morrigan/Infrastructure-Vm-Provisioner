@@ -107,6 +107,22 @@ if ($_loaded.Count -ne 1 -or $_loaded[0].Version -ne $_common.Version) {
 # post-provisioning file transfers and software installs).
 Invoke-ModuleInstall -ModuleName 'Infrastructure.HyperV' -MinimumVersion '0.11.0'
 
+# Infrastructure.Network.Windows hosts the Windows-only host-network
+# helpers the preflight + step 4 setup rely on: Reset-IcsSharing,
+# Set-RouterSshPortProxy(+Firewall), Get-NetshPortProxyRules,
+# Test-HostNetworkProfileSetting, Test-IcsDnsReachable,
+# Test-IcsDnsProxyReachable, Test-WslRouterReachability. Auto-pulls
+# Infrastructure.Wsl via its RequiredModules manifest entry, so
+# Invoke-WslShell becomes available without an explicit install
+# call here.
+Invoke-ModuleInstall -ModuleName 'Infrastructure.Network.Windows' -MinimumVersion '0.1.0'
+
+# Infrastructure.Wsl provides Invoke-WslShell (used by
+# Test-WslRouterReachability) and Assert-Wsl2Ready / Assert-WslHasBash
+# (gates for any wsl-using flow). Moved out of PowerShell.Common at
+# 7.0.0 so a fresh provisioner host needs both modules now.
+Invoke-ModuleInstall -ModuleName 'Infrastructure.Wsl' -MinimumVersion '0.1.0'
+
 # Posh-SSH is loaded only for its bundled Renci.SshNet.dll - the SSH.NET
 # types that New-VmSshClient instantiates. Posh-SSH's own cmdlets are not
 # used (ConnectionInfoGenerator in Posh-SSH 3.x drops algorithm entries,
