@@ -24,6 +24,15 @@ BeforeAll {
         & $Action
     }
 
+    # Stub the per-VM diag-folder retention sweep. The real helper
+    # ships in PowerShell.Common (Limit-RetainedItem) which
+    # provision.ps1's bootstrap imports before create-vm.ps1 runs.
+    # Creation tests exercise Hyper-V dispatch + diag-timestamp
+    # seeding, not file pruning, so a no-op stub keeps the focus.
+    function Limit-RetainedItem {
+        param($Directory, $Filter, $MaxItems, $MaxAgeDays, [switch] $FileOnly)
+    }
+
     # Serial-console capture stubs. The real cmdlets live in
     # Invoke-SerialConsoleCapture.ps1 and attach a named-pipe reader job
     # before Start-VM; here they are no-ops so the creation tests stay

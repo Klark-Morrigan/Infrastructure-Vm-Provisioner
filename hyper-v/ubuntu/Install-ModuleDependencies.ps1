@@ -84,8 +84,8 @@ if (-not $_nuget -or $_nuget.Version -lt [Version]'2.8.5.201') {
 # Step 2 - PowerShell.Common (chicken-and-egg bootstrap)
 $_common = Get-Module -ListAvailable -Name PowerShell.Common |
     Sort-Object Version -Descending | Select-Object -First 1
-if (-not $_common -or $_common.Version -lt [Version]'5.1.0') {
-    Install-PowerShellCommonWithRetry -MinimumVersion '6.1.0'
+if (-not $_common -or $_common.Version -lt [Version]'7.0.0') {
+    Install-PowerShellCommonWithRetry -MinimumVersion '7.0.0'
     # Re-query so the comparison below uses the freshly installed version.
     $_common = Get-Module -ListAvailable -Name PowerShell.Common |
         Sort-Object Version -Descending | Select-Object -First 1

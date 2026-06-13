@@ -155,6 +155,22 @@ function Invoke-VmCreation {
     Add-Member -InputObject $Vm -MemberType NoteProperty `
                -Name '_diagTimestamp' -Value $diagTimestamp -Force
 
+    # Per-VM diag-folder retention. The diagnostics root for this VM
+    # accumulates one timestamped subfolder per run (console.log,
+    # cloud-init-*.txt, runtime-diag.log, ssh.log all collocated).
+    # Sweep before this run drops its first artifact so the
+    # operator's disk does not grow without bound across repeated
+    # provisions. Keep the last 30 runs (over a year of weekly
+    # runs) or 60 days of them, whichever is smaller.
+    if ($Vm.PSObject.Properties['vmConfigPath'] -and $Vm.vmConfigPath) {
+        $perVmDiagRoot = Join-Path (Join-Path $Vm.vmConfigPath 'diagnostics') `
+                                   $Vm.vmName
+        Limit-RetainedItem -Directory  $perVmDiagRoot `
+                           -Filter     '????-??-??_*' `
+                           -MaxItems   30 `
+                           -MaxAgeDays 7
+    }
+
     $consoleCapture = Start-SerialConsoleCapture `
                           -VmName       $Vm.vmName `
                           -VmConfigPath $Vm.vmConfigPath `
