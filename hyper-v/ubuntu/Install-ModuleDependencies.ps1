@@ -115,13 +115,7 @@ Invoke-ModuleInstall -ModuleName 'Infrastructure.HyperV' -MinimumVersion '0.11.0
 # Infrastructure.Wsl via its RequiredModules manifest entry, so
 # Invoke-WslShell becomes available without an explicit install
 # call here.
-#
-# Floor at 0.2.0: that release adds the Hyper-V Firewall allow rule to
-# Set-RouterSshPortProxyFirewall. Without it, Win11 hosts where WSL sits
-# behind the Hyper-V Firewall (DefaultInboundAction=Block) silently drop
-# WSL's packets to the portproxy, surfacing as the Ansible
-# "Connection timed out during banner exchange" UNREACHABLE.
-Invoke-ModuleInstall -ModuleName 'Infrastructure.Network.Windows' -MinimumVersion '0.2.0'
+Invoke-ModuleInstall -ModuleName 'Infrastructure.Network.Windows' -MinimumVersion '0.3.0'
 
 # Infrastructure.Wsl provides Invoke-WslShell (used by
 # Test-WslRouterReachability) and Assert-Wsl2Ready / Assert-WslHasBash
