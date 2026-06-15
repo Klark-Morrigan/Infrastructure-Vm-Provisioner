@@ -12,7 +12,7 @@
 BeforeAll {
     # Stub cross-repo functions that ConvertFrom-VmConfigJson.ps1 expects
     # at dot-source time. Their real implementations live in
-    # PowerShell.Common / Infrastructure.HyperV, which the test host
+    # Common.PowerShell / Infrastructure.HyperV, which the test host
     # does not load. ConvertFrom-VmConfigJson itself is mocked per-test
     # via Pester, so these stubs only need to satisfy the dot-source.
     function Assert-RequiredProperties { param($Object, $Properties, $Context) }

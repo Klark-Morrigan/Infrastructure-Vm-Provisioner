@@ -8,7 +8,7 @@ BeforeAll {
     # Stubbed so the file-server-not-called assertion can Mock it.
     # Set-EnvironmentVariables itself never references this cmdlet.
     function Add-VmFileServerFile { param($Server, $LocalPath) }
-    # ConvertTo-Array ships in PowerShell.Common in production. The
+    # ConvertTo-Array ships in Common.PowerShell in production. The
     # wrapper uses it to keep an empty entries array array-shaped after
     # property access (PSCustomObject -> object unwraps single-element
     # arrays). Tests reproduce its minimal contract.

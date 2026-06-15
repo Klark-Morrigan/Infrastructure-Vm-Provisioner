@@ -13,7 +13,7 @@ BeforeAll {
     function Move-Item         { param($Path, $Destination, [switch]$Force) }
 
     # Retry seam stubs - pass-through. Retry behaviour itself is covered
-    # by PowerShell.Common's own tests.
+    # by Common.PowerShell's own tests.
     function Invoke-WithRetry {
         param([scriptblock] $ScriptBlock, [hashtable[]] $RetryStrategy,
               [hashtable] $BackoffStrategy, [int] $MaxAttempts,

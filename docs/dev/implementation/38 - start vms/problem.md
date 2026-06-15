@@ -94,7 +94,7 @@ that sits alongside `provision.ps1` and `deprovision.ps1` and reuses
 their (now shared) bootstrap:
 
 1. Dot-source `Install-ModuleDependencies.ps1` to get
-   `PowerShell.Common` + `Infrastructure.HyperV` + the SecretStore
+   `Common.PowerShell` + `Infrastructure.HyperV` + the SecretStore
    provider modules in scope.
 2. Dot-source
    [Read-VmProvisionerConfig.ps1](../../../../hyper-v/ubuntu/common/config/Read-VmProvisionerConfig.ps1)

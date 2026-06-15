@@ -46,7 +46,7 @@ $ubuntu   = Join-Path $repoRoot 'hyper-v\ubuntu'
 # Install-ModuleDependencies.ps1 is a script BODY, not a function:
 # dot-sourcing it executes the install + import directly into the
 # caller's scope (the docstring on the file explains why - chicken-
-# and-egg with PowerShell.Common). No explicit invocation needed.
+# and-egg with Common.PowerShell). No explicit invocation needed.
 . (Join-Path $ubuntu 'Install-ModuleDependencies.ps1')
 
 . (Join-Path $ubuntu 'common\config\Read-VmProvisionerConfig.ps1')

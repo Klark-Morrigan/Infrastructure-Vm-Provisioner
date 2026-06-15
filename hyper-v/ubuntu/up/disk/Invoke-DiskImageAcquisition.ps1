@@ -1,7 +1,7 @@
 <#
 .NOTES
     Do not run this file directly. It is intended to be dot-sourced by
-    provision.ps1 after PowerShell.Common and Invoke-BaseImagePatch.ps1
+    provision.ps1 after Common.PowerShell and Invoke-BaseImagePatch.ps1
     are loaded.
 #>
 

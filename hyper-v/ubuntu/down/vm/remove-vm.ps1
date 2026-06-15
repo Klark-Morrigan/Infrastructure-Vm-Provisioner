@@ -20,7 +20,7 @@
 #        5 attempts with exponential backoff (capped at 30 s); throws on
 #        exhaustion identifying the locked path so the operator can re-run
 #        when the handle is freed. Retry is provided by Invoke-WithRetry
-#        (PowerShell.Common) with New-FileLockRetryStrategy.
+#        (Common.PowerShell) with New-FileLockRetryStrategy.
 #     3. Delete the seed ISO if present. Absence is not an error - provision.ps1
 #        removes it after first boot, so it is routinely absent.
 #     4. Delete the VM configuration directory with the same retry policy as

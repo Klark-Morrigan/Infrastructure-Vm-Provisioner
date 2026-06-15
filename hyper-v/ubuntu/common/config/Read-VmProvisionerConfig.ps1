@@ -2,7 +2,7 @@
 .NOTES
     Do not run this file directly. It is intended to be dot-sourced by
     provision.ps1, deprovision.ps1, and start-vms.ps1 after
-    PowerShell.Common is loaded.
+    Common.PowerShell is loaded.
 #>
 
 # Sibling helper dot-sourced here so callers of Read-VmProvisionerConfig do

@@ -26,7 +26,7 @@ BeforeAll {
     }
 
     # Retry seam stubs: pass-through and a sentinel strategy. Real retry
-    # behaviour is covered by PowerShell.Common's own tests.
+    # behaviour is covered by Common.PowerShell's own tests.
     function Invoke-WithRetry {
         param([scriptblock] $ScriptBlock, [hashtable[]] $RetryStrategy,
               [hashtable] $BackoffStrategy, [int] $MaxAttempts,

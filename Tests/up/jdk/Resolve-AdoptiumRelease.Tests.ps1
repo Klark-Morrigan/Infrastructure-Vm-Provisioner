@@ -1,9 +1,9 @@
 BeforeAll {
     # Resolve-AdoptiumRelease wraps its Invoke-RestMethod call in
-    # Invoke-WithRetry (from PowerShell.Common) with the transient
+    # Invoke-WithRetry (from Common.PowerShell) with the transient
     # network retry strategy. Stub both as pass-throughs so unit tests stay
     # isolated from the real module - the retry policy itself is covered by
-    # PowerShell.Common's own tests.
+    # Common.PowerShell's own tests.
     function Invoke-WithRetry {
         param([scriptblock] $ScriptBlock, [hashtable[]] $RetryStrategy,
               [hashtable] $BackoffStrategy, [int] $MaxAttempts,

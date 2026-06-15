@@ -24,9 +24,9 @@ BeforeAll {
     }
 
     # The acquisition script wraps Invoke-WebRequest in Invoke-WithRetry
-    # (from PowerShell.Common) using the transient-network strategy.
+    # (from Common.PowerShell) using the transient-network strategy.
     # Stub both as pass-throughs so unit tests stay isolated from the real
-    # module - retry policy itself is covered by PowerShell.Common's
+    # module - retry policy itself is covered by Common.PowerShell's
     # own tests.
     function Invoke-WithRetry {
         param([scriptblock] $ScriptBlock, [hashtable[]] $RetryStrategy,
