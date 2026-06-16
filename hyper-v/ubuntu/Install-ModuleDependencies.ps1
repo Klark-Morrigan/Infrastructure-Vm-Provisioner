@@ -82,10 +82,15 @@ if (-not $_nuget -or $_nuget.Version -lt [Version]'2.8.5.201') {
 }
 
 # Step 2 - Common.PowerShell (chicken-and-egg bootstrap)
+# Floor is 8.1.0: Infrastructure.Network.Windows (installed in step 3)
+# declares Common.PowerShell >= 8.1.0 in its RequiredModules. Because the
+# bootstrap imports Common.PowerShell into the session here, loading an
+# older 7.x first would collide with that requirement when Network.Windows
+# is imported. Loading 8.1.0 up front keeps a single compatible version live.
 $_common = Get-Module -ListAvailable -Name Common.PowerShell |
     Sort-Object Version -Descending | Select-Object -First 1
-if (-not $_common -or $_common.Version -lt [Version]'7.0.0') {
-    Install-PowerShellCommonWithRetry -MinimumVersion '7.0.0'
+if (-not $_common -or $_common.Version -lt [Version]'8.1.0') {
+    Install-PowerShellCommonWithRetry -MinimumVersion '8.1.0'
     # Re-query so the comparison below uses the freshly installed version.
     $_common = Get-Module -ListAvailable -Name Common.PowerShell |
         Sort-Object Version -Descending | Select-Object -First 1
@@ -115,7 +120,7 @@ Invoke-ModuleInstall -ModuleName 'Infrastructure.HyperV' -MinimumVersion '0.11.0
 # Infrastructure.Wsl via its RequiredModules manifest entry, so
 # Invoke-WslShell becomes available without an explicit install
 # call here.
-Invoke-ModuleInstall -ModuleName 'Infrastructure.Network.Windows' -MinimumVersion '0.4.0'
+Invoke-ModuleInstall -ModuleName 'Infrastructure.Network.Windows' -MinimumVersion '0.4.1'
 
 # Infrastructure.Wsl provides Invoke-WslShell (used by
 # Test-WslRouterReachability) and Assert-Wsl2Ready / Assert-WslHasBash
