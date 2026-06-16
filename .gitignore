@@ -2,7 +2,6 @@
 .claude/settings.local.json
 
 # BAT scripts
-*.bat
 
 # VM disk images and archives — large binaries, never committed
 *.vhd
@@ -22,3 +21,4 @@ TestResults.xml
 # graphify knowledge graph artifacts (local; rebuilt by graphify)
 graphify-out/
 supersets-out/
+

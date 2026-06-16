@@ -1158,15 +1158,57 @@ VitaliiAndreev/Common-PowerShell/.github/workflows/ci-powershell.yml@master
 The shared workflow runs `scripts\Run-Tests.ps1` on PowerShell 7.
 No additional CI configuration is needed in this repo.
 
+Two more thin workflows lint the YAML and Bash surfaces by delegating to
+**Common-Automation**, so the lint config is single-sourced and cannot drift
+per repo:
+
+| Workflow | Runs |
+|---|---|
+| `.github/workflows/ci-yaml.yml` | actionlint, action-validator, yamllint, ansible-lint |
+| `.github/workflows/ci-bash.yml` | shellcheck, check-sh-executable, bats |
+
+Each linter auto-skips when its surface is absent. To reproduce CI locally
+(Git Bash + Docker), use the main runner. It runs the full lint suite AND the
+bats tests - the local equivalent of this repo's `ci-yaml.yml` + `ci-bash.yml`:
+
+```bash
+# MAIN entry: full lint suite + bats tests (local ci-yaml.yml + ci-bash.yml).
+scripts/run-ci-yaml-and-bash.sh              # or double-click scripts\run-ci-yaml-and-bash.bat
+```
+
+To run just one half:
+
+```bash
+# Lint half only (shellcheck, actionlint, action-validator, yamllint,
+# ansible-lint). Distinct from the Pester runner Run-Tests.ps1; runs no
+# PowerShell tests.
+scripts/run-lint-yaml-and-bash.sh            # or double-click scripts\run-lint-yaml-and-bash.bat
+
+# Bats test half only.
+scripts/run-tests-bash.sh                    # or double-click scripts\run-tests-bash.bat
+
+# Re-stage the +x bit on tracked *.sh files (Windows checkouts drop it,
+# tripping the check-sh-executable gate).
+scripts/fix-permissions.sh     # or scripts\fix-permissions.bat
+```
+
+All three runners are thin shims over Common-Automation's engine, pointed at
+this repo via the `COMMON_AUTOMATION_TARGET_REPO` env var, so a sibling
+checkout at `..\Common-Automation` is required. `.gitattributes` pins `*.sh`
+to LF and `*.bat` to CRLF - Linux CI runners reject CRLF shebangs.
+
 ---
 
 ## Repo structure
 
 ```
 Infrastructure-VM-Provisioner/
+|- .gitattributes           # Pins *.sh to LF and *.bat to CRLF
 |- .github/
 |  `- workflows/
-|     `- ci.yml              # Delegates to shared ci-powershell.yml in Common-PowerShell
+|     |- ci.yml             # Delegates to shared ci-powershell.yml in Common-PowerShell
+|     |- ci-yaml.yml        # Delegates to Common-Automation reusable ci-yaml.yml
+|     `- ci-bash.yml        # Delegates to Common-Automation reusable ci-bash.yml
 |- hyper-v/
 |  `- ubuntu/
 |     |- provision.ps1       # Entry point - orchestrates all provisioning steps
@@ -1269,7 +1311,11 @@ Infrastructure-VM-Provisioner/
 |  |- Run-IntegrationTests.ps1            # Docker-host integration runner (delegates to Common-PowerShell)
 |  |- Run-IntegrationTests-AgainstDockerTarget.ps1  # Docker-target integration runner
 |  |- Test-HostNetworkPreflight.ps1       # Manual entry point: host-side network sanity-check (Assert-HostNetworkPreflight)
-|  `- Get-VmRuntimeDiag.ps1               # Manual entry point: host + guest runtime diag snapshot (Invoke-VmRuntimeDiag)
+|  |- Get-VmRuntimeDiag.ps1               # Manual entry point: host + guest runtime diag snapshot (Invoke-VmRuntimeDiag)
+|  |- run-ci-yaml-and-bash.sh / run-ci-yaml-and-bash.bat              # MAIN local runner: full lint suite + bats tests (Common-Automation engine)
+|  |- run-lint-yaml-and-bash.sh / run-lint-yaml-and-bash.bat          # Lint half only (shellcheck, actionlint, action-validator, yamllint, ansible-lint)
+|  |- run-tests-bash.sh / run-tests-bash.bat                          # Bats test half only
+|  `- fix-permissions.sh / fix-permissions.bat  # Re-stage +x on tracked *.sh via the shared engine
 `- README.md
 ```
 
