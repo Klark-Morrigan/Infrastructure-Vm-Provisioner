@@ -120,11 +120,13 @@ Invoke-ModuleInstall -ModuleName 'Infrastructure.HyperV' -MinimumVersion '0.11.0
 # Infrastructure.Wsl via its RequiredModules manifest entry, so
 # Invoke-WslShell becomes available without an explicit install
 # call here.
-# Floor 0.5.0: Set-RouterSshPortProxyFirewall ensures the inbound 2222
-# allow in the Hyper-V Firewall too, required for WSL in Windows 11
-# Hyper-V-firewall networking mode (older floors only opened the
-# Defender Firewall, which that mode ignores for WSL-to-host traffic).
-Invoke-ModuleInstall -ModuleName 'Infrastructure.Network.Windows' -MinimumVersion '0.5.0'
+# Floor 0.6.0: Set-RouterSshPortProxyFirewall scopes its inbound 2222
+# allow by the WSL NAT source range instead of the WSL adapter
+# interface. The adapter GUID is regenerated across shutdowns/reboots,
+# which stranded an interface-pinned rule and needed a re-provision to
+# fix; range scoping has nothing volatile to go stale, so it survives
+# reboots of long-lived VMs without re-provisioning.
+Invoke-ModuleInstall -ModuleName 'Infrastructure.Network.Windows' -MinimumVersion '0.6.0'
 
 # Infrastructure.Wsl provides Invoke-WslShell (used by
 # Test-WslRouterReachability) and Assert-Wsl2Ready / Assert-WslHasBash
