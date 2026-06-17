@@ -89,7 +89,7 @@ provisioner writes, bulk or single - same model and same rationale as
 today. The provisioner runs before any app users exist on the VM, so a
 per-file owner would only surface late; the CI user that compiles against
 the classpath - created later by
-[Infrastructure-Vm-Users](https://github.com/VitaliiAndreev/Infrastructure-Vm-Users) -
+[Infrastructure-Vm-Users](https://github.com/Klark-Morrigan/Infrastructure-Vm-Users) -
 only needs read access, which `0644` provides.
 
 ### Validation surface

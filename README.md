@@ -348,7 +348,7 @@ cloud-init stage knowledge into the host provisioner.
 
 Because the export script lives under `/etc/profile.d/`, any user account
 later created on the VM — including those provisioned by
-[Infrastructure-Vm-Users](https://github.com/VitaliiAndreev/Infrastructure-Vm-Users) —
+[Infrastructure-Vm-Users](https://github.com/Klark-Morrigan/Infrastructure-Vm-Users) —
 sees `JAVA_HOME` and `java` on `PATH` without any additional configuration
 in that repo. This is the deliberate split of responsibilities: the
 provisioner owns "software the box needs"; Vm-Users owns identities.
@@ -569,7 +569,7 @@ any SSH I/O happens for that entry — so a misspelled pattern names
 itself in the failure instead of being lost in a batched run.
 
 The transport is delegated to `Infrastructure.HyperV`'s
-[`Copy-VmFilesByPattern`](https://github.com/VitaliiAndreev/Infrastructure-HyperV/blob/master/Infrastructure.HyperV/Public/FileTransfer/Copy-VmFilesByPattern.ps1) —
+[`Copy-VmFilesByPattern`](https://github.com/Klark-Morrigan/Infrastructure-HyperV/blob/master/Infrastructure.HyperV/Public/FileTransfer/Copy-VmFilesByPattern.ps1) —
 see its notes for the exact wildcard semantics (including the zero-match
 and target-collision pre-flight errors raised before any SSH I/O).
 
@@ -613,7 +613,7 @@ transport treats an empty array as "remove this managed block". Same
 explicit-removal model as the JDK `uninstall` flag.
 
 The transport is delegated to `Infrastructure.HyperV`'s
-[`Set-VmEnvironmentVariables`](https://github.com/VitaliiAndreev/Infrastructure-HyperV/blob/master/Infrastructure.HyperV/Public/EnvVars/Set-VmEnvironmentVariables.ps1) —
+[`Set-VmEnvironmentVariables`](https://github.com/Klark-Morrigan/Infrastructure-HyperV/blob/master/Infrastructure.HyperV/Public/EnvVars/Set-VmEnvironmentVariables.ps1) —
 see its notes for the exact managed-block, atomic-write, and
 skip-unchanged semantics.
 
@@ -1072,7 +1072,7 @@ manual shutdown, or a Hyper-V "Saved" state caused by a host power event.
 
 Reads the same `VmProvisionerConfig` from the vault and for each VM calls
 `Start-VmIfStopped` from
-[Infrastructure-HyperV](https://github.com/VitaliiAndreev/Infrastructure-HyperV) —
+[Infrastructure-HyperV](https://github.com/Klark-Morrigan/Infrastructure-HyperV) —
 see that repo for the per-VM state-machine contract (`Off` -> Started,
 `Saved` -> Resumed, `Running` -> AlreadyRunning, transient states throw).
 
@@ -1149,10 +1149,10 @@ manually from `vhdPath` if it is no longer needed.
 
 CI runs on pull requests targeting `master` via `.github/workflows/ci.yml`,
 which delegates to the shared reusable workflow in
-[Common-PowerShell](https://github.com/VitaliiAndreev/Common-PowerShell):
+[Common-PowerShell](https://github.com/Klark-Morrigan/Common-PowerShell):
 
 ```
-VitaliiAndreev/Common-PowerShell/.github/workflows/ci-powershell.yml@master
+Klark-Morrigan/Common-PowerShell/.github/workflows/ci-powershell.yml@master
 ```
 
 The shared workflow runs `scripts\Run-Tests.ps1` on PowerShell 7.
