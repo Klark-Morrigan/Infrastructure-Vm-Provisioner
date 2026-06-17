@@ -251,7 +251,7 @@ are easy to read side-by-side.
 **File**: `hyper-v/ubuntu/deprovision.ps1`
 
 **Behaviour**:
-- Bootstrap `PowerShell.Common` (same minimum version check as
+- Bootstrap `Common.PowerShell` (same minimum version check as
   `provision.ps1`).
 - Import `Microsoft.PowerShell.SecretManagement` and
   `Infrastructure.Secrets`.

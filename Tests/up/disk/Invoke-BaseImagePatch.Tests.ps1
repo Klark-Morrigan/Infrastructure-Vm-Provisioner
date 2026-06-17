@@ -9,7 +9,7 @@ BeforeAll {
     # tests for the detailed explanation).
     function wsl { $global:LASTEXITCODE = 0 }
 
-    # Assert-Wsl2Ready is owned by PowerShell.Common and unit-tested there.
+    # Assert-Wsl2Ready is owned by Common.PowerShell and unit-tested there.
     # Stub it here so this test file does not redundantly assert the same
     # readiness/install/throw paths; the consumer-side concerns are only
     # "do we call it" and "do we propagate its throw without continuing".
@@ -51,7 +51,7 @@ Describe 'Invoke-BaseImagePatch' {
     # ------------------------------------------------------------------
     Context 'WSL2 readiness delegated to Assert-Wsl2Ready' {
     # ------------------------------------------------------------------
-        # The readiness/install/throw paths live in PowerShell.Common's
+        # The readiness/install/throw paths live in Common.PowerShell's
         # Assert-Wsl2Ready (and are covered by its tests there). Here we
         # only verify the consumer-side contract: we call the helper, and
         # if it throws we propagate the throw without proceeding to mount.
@@ -89,7 +89,7 @@ Describe 'Invoke-BaseImagePatch' {
 
         BeforeEach {
             Mock Test-Path { $false }
-            # Readiness lives in PowerShell.Common; stub it out so these
+            # Readiness lives in Common.PowerShell; stub it out so these
             # tests focus on the --bare-failure path.
             Mock Assert-Wsl2Ready {}
             Mock Mount-VHD { [PSCustomObject]@{ DiskNumber = 3 } }

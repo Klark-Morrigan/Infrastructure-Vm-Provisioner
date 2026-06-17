@@ -1,7 +1,7 @@
 <#
 .NOTES
     Do not run this file directly. It is intended to be dot-sourced by
-    provision.ps1 after PowerShell.Common is loaded.
+    provision.ps1 after Common.PowerShell is loaded.
 #>
 
 # ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@
 #
 #   Implementation:
 #     1. Skip immediately if the sentinel file is present (already patched).
-#     2. Delegate WSL2 readiness to Assert-Wsl2Ready (PowerShell.Common). It
+#     2. Delegate WSL2 readiness to Assert-Wsl2Ready (Common.PowerShell). It
 #        runs wsl --install and throws a Wsl2NotReady error if not ready;
 #        provision.ps1 catches that specific error and exits with code 0
 #        after printing the reboot prompt.
@@ -118,7 +118,7 @@ function Invoke-BaseImagePatch {
     Write-Host "  Patching datasource config in base image ..."
 
     # WSL2 is required for wsl --mount (kernel) and wsl -u root (distro).
-    # Assert-Wsl2Ready (PowerShell.Common) installs WSL2 if missing and
+    # Assert-Wsl2Ready (Common.PowerShell) installs WSL2 if missing and
     # throws Wsl2NotReady so provision.ps1 can prompt for reboot and exit 0.
     Assert-Wsl2Ready
 

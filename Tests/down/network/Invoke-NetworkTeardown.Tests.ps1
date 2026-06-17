@@ -1,226 +1,121 @@
 BeforeAll {
-    # Stub all Hyper-V and networking cmdlets unavailable outside a Hyper-V host.
+    # Hyper-V cmdlets unavailable outside a Hyper-V host. The shared
+    # NetNat / vNIC sweep is owned by Remove-LegacySingletonNat (tested
+    # in Tests/common/network/), so its own cmdlets are not stubbed here -
+    # the helper is mocked at the boundary instead.
     function Get-VM               { param($ErrorAction) }
-    function Get-VMNetworkAdapter { param($VM, [switch]$All, $ErrorAction) }
-    function Get-NetNat           { param([string]$Name, $ErrorAction) }
-    function Remove-NetNat        { param([string]$Name, $Confirm) }
-    function Get-NetIPAddress     { param($IPAddress, $ErrorAction) }
-    function Remove-NetIPAddress  { param($IPAddress, $Confirm) }
+    function Get-VMNetworkAdapter { param($VM, $ErrorAction) }
     function Get-VMSwitch         { param([string]$Name, $ErrorAction) }
     function Remove-VMSwitch      { param([string]$Name, [switch]$Force) }
 
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\down\network\teardown-network.ps1"
 
-    # Sets up all stubs so the full teardown path runs without error.
-    # All Get-* return absent (nothing to remove) and Remove-* are no-ops.
-    function Initialize-AllAbsentMocks {
-        Mock Get-VM               { }    # no VMs exist - no adapters to check
-        Mock Get-VMNetworkAdapter { }
-        Mock Get-NetNat           { }    # NAT rule absent
-        Mock Remove-NetNat        { }
-        Mock Get-NetIPAddress     { }    # host IP absent
-        Mock Remove-NetIPAddress  { }
-        Mock Get-VMSwitch         { }    # switch absent
-        Mock Remove-VMSwitch      { }
-    }
+    # Boundary stub for the shared legacy-cleanup helper. Behaviour is
+    # asserted in Remove-LegacySingletonNat.Tests.ps1.
+    function Remove-LegacySingletonNat { param([string]$GatewayIp) }
 
-    # Sets up all stubs so each object exists and requires removal.
-    function Initialize-AllPresentMocks {
-        Mock Get-VM               { }    # no VMs exist - teardown proceeds
-        Mock Get-VMNetworkAdapter { }
-        Mock Get-NetNat           { [PSCustomObject]@{ Name = 'VmLAN-NAT' } }
-        Mock Remove-NetNat        { }
-        Mock Get-NetIPAddress     { [PSCustomObject]@{ IPAddress = '192.168.1.1' } }
-        Mock Remove-NetIPAddress  { }
-        Mock Get-VMSwitch         { [PSCustomObject]@{ Name = 'VmLAN' } }
-        Mock Remove-VMSwitch      { }
+    # Sets up all probes to "no VMs attached and no switch present" so
+    # the full teardown path runs without error.
+    function Initialize-CleanHostMocks {
+        Mock Get-VM                    { }
+        Mock Get-VMNetworkAdapter      { }
+        Mock Get-VMSwitch              { $null }
+        Mock Remove-VMSwitch           { }
+        Mock Remove-LegacySingletonNat { }
     }
 }
 
 Describe 'Invoke-NetworkTeardown' {
 
     # ------------------------------------------------------------------
-    Context 'VMs still connected - teardown skipped' {
+    Context 'delegation to Remove-LegacySingletonNat' {
     # ------------------------------------------------------------------
-        # Removing shared network objects while VMs are still attached
-        # would cut their network access. The function must bail out and
-        # leave everything intact when Get-VMNetworkAdapter reports that
-        # adapters are still connected to the switch.
 
-        It 'does not remove NAT, host IP, or switch when VMs are still connected' {
-            Initialize-AllPresentMocks
-            # Return a VM so Get-VMNetworkAdapter receives input and returns an
-            # adapter connected to the switch, causing the guard to fire.
-            Mock Get-VM { [PSCustomObject]@{ Name = 'node-01' } }
+        It 'calls Remove-LegacySingletonNat once with the gateway IP' {
+            Initialize-CleanHostMocks
+            Invoke-NetworkTeardown -PrivateSwitchName 'env-prod' `
+                                   -GatewayIp         '10.10.0.1'
+            Should -Invoke Remove-LegacySingletonNat -Times 1 -Exactly -ParameterFilter {
+                $GatewayIp -eq '10.10.0.1'
+            }
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'attached-VMs guard for the Private switch' {
+    # ------------------------------------------------------------------
+        # Removing the Private switch while VMs are still attached would
+        # cut their network access. The function must bail on switch
+        # removal when Get-VMNetworkAdapter reports adapters connected to
+        # the named switch. The shared cleanup helper is unaffected -
+        # it operates on the gateway IP, not on the switch.
+
+        It 'does not call Remove-VMSwitch when VMs are still attached' {
+            Initialize-CleanHostMocks
+            Mock Get-VMSwitch { [PSCustomObject]@{ Name = 'env-prod' } }
+            Mock Get-VM       { [PSCustomObject]@{ Name = 'node-01' } }
             Mock Get-VMNetworkAdapter {
-                [PSCustomObject]@{ SwitchName = 'VmLAN'; VMName = 'node-01' }
+                [PSCustomObject]@{ SwitchName = 'env-prod'; VMName = 'node-01' }
             }
 
-            Invoke-NetworkTeardown -SwitchName 'VmLAN' `
-                                   -Gateway   '192.168.1.1' `
-                                   -NatName   'VmLAN-NAT'
+            Invoke-NetworkTeardown -PrivateSwitchName 'env-prod' `
+                                   -GatewayIp         '10.10.0.1'
 
-            Should -Invoke Remove-NetNat       -Times 0
-            Should -Invoke Remove-NetIPAddress -Times 0
-            Should -Invoke Remove-VMSwitch     -Times 0
+            Should -Invoke Remove-VMSwitch -Times 0
         }
 
-        It 'does not skip teardown when a VM is connected to a different switch' {
-            # The guard filters by SwitchName. An adapter on a different switch
-            # must not be counted, otherwise teardown would be skipped even
-            # though no VMs are attached to the target switch.
-            Initialize-AllPresentMocks
-            Mock Get-VM { [PSCustomObject]@{ Name = 'node-99' } }
+        It 'does not skip switch removal when a VM is on a different switch' {
+            # The guard filters by SwitchName. An adapter on a different
+            # switch must not be counted, otherwise the switch teardown
+            # would be skipped even though no VMs are on it.
+            Initialize-CleanHostMocks
+            Mock Get-VMSwitch { [PSCustomObject]@{ Name = 'env-prod' } }
+            Mock Get-VM       { [PSCustomObject]@{ Name = 'node-99' } }
             Mock Get-VMNetworkAdapter {
-                [PSCustomObject]@{ SwitchName = 'OtherSwitch'; VMName = 'node-99' }
+                [PSCustomObject]@{ SwitchName = 'env-dev'; VMName = 'node-99' }
             }
 
-            Invoke-NetworkTeardown -SwitchName 'VmLAN' `
-                                   -Gateway   '192.168.1.1' `
-                                   -NatName   'VmLAN-NAT'
+            Invoke-NetworkTeardown -PrivateSwitchName 'env-prod' `
+                                   -GatewayIp         '10.10.0.1'
 
-            Should -Invoke Remove-NetNat       -Times 1 -Exactly
-            Should -Invoke Remove-NetIPAddress -Times 1 -Exactly
-            Should -Invoke Remove-VMSwitch     -Times 1 -Exactly
+            Should -Invoke Remove-VMSwitch -Times 1 -Exactly -ParameterFilter {
+                $Name -eq 'env-prod' -and $Force -eq $true
+            }
         }
 
-        It 'uses Get-VM pipeline to check for connected VMs' {
-            # Get-VM is used rather than Get-VMNetworkAdapter -All so that
-            # adapters for recently removed VMs are not seen. VMMS deregisters
-            # adapters asynchronously, so -All transiently returns stale entries
-            # that would incorrectly block teardown.
-            Initialize-AllPresentMocks
-
-            Invoke-NetworkTeardown -SwitchName 'VmLAN' `
-                                   -Gateway   '192.168.1.1' `
-                                   -NatName   'VmLAN-NAT'
-
+        It 'uses Get-VM pipeline to check for connected VMs (not Get-VMNetworkAdapter -All)' {
+            # VMMS deregisters adapters asynchronously after Remove-VM
+            # returns, so Get-VMNetworkAdapter -All transiently reports
+            # adapters for VMs that have already been removed - which
+            # would incorrectly block teardown.
+            Initialize-CleanHostMocks
+            Invoke-NetworkTeardown -PrivateSwitchName 'env-prod' `
+                                   -GatewayIp         '10.10.0.1'
             Should -Invoke Get-VM -Times 1 -Exactly
         }
     }
 
     # ------------------------------------------------------------------
-    Context 'NAT rule removal' {
+    Context 'Private switch removal' {
     # ------------------------------------------------------------------
 
-        It 'removes the NAT rule when it exists' {
-            Initialize-AllPresentMocks
+        It 'removes the Private switch when present and no VMs are attached' {
+            Initialize-CleanHostMocks
+            Mock Get-VMSwitch { [PSCustomObject]@{ Name = 'env-prod' } }
 
-            Invoke-NetworkTeardown -SwitchName 'VmLAN' `
-                                   -Gateway   '192.168.1.1' `
-                                   -NatName   'VmLAN-NAT'
+            Invoke-NetworkTeardown -PrivateSwitchName 'env-prod' `
+                                   -GatewayIp         '10.10.0.1'
 
-            # -Confirm:$false prevents an interactive prompt that would block CI.
-            Should -Invoke Remove-NetNat -Times 1 -Exactly -ParameterFilter {
-                $Name -eq 'VmLAN-NAT' -and $Confirm -eq $false
-            }
-        }
-
-        It 'does not call Remove-NetNat when the rule is already absent' {
-            Initialize-AllAbsentMocks
-
-            Invoke-NetworkTeardown -SwitchName 'VmLAN' `
-                                   -Gateway   '192.168.1.1' `
-                                   -NatName   'VmLAN-NAT'
-
-            Should -Invoke Remove-NetNat -Times 0
-        }
-
-        It 'does not throw when the NAT rule is absent' {
-            Initialize-AllAbsentMocks
-
-            { Invoke-NetworkTeardown -SwitchName 'VmLAN' `
-                                     -Gateway   '192.168.1.1' `
-                                     -NatName   'VmLAN-NAT' } | Should -Not -Throw
-        }
-    }
-
-    # ------------------------------------------------------------------
-    Context 'host vNIC IP removal' {
-    # ------------------------------------------------------------------
-
-        It 'removes the host vNIC IP when it exists' {
-            Initialize-AllPresentMocks
-
-            Invoke-NetworkTeardown -SwitchName 'VmLAN' `
-                                   -Gateway   '192.168.1.1' `
-                                   -NatName   'VmLAN-NAT'
-
-            # -Confirm:$false prevents an interactive prompt that would block CI.
-            Should -Invoke Remove-NetIPAddress -Times 1 -Exactly -ParameterFilter {
-                $IPAddress -eq '192.168.1.1' -and $Confirm -eq $false
-            }
-        }
-
-        It 'does not call Remove-NetIPAddress when the IP is already absent' {
-            Initialize-AllAbsentMocks
-
-            Invoke-NetworkTeardown -SwitchName 'VmLAN' `
-                                   -Gateway   '192.168.1.1' `
-                                   -NatName   'VmLAN-NAT'
-
-            Should -Invoke Remove-NetIPAddress -Times 0
-        }
-
-        It 'does not throw when the host vNIC IP is absent' {
-            Initialize-AllAbsentMocks
-
-            { Invoke-NetworkTeardown -SwitchName 'VmLAN' `
-                                     -Gateway   '192.168.1.1' `
-                                     -NatName   'VmLAN-NAT' } | Should -Not -Throw
-        }
-    }
-
-    # ------------------------------------------------------------------
-    Context 'virtual switch removal' {
-    # ------------------------------------------------------------------
-
-        It 'removes the virtual switch when it exists' {
-            Initialize-AllPresentMocks
-
-            Invoke-NetworkTeardown -SwitchName 'VmLAN' `
-                                   -Gateway   '192.168.1.1' `
-                                   -NatName   'VmLAN-NAT'
-
-            # -Force prevents an interactive confirmation prompt that would block CI.
             Should -Invoke Remove-VMSwitch -Times 1 -Exactly -ParameterFilter {
-                $Name -eq 'VmLAN' -and $Force -eq $true
+                $Name -eq 'env-prod' -and $Force -eq $true
             }
         }
 
         It 'does not call Remove-VMSwitch when the switch is already absent' {
-            Initialize-AllAbsentMocks
-
-            Invoke-NetworkTeardown -SwitchName 'VmLAN' `
-                                   -Gateway   '192.168.1.1' `
-                                   -NatName   'VmLAN-NAT'
-
+            Initialize-CleanHostMocks
+            Invoke-NetworkTeardown -PrivateSwitchName 'env-prod' `
+                                   -GatewayIp         '10.10.0.1'
             Should -Invoke Remove-VMSwitch -Times 0
-        }
-
-        It 'does not throw when the virtual switch is absent' {
-            Initialize-AllAbsentMocks
-
-            { Invoke-NetworkTeardown -SwitchName 'VmLAN' `
-                                     -Gateway   '192.168.1.1' `
-                                     -NatName   'VmLAN-NAT' } | Should -Not -Throw
-        }
-    }
-
-    # ------------------------------------------------------------------
-    Context 'full teardown - all objects present, no VMs remaining' {
-    # ------------------------------------------------------------------
-
-        It 'removes NAT, host IP, and switch when no VMs remain on the switch' {
-            Initialize-AllPresentMocks
-
-            Invoke-NetworkTeardown -SwitchName 'VmLAN' `
-                                   -Gateway   '192.168.1.1' `
-                                   -NatName   'VmLAN-NAT'
-
-            Should -Invoke Remove-NetNat       -Times 1 -Exactly
-            Should -Invoke Remove-NetIPAddress -Times 1 -Exactly
-            Should -Invoke Remove-VMSwitch     -Times 1 -Exactly
         }
     }
 }

@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    Builds a netplan v2 YAML document for a Hyper-V VM's static NIC.
+    Builds a netplan v2 YAML document (or just one ethernet entry) for a
+    Hyper-V VM's static NIC.
 
 .NOTES
     Do not run this file directly. It is intended to be dot-sourced by
@@ -9,28 +10,37 @@
 
 # ---------------------------------------------------------------------------
 # New-StaticNetplanYaml
-#   Returns the netplan v2 YAML string that configures a single Hyper-V
-#   synthetic NIC with a static IPv4 address, default route, and one DNS
-#   server.
+#   Returns netplan v2 YAML configuring a single Hyper-V synthetic NIC with
+#   a static IPv4 address, optional default route, and optional DNS server.
 #
-#   The YAML is shared between two consumers:
-#     - the cloud-init NoCloud seed's 'network-config' file (legacy path),
-#     - a write_files entry inside 'user-data' that lands the same content
-#       at /etc/netplan/99-static.yaml on the running VM.
-#   Centralising the template here keeps both consumers in lock-step.
+#   Two output shapes:
+#     - Default: a complete document wrapped in
+#         `network: / version: 2 / ethernets: / <Key>: / ...`.
+#         Workload VMs ship this directly to cloud-init's network-config
+#         slot and to /etc/netplan/99-static.yaml.
+#     - `-NoWrapper`: just the ethernet entry starting at `    <Key>:`,
+#         no top-level wrapper. The router seed (feature 53) calls this
+#         twice (one per NIC) and wraps the concatenated entries once
+#         so both NICs live in a single netplan document.
 #
-#   Matching on driver: hv_netvsc (not on a fixed interface name such as
-#   eth0 / enp0s*) is intentional - the kernel-assigned NIC name varies
-#   across Ubuntu releases and Hyper-V generations, but hv_netvsc is the
-#   driver for every Hyper-V synthetic NIC, so this match always hits.
+#   Match block:
+#     - When `-MacAddress` is supplied, the entry matches by MAC. Used by
+#       router VMs which have two synthetic NICs (both `hv_netvsc` driver),
+#       so the driver-only match would be ambiguous.
+#     - Otherwise the entry matches by driver (`hv_netvsc`). Workload VMs
+#       have one synthetic NIC so this is unambiguous and portable across
+#       kernel-assigned interface names (eth0 / enp0s*) that differ across
+#       Ubuntu releases and Hyper-V generations.
 #
-#   The top-level `network:` wrapper is required by netplan and accepted
-#   by cloud-init's NoCloud network-config parser. An earlier revision
-#   emitted the inner block only - it parsed fine when cloud-init
-#   re-rendered it into /etc/netplan/50-cloud-init.yaml (cloud-init
-#   added the wrapper), but is rejected when written directly into
-#   /etc/netplan/*.yaml via write_files. See docs/dev/implementation/
-#   40 - static network config/plan.md step 4 follow-up.
+#   `-SetName` (optional) emits `set-name: <SetName>` so the kernel-visible
+#   NIC name is pinned. Router VMs use this so nftables and dnsmasq can
+#   reference `ext0` / `priv0` without guessing.
+#
+#   `-Gateway` and `-Dns` are optional: a router VM's private-side NIC has
+#   no upstream gateway and no DNS server (it IS the gateway and the
+#   resolver for downstream VMs), so its entry skips those blocks. The
+#   workload caller continues to pass both so its existing behaviour is
+#   byte-for-byte preserved.
 # ---------------------------------------------------------------------------
 function New-StaticNetplanYaml {
     [CmdletBinding()]
@@ -38,25 +48,52 @@ function New-StaticNetplanYaml {
     param(
         [Parameter(Mandatory)] [string] $IpAddress,
         [Parameter(Mandatory)] [string] $SubnetMask,
-        [Parameter(Mandatory)] [string] $Gateway,
-        [Parameter(Mandatory)] [string] $Dns
+        [Parameter()]          [string] $Gateway,
+        [Parameter()]          [string] $Dns,
+        [Parameter()]          [string] $Key = 'eth0',
+        [Parameter()]          [string] $MacAddress,
+        [Parameter()]          [string] $SetName,
+        [Parameter()]          [switch] $NoWrapper
     )
+
+    # Build the ethernet entry line-by-line so optional blocks (set-name,
+    # routes, nameservers) can be skipped without leaving stray blank
+    # lines that netplan would silently parse as empty mappings.
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add("    ${Key}:")
+    $lines.Add('      match:')
+    if ($MacAddress) {
+        $lines.Add("        macaddress: $MacAddress")
+    }
+    else {
+        $lines.Add('        driver: hv_netvsc')
+    }
+    if ($SetName) {
+        $lines.Add("      set-name: $SetName")
+    }
+    $lines.Add('      dhcp4: false')
+    $lines.Add('      addresses:')
+    $lines.Add("        - $IpAddress/$SubnetMask")
+    if ($Gateway) {
+        $lines.Add('      routes:')
+        $lines.Add('        - to: default')
+        $lines.Add("          via: $Gateway")
+    }
+    if ($Dns) {
+        $lines.Add('      nameservers:')
+        $lines.Add('        addresses:')
+        $lines.Add("          - $Dns")
+    }
+    $entry = $lines -join "`n"
+
+    if ($NoWrapper) {
+        return $entry
+    }
 
     return @"
 network:
   version: 2
   ethernets:
-    eth0:
-      match:
-        driver: hv_netvsc
-      dhcp4: false
-      addresses:
-        - $IpAddress/$SubnetMask
-      routes:
-        - to: default
-          via: $Gateway
-      nameservers:
-        addresses:
-          - $Dns
+$entry
 "@
 }

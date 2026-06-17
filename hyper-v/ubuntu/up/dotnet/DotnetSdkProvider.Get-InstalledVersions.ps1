@@ -47,7 +47,7 @@ function Get-DotnetSdkInstalledVersions {
 
     # ConvertTo-Array normalises null / scalar / array into a flat
     # array shape without the @()-in-if-expression collapse-to-$null
-    # trap (see PowerShell.Common's ConvertTo-Array header).
+    # trap (see Common.PowerShell's ConvertTo-Array header).
     $manifests = ConvertTo-Array (
         Get-VmManifestsByProvider `
             -SshClient $SshClient `

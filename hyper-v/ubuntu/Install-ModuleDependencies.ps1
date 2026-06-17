@@ -14,7 +14,7 @@
              Included even though it's idempotent so a cold machine doesn't
              need a separate setup step.
 
-    Step 2 - PowerShell.Common: the chicken-and-egg case. It supplies
+    Step 2 - Common.PowerShell: the chicken-and-egg case. It supplies
              Invoke-ModuleInstall used by every install below, so it cannot
              install itself - the inline guard is unavoidable.
 
@@ -31,8 +31,8 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 # Install-PowerShellCommonWithRetry
 #   The chicken-and-egg case: Invoke-ModuleInstall (which has retry built
-#   in) lives inside PowerShell.Common, so it cannot be used to install
-#   PowerShell.Common itself. A small inline retry wrapper here covers
+#   in) lives inside Common.PowerShell, so it cannot be used to install
+#   Common.PowerShell itself. A small inline retry wrapper here covers
 #   that single bootstrap call. All later Invoke-ModuleInstall calls below
 #   get retry for free.
 #
@@ -55,7 +55,7 @@ function Install-PowerShellCommonWithRetry {
             # -ErrorAction Stop promotes PSGallery "Unable to resolve
             # package source" (a non-terminating error by default) to a
             # terminating one so the catch block can retry it.
-            Install-Module PowerShell.Common `
+            Install-Module Common.PowerShell `
                 -MinimumVersion $MinimumVersion `
                 -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
             return
@@ -63,7 +63,7 @@ function Install-PowerShellCommonWithRetry {
         catch {
             if ($attempt -ge $MaxAttempts) { throw }
             Write-Warning (
-                "Install-Module PowerShell.Common failed " +
+                "Install-Module Common.PowerShell failed " +
                 "(attempt $attempt/$MaxAttempts): " +
                 "$($_.Exception.Message). Retrying in ${delay}s ..."
             )
@@ -81,23 +81,28 @@ if (-not $_nuget -or $_nuget.Version -lt [Version]'2.8.5.201') {
         -Scope CurrentUser -Force -ForceBootstrap | Out-Null
 }
 
-# Step 2 - PowerShell.Common (chicken-and-egg bootstrap)
-$_common = Get-Module -ListAvailable -Name PowerShell.Common |
+# Step 2 - Common.PowerShell (chicken-and-egg bootstrap)
+# Floor is 8.1.0: Infrastructure.Network.Windows (installed in step 3)
+# declares Common.PowerShell >= 8.1.0 in its RequiredModules. Because the
+# bootstrap imports Common.PowerShell into the session here, loading an
+# older 7.x first would collide with that requirement when Network.Windows
+# is imported. Loading 8.1.0 up front keeps a single compatible version live.
+$_common = Get-Module -ListAvailable -Name Common.PowerShell |
     Sort-Object Version -Descending | Select-Object -First 1
-if (-not $_common -or $_common.Version -lt [Version]'5.1.0') {
-    Install-PowerShellCommonWithRetry -MinimumVersion '6.1.0'
+if (-not $_common -or $_common.Version -lt [Version]'8.1.0') {
+    Install-PowerShellCommonWithRetry -MinimumVersion '8.1.0'
     # Re-query so the comparison below uses the freshly installed version.
-    $_common = Get-Module -ListAvailable -Name PowerShell.Common |
+    $_common = Get-Module -ListAvailable -Name Common.PowerShell |
         Sort-Object Version -Descending | Select-Object -First 1
 }
 # Reload only when the loaded state differs from the target (multiple
 # versions live, or wrong version live). Mirrors the conditional in
 # Invoke-ModuleInstall - inlined here because the bootstrap installs
 # the very module that defines that function.
-$_loaded = @(Get-Module -Name PowerShell.Common)
+$_loaded = @(Get-Module -Name Common.PowerShell)
 if ($_loaded.Count -ne 1 -or $_loaded[0].Version -ne $_common.Version) {
     if ($_loaded) { $_loaded | Remove-Module -Force }
-    Import-Module PowerShell.Common -Force -ErrorAction Stop
+    Import-Module Common.PowerShell -Force -ErrorAction Stop
 }
 
 # Step 3 - Everything else
@@ -105,7 +110,29 @@ if ($_loaded.Count -ne 1 -or $_loaded[0].Version -ne $_common.Version) {
 # cloud-init readiness poll) and New-VmSshClient / Invoke-SshClientCommand /
 # Invoke-WithVmFileServer / Add-VmFileServerFile (used by the out-of-band
 # post-provisioning file transfers and software installs).
-Invoke-ModuleInstall -ModuleName 'Infrastructure.HyperV' -MinimumVersion '0.10.1'
+Invoke-ModuleInstall -ModuleName 'Infrastructure.HyperV' -MinimumVersion '0.11.0'
+
+# Infrastructure.Network.Windows hosts the Windows-only host-network
+# helpers the preflight + step 4 setup rely on: Reset-IcsSharing,
+# Set-RouterSshPortProxy(+Firewall), Get-NetshPortProxyRules,
+# Test-HostNetworkProfileSetting, Test-IcsDnsReachable,
+# Test-IcsDnsProxyReachable, Test-WslRouterReachability. Auto-pulls
+# Infrastructure.Wsl via its RequiredModules manifest entry, so
+# Invoke-WslShell becomes available without an explicit install
+# call here.
+# Floor 0.6.0: Set-RouterSshPortProxyFirewall scopes its inbound 2222
+# allow by the WSL NAT source range instead of the WSL adapter
+# interface. The adapter GUID is regenerated across shutdowns/reboots,
+# which stranded an interface-pinned rule and needed a re-provision to
+# fix; range scoping has nothing volatile to go stale, so it survives
+# reboots of long-lived VMs without re-provisioning.
+Invoke-ModuleInstall -ModuleName 'Infrastructure.Network.Windows' -MinimumVersion '0.6.0'
+
+# Infrastructure.Wsl provides Invoke-WslShell (used by
+# Test-WslRouterReachability) and Assert-Wsl2Ready / Assert-WslHasBash
+# (gates for any wsl-using flow). Moved out of Common.PowerShell at
+# 7.0.0 so a fresh provisioner host needs both modules now.
+Invoke-ModuleInstall -ModuleName 'Infrastructure.Wsl' -MinimumVersion '0.1.0'
 
 # Posh-SSH is loaded only for its bundled Renci.SshNet.dll - the SSH.NET
 # types that New-VmSshClient instantiates. Posh-SSH's own cmdlets are not

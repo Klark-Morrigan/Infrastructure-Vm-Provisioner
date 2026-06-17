@@ -5,6 +5,12 @@ BeforeAll {
     function New-SeedIso { param($OutputPath, $Files) }
 
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\New-StaticNetplanYaml.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\Initialize-SeedConfigDirectory.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\New-CloudInitMetaData.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\New-CloudInitUserBlock.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\New-CloudInitDisableNetworkConfigEntry.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\Format-CloudInitLiteralBlock.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\Write-VmSeedIso.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\generate-seed-iso.ps1"
 
     function New-TestVm {

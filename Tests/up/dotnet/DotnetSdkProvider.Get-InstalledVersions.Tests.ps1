@@ -4,7 +4,7 @@ BeforeAll {
     # Get-VmManifestsByProvider.Tests.ps1 and not under test here.
     function Get-VmManifestsByProvider { param($SshClient, $Provider) }
 
-    # ConvertTo-Array ships in PowerShell.Common in production. The
+    # ConvertTo-Array ships in Common.PowerShell in production. The
     # SUT uses it to keep the manifest list array-shaped without falling
     # into the @()-in-if-expression collapse-to-$null trap. Tests
     # reproduce its minimal contract.

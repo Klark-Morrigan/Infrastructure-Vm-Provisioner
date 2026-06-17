@@ -19,14 +19,14 @@ several implementation choices that are now stale:
 - `provision.ps1` and `deprovision.ps1` declare in their `.NOTES` block:
   `"PowerShell 5.1 (ships with Windows 11) or later. PS 7 is recommended but not required."`
 - `setup-secrets.ps1` pins its module dependencies at versions predating the
-  PS 7-only releases: `PowerShell.Common >= 1.3.3` (now `2.0.0`) and
+  PS 7-only releases: `Common.PowerShell >= 1.3.3` (now `2.0.0`) and
   `Infrastructure.Secrets >= 2.1.0` (now `3.0.0`). Leaving these pins allows
   PSGallery to resolve to the old PS 5.1-era releases, breaking any consumer
   that expects PS 7-only APIs.
 - Four source files contain code written specifically to run on PS 5.1, plus
   stale comments documenting that intent in two further files.
 
-CI requires no changes - `ci.yml` delegates to PowerShell-Common's shared
+CI requires no changes - `ci.yml` delegates to Common-PowerShell's shared
 workflow, which already dropped the PS 5.1 job.
 
 ---
@@ -44,7 +44,7 @@ workflow, which already dropped the PS 5.1 job.
 
 | Dependency | Current pin | Target pin |
 |------------|------------|------------|
-| `PowerShell.Common` | `>= 1.3.3` | `>= 2.0.0` (first PS 7-only release) |
+| `Common.PowerShell` | `>= 1.3.3` | `>= 2.0.0` (first PS 7-only release) |
 | `Infrastructure.Secrets` | `>= 2.1.0` | `>= 3.0.0` (first PS 7-only release) |
 
 ### Code compromise
@@ -73,7 +73,7 @@ workflow, which already dropped the PS 5.1 job.
 
 ## Why Now
 
-- `PowerShell.Common 2.0.0` and `Infrastructure.Secrets 3.0.0` are now the
+- `Common.PowerShell 2.0.0` and `Infrastructure.Secrets 3.0.0` are now the
   current releases and both require PS 7. Pinning to older versions here risks
   pulling in stale, incompatible releases on a fresh machine.
 - The documentation actively misleads operators about the supported runtime.
@@ -128,4 +128,4 @@ graph TD
   implementations are unchanged - they remain preferred over their PS cmdlet
   equivalents for predictability; only the PS 5.1 rationale in the comments
   is removed.
-- No `ci.yml` changes - the PS 5.1 job removal propagated from PowerShell-Common.
+- No `ci.yml` changes - the PS 5.1 job removal propagated from Common-PowerShell.

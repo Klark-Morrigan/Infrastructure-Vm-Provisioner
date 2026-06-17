@@ -47,7 +47,29 @@ $ErrorActionPreference = 'Stop'
 
 . "$PSScriptRoot\common\config\ConvertFrom-VmConfigJson.ps1"
 . "$PSScriptRoot\common\config\Get-SanitizedVmDisplay.ps1"
+. "$PSScriptRoot\common\config\Group-VmsByEnvironment.ps1"
 . "$PSScriptRoot\common\config\Read-VmProvisionerConfig.ps1"
+. "$PSScriptRoot\common\diag\Get-VmDiagFolder.ps1"
+. "$PSScriptRoot\common\diag\Invoke-VmRuntimeDiag.ps1"
+. "$PSScriptRoot\common\network\Get-VmAdapterIPv4.ps1"
+# Eight host-network helpers (ICS toggle, netsh portproxy x2,
+# firewall, profile, DNS x2, WSL reachability probe) now ship
+# in the Infrastructure.Network.Windows module. Install-ModuleDependencies
+# imports it at agent startup; this file only consumes the
+# exported functions. Test-WslRouterReachability transitively
+# depends on Infrastructure.Wsl (auto-imported via RequiredModules).
+. "$PSScriptRoot\common\network\preflight\checks\Test-IsCurrentSessionElevated.ps1"
+. "$PSScriptRoot\common\network\preflight\Assert-PreflightFindings.ps1"
+. "$PSScriptRoot\common\network\preflight\Assert-HostNetworkPreflight.ps1"
+. "$PSScriptRoot\common\network\Assert-WorkloadReachableViaRouter.ps1"
+. "$PSScriptRoot\common\network\Remove-LegacySingletonNat.ps1"
+. "$PSScriptRoot\common\network\Resolve-ExistingRouterIp.ps1"
+. "$PSScriptRoot\common\ssh\Wait-VmSshBannerReachable.ps1"
+. "$PSScriptRoot\common\ui\Format-ElapsedBudgetWithGradient.ps1"
+# SSH jump-host helpers (New-VmSshTunnel, New-VmSshClientWithJump,
+# Test-SshBanner) and the upstream-host-IP discovery (Get-VmSwitchHostIp)
+# live in Infrastructure.HyperV >= 0.11.0 - imported by
+# Install-ModuleDependencies above. No dot-source needed.
 . "$PSScriptRoot\up\config\Select-VmsForProvisioning.ps1"
 . "$PSScriptRoot\up\seed\iso.ps1"
 . "$PSScriptRoot\up\disk\Invoke-BaseImagePatch.ps1"
@@ -89,13 +111,30 @@ $ErrorActionPreference = 'Stop'
 # specific data it captures and where outputs land. All three write
 # under <vmConfigPath>\diagnostics\<vmName>\<timestamp>\ so a single
 # provisioning run produces one self-contained folder.
+. "$PSScriptRoot\up\post\Assert-RouterServicesActive.ps1"
 . "$PSScriptRoot\up\post\Invoke-CloudInitDiagnostics.ps1"
 . "$PSScriptRoot\up\post\Invoke-SerialConsoleCapture.ps1"
 . "$PSScriptRoot\up\post\New-DiagnosticSshClientWrapper.ps1"
+. "$PSScriptRoot\up\post\Wait-CloudInitFinished.ps1"
+. "$PSScriptRoot\up\post\Invoke-VmFilesDispatch.ps1"
 . "$PSScriptRoot\up\post\Invoke-VmPostProvisioning.ps1"
 . "$PSScriptRoot\up\seed\New-StaticNetplanYaml.ps1"
+. "$PSScriptRoot\up\seed\Get-RouterNicStaticMac.ps1"
+# Shared cloud-init helpers - the workload and router seed generators
+# both call these so the meta-data / users / write_files / disable-flag
+# / literal-block-indent / seed-ISO-write paths have one owner.
+. "$PSScriptRoot\up\seed\Initialize-SeedConfigDirectory.ps1"
+. "$PSScriptRoot\up\seed\New-CloudInitMetaData.ps1"
+. "$PSScriptRoot\up\seed\New-CloudInitUserBlock.ps1"
+. "$PSScriptRoot\up\seed\New-CloudInitDisableNetworkConfigEntry.ps1"
+. "$PSScriptRoot\up\seed\Format-CloudInitLiteralBlock.ps1"
+. "$PSScriptRoot\up\seed\Write-VmSeedIso.ps1"
 . "$PSScriptRoot\up\seed\generate-seed-iso.ps1"
+. "$PSScriptRoot\up\seed\Invoke-RouterSeedIsoGeneration.ps1"
+. "$PSScriptRoot\up\network\Ensure-ExternalSwitch.ps1"
+. "$PSScriptRoot\up\network\Ensure-PrivateSwitch.ps1"
 . "$PSScriptRoot\up\network\setup-network.ps1"
+. "$PSScriptRoot\up\vm\Remove-VmSeedIso.ps1"
 . "$PSScriptRoot\up\vm\create-vm.ps1"
 . "$PSScriptRoot\up\timing\Initialize-PhaseTimings.ps1"
 . "$PSScriptRoot\up\timing\Invoke-WithPhaseTimer.ps1"
@@ -167,6 +206,12 @@ $reconcileSubSteps = @(
 )
 
 Initialize-PhaseTimings -Phases @(
+    # Hoisted to the front so a misconfigured host (missing switch,
+    # Public profile, broken ICS DNS proxy) fails in seconds instead
+    # of after minutes of disk copy + tarball download. Owns every
+    # host-deterministic operation: switch ensures, legacy-NAT
+    # cleanup, preflight checks, router-IP discovery, portproxy.
+    'Host network setup',
     # Hashtable items pre-declare their sub-steps so the report shows
     # them as SKIPPED on runs where the work did not apply (e.g.
     # base-image cache hit suppresses the 'download base image' row,
@@ -184,7 +229,6 @@ Initialize-PhaseTimings -Phases @(
         SubSteps = @('JDK', 'dotnet SDK', 'dotnet tools')
     },
     'Cloud-init seed ISO',
-    'Virtual switch + NAT',
     @{
         Name     = 'VM creation'
         SubSteps = @('create + start', 'wait for SSH')
@@ -200,7 +244,70 @@ Initialize-PhaseTimings -Phases @(
 try {
 
     # -----------------------------------------------------------------------
-    # 4. Disk image acquisition (new VMs only)
+    # 4. Host network setup
+    #    Per-env: everything host-side and deterministic that has to be
+    #    in place before any VM-touching work. Hoisted to phase 4 so a
+    #    misconfigured host fails in seconds instead of after disk
+    #    copy + tarball downloads. Order matters:
+    #      a. Legacy NetNat / vNIC cleanup (Invoke-NetworkSetup) FIRST
+    #         so stale state cannot falsely fail the preflight's
+    #         IP-collision check.
+    #      b. External + Private switches before the preflight - the
+    #         preflight's first check is "switch exists".
+    #      c. Assert-HostNetworkPreflight: checks 1-7 with auto-repair
+    #         ON (no VMs alive yet, ICS toggle disrupts nothing).
+    #      d. Router-IP discovery (existing-state routers only - new
+    #         routers get their IP at step 8's KVP discovery).
+    #      e. Localhost portproxy 127.0.0.1:2222 -> <routerIp>:22 so
+    #         WSL-based tools (Ansible) can reach the router. Static
+    #         path runs now; the DHCP follow-up runs in step 8 once
+    #         create-vm.ps1 has populated $routerVm.ipAddress.
+    #      f. Workload _RouterVm stamping so step 8's wait-for-SSH
+    #         and step 9's post-provisioning find the jump host.
+    # -----------------------------------------------------------------------
+
+    Invoke-WithPhaseTimer -Name 'Host network setup' -Action {
+        foreach ($env in (Group-VmsByEnvironment -VmDefs $vmsToProcess)) {
+            if ($env.RouterVms.Count -eq 0) { continue }
+            $routerVm = $env.RouterVms[0]
+
+            Invoke-NetworkSetup -RouterVm    $routerVm `
+                                -WorkloadVms $env.WorkloadVms
+
+            Ensure-ExternalSwitch -Name           $routerVm.externalSwitchName `
+                                  -NetAdapterName $routerVm.externalAdapterName
+            Ensure-PrivateSwitch -Name $routerVm.privateSwitchName
+
+            Assert-HostNetworkPreflight `
+                -SwitchName      $routerVm.externalSwitchName `
+                -WanAdapterName  $routerVm.externalAdapterName `
+                -DnsProbeTarget  $routerVm.gateway
+
+            Resolve-ExistingRouterIp -RouterVm $routerVm
+
+            if ($routerVm.PSObject.Properties['ipAddress'] -and
+                $routerVm.ipAddress) {
+                Set-RouterSshPortProxy -ConnectAddress $routerVm.ipAddress
+            }
+            # Firewall companion: without an inbound allow rule on
+            # the WSL vEthernet, the portproxy listens but Windows
+            # silently drops WSL's packets, surfacing later as the
+            # "Connection timed out during banner exchange" Ansible
+            # UNREACHABLE error.
+            Set-RouterSshPortProxyFirewall
+
+            foreach ($workload in $env.WorkloadVms) {
+                Add-Member -InputObject $workload `
+                           -MemberType NoteProperty `
+                           -Name '_RouterVm' `
+                           -Value $routerVm `
+                           -Force
+            }
+        }
+    }
+
+    # -----------------------------------------------------------------------
+    # 5. Disk image acquisition (new VMs only)
     #    Downloads, converts, patches, and copies the per-VM VHDX.
     #    Sets $vm._vhdxPath on each object for use in step 8. Skipped for
     #    existing VMs - their disks already exist and re-copying would lose
@@ -233,7 +340,7 @@ try {
     }
 
     # -----------------------------------------------------------------------
-    # 5. Host-side acquisitions (per VM - new AND existing)
+    # 6. Host-side acquisitions (per VM - new AND existing)
     #    Per-VM orchestrator that dispatches each per-software acquirer whose
     #    opt-in field is set on the VM definition. Self-skips for VMs with no
     #    opt-in fields. Adding a new acquirer is one dispatch line in
@@ -252,7 +359,7 @@ try {
     }
 
     # -----------------------------------------------------------------------
-    # 6. Cloud-init seed ISO generation (new VMs only)
+    # 7. Cloud-init seed ISO generation (new VMs only)
     #    Builds meta-data, user-data, and network-config; writes the ISO.
     #    Sets $vm._seedIsoPath on each object for use in the VM-creation step.
     #    Skipped for existing VMs - cloud-init already ran on their first boot.
@@ -260,35 +367,50 @@ try {
 
     Invoke-WithPhaseTimer -Name 'Cloud-init seed ISO' -Action {
         foreach ($vm in $newVms) {
-            Invoke-SeedIsoGeneration -Vm $vm
+            # Branch on kind so router VMs get the dual-NIC seed
+            # (Invoke-RouterSeedIsoGeneration) and workload VMs keep
+            # the single-NIC seed they have always had. Schema defaults
+            # 'kind' to 'workload', so this comparison is total.
+            if ($vm.kind -eq 'router') {
+                Invoke-RouterSeedIsoGeneration -Vm $vm
+            }
+            else {
+                Invoke-SeedIsoGeneration -Vm $vm
+            }
         }
-    }
-
-    # -----------------------------------------------------------------------
-    # 7. Virtual switch and NAT setup
-    #    Switch and NAT names come from the config (default: VmLAN / VmLAN-NAT).
-    #    Idempotent - safe to re-run. Always runs so a rebuilt host gets the
-    #    network re-applied around already-existing VMs.
-    # -----------------------------------------------------------------------
-
-    $switchName = $vmsToProcess[0].switchName
-    $natName    = $vmsToProcess[0].natName
-
-    Invoke-WithPhaseTimer -Name 'Virtual switch + NAT' -Action {
-        Invoke-NetworkSetup -VmsToProvision $vmsToProcess `
-                            -SwitchName     $switchName `
-                            -NatName        $natName
     }
 
     # -----------------------------------------------------------------------
     # 8. VM creation (new VMs only)
     #    Creates, configures, boots each VM, and waits for SSH readiness.
+    #    Workload VMs get one NIC on their environment's privateSwitchName;
+    #    router VMs get their externalSwitchName as the primary NIC switch
+    #    and Invoke-VmCreation adds the second (private) NIC internally.
     #    Skipped for existing VMs.
     # -----------------------------------------------------------------------
 
     Invoke-WithPhaseTimer -Name 'VM creation' -Action {
         foreach ($vm in $newVms) {
-            Invoke-VmCreation -Vm $vm -SwitchName $switchName
+            $primarySwitch = if ($vm.kind -eq 'router') {
+                $vm.externalSwitchName
+            }
+            else {
+                $vm.privateSwitchName
+            }
+            Invoke-VmCreation -Vm $vm -SwitchName $primarySwitch
+        }
+        # Follow-up portproxy pass for routers whose IP was unknown
+        # at step 4 (DHCP) and got populated by create-vm.ps1's KVP
+        # discovery just above. Static routers already had their
+        # portproxy set in step 4; the call is idempotent so a static
+        # router whose IP did not change is a no-op. New IP at the
+        # same listen target triggers a delete+re-add inside
+        # Set-RouterSshPortProxy.
+        foreach ($vm in $newVms | Where-Object { $_.kind -eq 'router' }) {
+            if ($vm.PSObject.Properties['ipAddress'] -and $vm.ipAddress) {
+                Set-RouterSshPortProxy -ConnectAddress $vm.ipAddress
+                Set-RouterSshPortProxyFirewall
+            }
         }
     }
 

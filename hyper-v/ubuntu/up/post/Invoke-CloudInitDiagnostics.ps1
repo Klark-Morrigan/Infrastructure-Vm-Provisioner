@@ -51,6 +51,14 @@
 #     apt-get update sit on retries for several minutes per source)
 #       network-interfaces.txt      - `ip addr` + `ip route` + `ip rule`
 #                                     (interface IPs, routing table)
+#       netplan-config.txt          - file listing of /etc/netplan/,
+#                                     full contents of each .yaml /
+#                                     .yml file, merged effective
+#                                     config (`netplan get`), and
+#                                     `networkctl status` per link.
+#                                     Diagnoses the case where a static
+#                                     seed config is shadowed by an
+#                                     Azure base-image netplan default.
 #       network-resolv.txt          - /etc/resolv.conf contents +
 #                                     symlink target + resolvectl status
 #       network-reachability.txt    - ping gateway / 8.8.8.8 / 1.1.1.1,
@@ -108,9 +116,9 @@ function Invoke-CloudInitDiagnostics {
     #     Invoke-VmCreation as $Vm._diagTimestamp) so console.log from
     #     Start-SerialConsoleCapture and the dumps below land in the
     #     SAME folder for a given run.
-    $diagDir = Join-Path $VmConfigPath 'diagnostics'
-    $diagDir = Join-Path $diagDir      $VmName
-    $diagDir = Join-Path $diagDir      $Timestamp
+    $diagDir = Get-VmDiagFolder -VmConfigPath $VmConfigPath `
+                                -VmName       $VmName `
+                                -Timestamp    $Timestamp
     if (-not (Test-Path -Path $diagDir -PathType Container)) {
         New-Item -ItemType Directory -Path $diagDir -Force | Out-Null
     }
@@ -193,6 +201,29 @@ function Invoke-CloudInitDiagnostics {
             'echo "=== ip addr ===" && ip -d addr; ' +
             'echo "=== ip route ===" && ip route; ' +
             'echo "=== ip rule ===" && ip rule'
+        # netplan inputs (every file under /etc/netplan/) plus the
+        # merged effective config and what networkd actually applied.
+        # Captures the case where a static seed config is shadowed by
+        # an Azure base-image netplan default - the file listing shows
+        # both files; `netplan get` shows the merged result; `networkctl`
+        # shows whether the resulting wires were brought up.
+        'netplan-config.txt'          =
+            'echo "=== ls -la /etc/netplan/ ===" && ' +
+            'sudo ls -la /etc/netplan/ 2>&1; ' +
+            'echo "=== /etc/netplan/*.yaml contents ===" && ' +
+            'for f in /etc/netplan/*.yaml /etc/netplan/*.yml; do ' +
+            '[ -f "$f" ] || continue; ' +
+            'echo "--- $f ---"; ' +
+            'sudo cat "$f"; done; ' +
+            'echo "=== sudo netplan get (merged effective) ===" && ' +
+            'sudo netplan get 2>&1 || echo "netplan get unavailable"; ' +
+            'echo "=== networkctl ===" && ' +
+            'networkctl --no-pager 2>&1 || echo "networkctl unavailable"; ' +
+            'echo "=== networkctl status (per link) ===" && ' +
+            'for L in $(networkctl --no-legend list 2>/dev/null | awk "{print \$2}"); do ' +
+            'echo "--- $L ---"; ' +
+            'networkctl status --no-pager "$L" 2>&1; done'
+
         # /etc/resolv.conf is a symlink to /run/systemd/resolve/stub-resolv.conf
         # on systemd-resolved systems; print both the symlink target
         # and its contents so an operator can see where resolution

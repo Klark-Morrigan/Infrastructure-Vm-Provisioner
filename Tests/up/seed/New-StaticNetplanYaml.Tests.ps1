@@ -151,4 +151,171 @@ Describe 'New-StaticNetplanYaml' {
             @($eth['nameservers']['addresses']) | Should -Be @('9.9.9.9')
         }
     }
+
+    # ------------------------------------------------------------------
+    Context 'Key parameter (ethernet entry id)' {
+    # ------------------------------------------------------------------
+
+        It 'defaults the ethernet entry key to eth0' {
+            $eths = (ConvertTo-NetplanModel -Yaml (New-TestYaml))['ethernets']
+            @($eths.Keys) | Should -Be @('eth0')
+        }
+
+        It 'uses the supplied Key as the ethernet entry id' {
+            $yaml = New-StaticNetplanYaml `
+                -Key        'ext0' `
+                -IpAddress  '192.168.1.10' `
+                -SubnetMask '24' `
+                -Gateway    '192.168.1.1' `
+                -Dns        '8.8.8.8'
+            $eths = (ConvertTo-NetplanModel -Yaml $yaml)['ethernets']
+            @($eths.Keys) | Should -Be @('ext0')
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'MacAddress parameter (match by MAC instead of driver)' {
+    # ------------------------------------------------------------------
+        # Router VMs need MAC-based matching because both NICs share the
+        # hv_netvsc driver, so the workload-default driver match is
+        # ambiguous. Workload VMs continue to match by driver.
+
+        It 'matches by driver hv_netvsc when MacAddress is absent' {
+            $eth = (ConvertTo-NetplanModel -Yaml (New-TestYaml))['ethernets']['eth0']
+            $eth['match']['driver']     | Should -Be 'hv_netvsc'
+            $eth['match']['macaddress'] | Should -BeNullOrEmpty
+        }
+
+        It 'matches by MacAddress when supplied' {
+            $yaml = New-StaticNetplanYaml `
+                -IpAddress  '192.168.1.10' `
+                -SubnetMask '24' `
+                -Gateway    '192.168.1.1' `
+                -Dns        '8.8.8.8' `
+                -MacAddress '02:aa:bb:cc:dd:00'
+            $eth = (ConvertTo-NetplanModel -Yaml $yaml)['ethernets']['eth0']
+            $eth['match']['macaddress'] | Should -Be '02:aa:bb:cc:dd:00'
+            $eth['match']['driver']     | Should -BeNullOrEmpty
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'SetName parameter (pin kernel interface name)' {
+    # ------------------------------------------------------------------
+        # Router VMs pin set-name so nftables and dnsmasq can reference
+        # ext0 / priv0 without guessing at kernel-assigned names.
+
+        It 'omits set-name by default' {
+            $eth = (ConvertTo-NetplanModel -Yaml (New-TestYaml))['ethernets']['eth0']
+            $eth['set-name'] | Should -BeNullOrEmpty
+        }
+
+        It 'emits set-name when supplied' {
+            $yaml = New-StaticNetplanYaml `
+                -Key        'ext0' `
+                -IpAddress  '192.168.1.10' `
+                -SubnetMask '24' `
+                -Gateway    '192.168.1.1' `
+                -Dns        '8.8.8.8' `
+                -MacAddress '02:aa:bb:cc:dd:00' `
+                -SetName    'ext0'
+            $eth = (ConvertTo-NetplanModel -Yaml $yaml)['ethernets']['ext0']
+            $eth['set-name'] | Should -Be 'ext0'
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'optional Gateway and Dns' {
+    # ------------------------------------------------------------------
+        # The router VM's private-side NIC has no upstream gateway and
+        # no DNS server (it IS the gateway and resolver for downstream
+        # VMs). Skipping the blocks at the template layer keeps the
+        # router code from having to do post-hoc YAML surgery.
+
+        It 'omits the routes block when Gateway is absent' {
+            $yaml = New-StaticNetplanYaml `
+                -IpAddress  '10.10.0.1' `
+                -SubnetMask '24' `
+                -Dns        '8.8.8.8'
+            $eth = (ConvertTo-NetplanModel -Yaml $yaml)['ethernets']['eth0']
+            $eth['routes'] | Should -BeNullOrEmpty
+        }
+
+        It 'omits the nameservers block when Dns is absent' {
+            $yaml = New-StaticNetplanYaml `
+                -IpAddress  '10.10.0.1' `
+                -SubnetMask '24' `
+                -Gateway    '10.10.0.254'
+            $eth = (ConvertTo-NetplanModel -Yaml $yaml)['ethernets']['eth0']
+            $eth['nameservers'] | Should -BeNullOrEmpty
+        }
+
+        It 'omits both routes and nameservers when neither Gateway nor Dns is supplied' {
+            $yaml = New-StaticNetplanYaml `
+                -IpAddress  '10.10.0.1' `
+                -SubnetMask '24'
+            $eth = (ConvertTo-NetplanModel -Yaml $yaml)['ethernets']['eth0']
+            $eth['routes']      | Should -BeNullOrEmpty
+            $eth['nameservers'] | Should -BeNullOrEmpty
+            # But the address still lands.
+            @($eth['addresses']) | Should -Be @('10.10.0.1/24')
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'NoWrapper switch (ethernet entry only)' {
+    # ------------------------------------------------------------------
+        # Router VMs compose two ethernet entries under one wrapper to
+        # land both NICs in a single netplan document. -NoWrapper lets
+        # New-StaticNetplanYaml emit just the inner entry so the caller
+        # owns the network: / version: / ethernets: header.
+
+        It 'wraps the entry under network: / version: 2 / ethernets: by default' {
+            $yaml = New-TestYaml
+            $yaml | Should -Match '(?m)^network:'
+            $yaml | Should -Match '(?m)^\s+version:\s*2'
+            $yaml | Should -Match '(?m)^\s+ethernets:'
+        }
+
+        It 'returns just the ethernet entry when -NoWrapper is set' {
+            $entry = New-StaticNetplanYaml `
+                -IpAddress  '192.168.1.10' `
+                -SubnetMask '24' `
+                -Gateway    '192.168.1.1' `
+                -Dns        '8.8.8.8' `
+                -NoWrapper
+            $entry | Should -Not -Match '(?m)^network:'
+            $entry | Should -Not -Match '(?m)^\s+version:\s*2'
+            $entry | Should -Not -Match '(?m)^\s+ethernets:'
+            $entry | Should -Match '(?m)^\s+eth0:'
+        }
+
+        It 'concatenated NoWrapper entries parse as one netplan document under a hand-built wrapper' {
+            # Pins the composition contract the router seed depends on:
+            # two NoWrapper entries can be concatenated under a single
+            # `network: / version: 2 / ethernets:` header and the result
+            # is a single, parseable netplan document.
+            $ext = New-StaticNetplanYaml `
+                -Key 'ext0' -MacAddress '02:aa:bb:cc:dd:00' -SetName 'ext0' `
+                -IpAddress '192.168.1.10' -SubnetMask '24' `
+                -Gateway   '192.168.1.1'  -Dns '8.8.8.8' `
+                -NoWrapper
+            $priv = New-StaticNetplanYaml `
+                -Key 'priv0' -MacAddress '02:aa:bb:cc:dd:01' -SetName 'priv0' `
+                -IpAddress '10.10.0.1' -SubnetMask '24' `
+                -NoWrapper
+            $combined = @"
+network:
+  version: 2
+  ethernets:
+$ext
+$priv
+"@
+            $model = ConvertTo-NetplanModel -Yaml $combined
+            @($model['ethernets'].Keys) | Sort-Object | Should -Be @('ext0', 'priv0')
+            $model['ethernets']['ext0']['match']['macaddress']  | Should -Be '02:aa:bb:cc:dd:00'
+            $model['ethernets']['priv0']['match']['macaddress'] | Should -Be '02:aa:bb:cc:dd:01'
+            $model['ethernets']['priv0']['routes']              | Should -BeNullOrEmpty
+        }
+    }
 }

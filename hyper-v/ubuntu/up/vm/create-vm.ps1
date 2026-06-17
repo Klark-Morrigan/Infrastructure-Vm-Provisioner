@@ -113,10 +113,34 @@ function Invoke-VmCreation {
 
     # ------------------------------------------------------------------
     # Network
+    #
+    # Workload VMs get one NIC on $SwitchName (caller's choice). Router
+    # VMs (kind: router) get a second NIC on their privateSwitchName
+    # and both NICs are pinned to deterministic MACs so the cloud-init
+    # netplan's match-by-MAC blocks find their NIC. See feature 53.
     # ------------------------------------------------------------------
     Connect-VMNetworkAdapter -VMName     $Vm.vmName `
                              -Name       'Network Adapter' `
                              -SwitchName $SwitchName
+
+    $kind = if ($Vm.PSObject.Properties['kind']) { $Vm.kind } else { 'workload' }
+    if ($kind -eq 'router') {
+        # Pin the default NIC's MAC to the same value the router seed
+        # embedded in its netplan match block. Without this Hyper-V's
+        # dynamic-MAC pool would hand the guest a different MAC each
+        # boot and netplan would never bring the interface up.
+        Set-VMNetworkAdapter -VMName           $Vm.vmName `
+                             -Name             'Network Adapter' `
+                             -StaticMacAddress $Vm._externalMac
+
+        # Add the private-side NIC. Name 'Private' is chosen so Get-
+        # VMNetworkAdapter / operator inspection at the Hyper-V layer
+        # immediately distinguishes the two adapters.
+        Add-VMNetworkAdapter -VMName           $Vm.vmName `
+                             -Name             'Private' `
+                             -SwitchName       $Vm.privateSwitchName `
+                             -StaticMacAddress $Vm._privateMac
+    }
 
     # Attach the named-pipe serial reader BEFORE Start-VM so we do not
     # miss the early kernel / cloud-init lines. The reader job sits on
@@ -130,6 +154,22 @@ function Invoke-VmCreation {
     $diagTimestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
     Add-Member -InputObject $Vm -MemberType NoteProperty `
                -Name '_diagTimestamp' -Value $diagTimestamp -Force
+
+    # Per-VM diag-folder retention. The diagnostics root for this VM
+    # accumulates one timestamped subfolder per run (console.log,
+    # cloud-init-*.txt, runtime-diag.log, ssh.log all collocated).
+    # Sweep before this run drops its first artifact so the
+    # operator's disk does not grow without bound across repeated
+    # provisions. Keep the last 30 runs (over a year of weekly
+    # runs) or 60 days of them, whichever is smaller.
+    if ($Vm.PSObject.Properties['vmConfigPath'] -and $Vm.vmConfigPath) {
+        $perVmDiagRoot = Join-Path (Join-Path $Vm.vmConfigPath 'diagnostics') `
+                                   $Vm.vmName
+        Limit-RetainedItem -Directory  $perVmDiagRoot `
+                           -Filter     '????-??-??_*' `
+                           -MaxItems   30 `
+                           -MaxAgeDays 7
+    }
 
     $consoleCapture = Start-SerialConsoleCapture `
                           -VmName       $Vm.vmName `
@@ -164,7 +204,8 @@ function Invoke-VmCreation {
     # ------------------------------------------------------------------
     $timeoutMinutes      = 10
     $pollIntervalSeconds = 10
-    $deadline            = (Get-Date).AddMinutes($timeoutMinutes)
+    $startTime           = Get-Date
+    $deadline            = $startTime.AddMinutes($timeoutMinutes)
     $sshReady            = $false
 
     Invoke-WithSubStepTimer `
@@ -172,62 +213,224 @@ function Invoke-VmCreation {
         -Name   'wait for SSH' `
         -Action {
 
+    # Router VMs in externalDhcp mode (the schema default) have no
+    # ipAddress in their VM def at this point - the upstream NIC's
+    # address gets handed to them by the LAN's DHCP server moments
+    # after boot. Discover it through Hyper-V's KVP integration
+    # services BEFORE the SSH probe: poll Get-VMNetworkAdapter on
+    # the external switch until an IPv4 appears, then write it back
+    # onto $Vm.ipAddress so every downstream consumer (this loop's
+    # SSH probe, the workload's tunnel in step 7, plan/diag output)
+    # sees a single source of truth. Pinned-static router VMs and
+    # workload VMs already have ipAddress and skip the discovery
+    # loop.
+    $needsIpDiscovery = -not $Vm.PSObject.Properties['ipAddress']
+    if ($needsIpDiscovery) {
+        # Get-VmKvpIpAddress (Infrastructure.HyperV >= 0.11.0) owns the
+        # polling loop, the VM-state guard, the IPv4 filter, and the
+        # deadline error surface. -OnPoll paints the inline progress
+        # dot so the operator sees the discovery is alive without the
+        # helper having to know about Write-Host. The discovered IP is
+        # stamped back onto $Vm so downstream consumers (this loop's
+        # SSH probe, the workload tunnel below) see a single source of
+        # truth.
+        Write-Host "  Discovering ext0 IP via Hyper-V KVP ..." -NoNewline
+        try {
+            $discoveredIp = Get-VmKvpIpAddress `
+                                -VmName              $Vm.vmName `
+                                -SwitchName          $Vm.externalSwitchName `
+                                -TimeoutMinutes      $timeoutMinutes `
+                                -PollIntervalSeconds $pollIntervalSeconds `
+                                -OnPoll              { Write-Host '.' -NoNewline }
+        } catch {
+            Write-Host ''
+            throw
+        }
+
+        Add-Member -InputObject $Vm `
+                   -MemberType NoteProperty `
+                   -Name 'ipAddress' `
+                   -Value $discoveredIp `
+                   -Force
+        Write-Host " $discoveredIp" -ForegroundColor Green
+    }
+
+    # Workload VMs after feature 53 sit on a per-environment private
+    # switch the host has no route to. provision.ps1 step 7 stamps
+    # _RouterVm onto every workload def; we open a port forward
+    # through that router so the TCP probe below can target a
+    # localhost endpoint that emerges at the workload on the far
+    # side of the jump. Router VMs (and any pre-feature-53 caller)
+    # take the no-tunnel branch and probe the configured IP
+    # directly.
+    $sshTunnel = $null
+    $hasRouter = $Vm.PSObject.Properties['_RouterVm'] -and $Vm._RouterVm
+    if ($hasRouter) {
+        $sshTunnel = New-VmSshTunnel `
+                         -TargetIp     $Vm.ipAddress `
+                         -JumpHostIp   $Vm._RouterVm.ipAddress `
+                         -JumpUsername $Vm._RouterVm.username `
+                         -JumpPassword $Vm._RouterVm.password
+        $probeIp   = $sshTunnel.LocalHost
+        $probePort = $sshTunnel.LocalPort
+    } else {
+        $probeIp   = $Vm.ipAddress
+        $probePort = 22
+    }
+
     try {
+        # Router-side reachability gate. Owns the polling probe plus
+        # the diag bundle capture on failure - see
+        # common\network\Assert-WorkloadReachableViaRouter.ps1 for
+        # the full contract. Lives inside the try block so a gate
+        # throw still disposes the tunnel + serial console capture
+        # via the finally below.
+        if ($hasRouter) {
+            $diagFolder = Get-VmDiagFolder -VmConfigPath $Vm.vmConfigPath `
+                                           -VmName       $Vm.vmName `
+                                           -Timestamp    $Vm._diagTimestamp
+            # Hyper-V VM-state check is the caller's concern; the
+            # helper stays generic. A non-Running state means the
+            # workload crashed / shut itself off before its sshd could
+            # come up - no point waiting out the gate's full budget.
+            # Closes over a plain string ($vmName) so the callback
+            # works regardless of which module/session state the
+            # helper invokes it from.
+            $vmName     = $Vm.vmName
+            $gateOnPoll = {
+                $vmState = (Get-VM -Name $vmName).State
+                if ($vmState -ne 'Running') {
+                    throw (
+                        "VM '$vmName' stopped unexpectedly " +
+                        "(state: $vmState) during router-side probe."
+                    )
+                }
+            }.GetNewClosure()
+            try {
+                Assert-WorkloadReachableViaRouter `
+                    -JumpClient      $sshTunnel.JumpClient `
+                    -WorkloadIp      $Vm.ipAddress `
+                    -WorkloadVmName  $Vm.vmName `
+                    -RouterVmName    $Vm._RouterVm.vmName `
+                    -DiagFolder      $diagFolder `
+                    -OnPoll          $gateOnPoll
+            } catch {
+                # Output ordering: end the unterminated dot line,
+                # surface the actual error message, THEN fire the
+                # diag. Without these the dots run into the diag-log
+                # path on the same line, and the error appears later
+                # in the timing report instead of right above the
+                # diag pointer.
+                Write-Host ''
+                Write-Host ('  [ERROR] ' + $_.Exception.Message) `
+                    -ForegroundColor Red
+                # Same host+guest snapshot as the wait-for-SSH path.
+                # Assert-WorkloadReachableViaRouter already writes its
+                # own router-side-probe.log into $diagFolder; this adds
+                # the host-side network truth + (if SSH opens) the
+                # workload's own runtime state, both of which the
+                # router-side probe alone cannot see.
+                try {
+                    Invoke-VmRuntimeDiag -Vm           $Vm `
+                                         -VmConfigPath $Vm.vmConfigPath `
+                                         -Timestamp    $Vm._diagTimestamp |
+                        Out-Null
+                } catch {
+                    Write-Host "  [diag] runtime-diag capture failed: $($_.Exception.Message)" `
+                        -ForegroundColor Yellow
+                }
+                throw
+            }
+        }
+
         Write-Host "  Polling SSH on $($Vm.vmName) ..." -NoNewline
 
-        while ((Get-Date) -lt $deadline) {
-            # Abort early if the VM is no longer running - no point waiting
-            # out the full timeout if it has already crashed or shut down.
-            $vmState = (Get-VM -Name $Vm.vmName).State
+        # Wait-VmSshBannerReachable owns the TCP+banner gate and the
+        # progress-dot cadence; the OnPoll callback below carries the
+        # Hyper-V "VM no longer Running" early-exit check that does not
+        # belong in a generic SSH waiter. The callback closes over a
+        # plain string ($vmName) instead of $Vm.vmName so we are not
+        # dependent on .GetNewClosure() capturing a PSCustomObject -
+        # callbacks invoked from a different module/session state see
+        # the script-block-local string the same way regardless.
+        $vmName = $Vm.vmName
+        $onPollVmState = {
+            $vmState = (Get-VM -Name $vmName).State
             if ($vmState -ne 'Running') {
                 Write-Host ''
                 throw (
-                    "VM '$($Vm.vmName)' stopped unexpectedly " +
+                    "VM '$vmName' stopped unexpectedly " +
                     "(state: $vmState). Check the Hyper-V console."
                 )
             }
+        }.GetNewClosure()
+        $sshReady = Wait-VmSshBannerReachable `
+                        -IpAddress           $probeIp `
+                        -Port                $probePort `
+                        -Deadline            $deadline `
+                        -PollIntervalSeconds $pollIntervalSeconds `
+                        -OnPoll              $onPollVmState
 
-            if (Test-VmSshPort -IpAddress $Vm.ipAddress -Port 22) {
-                $sshReady = $true
-                break
-            }
-
-            Write-Host '.' -NoNewline
-            Start-Sleep -Seconds $pollIntervalSeconds
-        }
-
-        Write-Host ''
+        # Elapsed-time tail on the same line as the dots. Outcome-
+        # encoded gradient lives in Format-ElapsedBudgetWithGradient.
+        $totalSeconds = $timeoutMinutes * 60
+        $elapsedSecs  = [int]([Math]::Round(
+            ((Get-Date) - $startTime).TotalSeconds))
+        Write-Host (' ' + (Format-ElapsedBudgetWithGradient `
+                              -ElapsedSeconds $elapsedSecs `
+                              -BudgetSeconds  $totalSeconds `
+                              -Succeeded      $sshReady))
 
         if (-not $sshReady) {
-            throw (
+            # Headline error first so the operator sees it before the
+            # diag log path - mirrors the router-side reachability
+            # catch above for output consistency. The Format-Elapsed
+            # gradient line above already terminated the dot line.
+            $sshTimeoutMessage = (
                 "SSH on '$($Vm.vmName)' did not become reachable within " +
                 "$timeoutMinutes minutes. Check the Hyper-V console for " +
                 "boot errors."
             )
+            Write-Host ('  [ERROR] ' + $sshTimeoutMessage) `
+                -ForegroundColor Red
+
+            # Capture host-side networking truth before throwing.
+            # This is exactly the diag we hand-ran for the WiFi-MAC
+            # collision and ICS DHCP-drift cases: side-by-side
+            # Get-VMNetworkAdapter / Get-NetNeighbor / arp -a / route
+            # tables make duplicate or drifted IPs obvious at a glance.
+            # Guest-side capture is best-effort - if SSH happens to
+            # work post-timeout we get a bonus inside-VM dump; if not,
+            # we still have the host-side log. Wrapped in try/catch so
+            # a diag failure does not mask the headline timeout.
+            try {
+                Invoke-VmRuntimeDiag -Vm           $Vm `
+                                     -VmConfigPath $Vm.vmConfigPath `
+                                     -Timestamp    $Vm._diagTimestamp |
+                    Out-Null
+            } catch {
+                Write-Host "  [diag] runtime-diag capture failed: $($_.Exception.Message)" `
+                    -ForegroundColor Yellow
+            }
+            throw $sshTimeoutMessage
         }
 
         Write-Host "  [OK] SSH reachable on $($Vm.vmName)." -ForegroundColor Green
     }
     finally {
+        # Tear the tunnel down before the seed-ISO cleanup so the
+        # forward stops listening before the wider 'wait for SSH'
+        # sub-step ends. Tunnel disposal is idempotent and safe to
+        # call when the tunnel was never opened (router branch).
+        if ($null -ne $sshTunnel) { $sshTunnel.Dispose() }
+
         # Stop the serial-console reader. Safe to call with $null (Start
         # may have thrown). The reader normally exits on its own when the
         # VM stops; this is belt-and-braces for the orchestrator-tears-
         # down-first case.
         Stop-SerialConsoleCapture -Capture $consoleCapture
 
-        # Remove-VMDvdDrive detaches before Remove-Item deletes - deleting a
-        # file still attached leaves a broken DVD drive reference in the VM.
-        $dvdDrive = Get-VMDvdDrive -VMName $Vm.vmName |
-            Where-Object { $_.Path -eq $Vm._seedIsoPath }
-        if ($null -ne $dvdDrive) {
-            Remove-VMDvdDrive -VMName            $Vm.vmName `
-                              -ControllerNumber   $dvdDrive.ControllerNumber `
-                              -ControllerLocation $dvdDrive.ControllerLocation
-        }
-        if (Test-Path $Vm._seedIsoPath) {
-            Remove-Item -Path $Vm._seedIsoPath -Force
-            Write-Host "  [OK] Seed ISO removed." -ForegroundColor Green
-        }
+        Remove-VmSeedIso -VmName $Vm.vmName -SeedIsoPath $Vm._seedIsoPath
     }
 
         } # end 'wait for SSH' sub-step

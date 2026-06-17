@@ -1,13 +1,13 @@
 BeforeAll {
     # Stub Assert-RequiredProperties before dot-sourcing so the function exists
     # when ConvertFrom-VmConfigJson.ps1 is loaded. The real implementation
-    # lives in PowerShell.Common, which is not required in the test
+    # lives in Common.PowerShell, which is not required in the test
     # environment.
     function Assert-RequiredProperties {
         param($Object, $Properties, $Context)
     }
 
-    # ConvertTo-Array is provided by PowerShell.Common at runtime.
+    # ConvertTo-Array is provided by Common.PowerShell at runtime.
     # Stub it here so the unit tests have no cross-repo dependency.
     function ConvertTo-Array {
         param([AllowNull()] $InputObject)
@@ -44,19 +44,20 @@ BeforeAll {
     function New-ValidVmJson([string] $vmName = 'node-01') {
         @"
 {
-    "vmName":        "$vmName",
-    "cpuCount":      2,
-    "ramGB":         4,
-    "diskGB":        40,
-    "ubuntuVersion": "24.04",
-    "username":      "admin",
-    "password":      "s3cr3t",
-    "ipAddress":     "10.0.0.10",
-    "subnetMask":    "255.255.255.0",
-    "gateway":       "10.0.0.1",
-    "dns":           "8.8.8.8",
-    "vmConfigPath":  "E:\\a_VMs\\Hyper-V\\Config",
-    "vhdPath":       "E:\\a_VMs\\Hyper-V\\Disks"
+    "vmName":            "$vmName",
+    "cpuCount":          2,
+    "ramGB":             4,
+    "diskGB":            40,
+    "ubuntuVersion":     "24.04",
+    "username":          "admin",
+    "password":          "s3cr3t",
+    "ipAddress":         "10.0.0.10",
+    "subnetMask":        "255.255.255.0",
+    "gateway":           "10.0.0.1",
+    "dns":               "8.8.8.8",
+    "vmConfigPath":      "E:\\a_VMs\\Hyper-V\\Config",
+    "vhdPath":           "E:\\a_VMs\\Hyper-V\\Disks",
+    "privateSwitchName": "PrivateSwitch-Production"
 }
 "@
     }
@@ -82,23 +83,9 @@ Describe 'ConvertFrom-VmConfigJson' {
             $result | Should -HaveCount 1
         }
 
-        It 'defaults switchName to VmLAN when absent' {
+        It 'defaults kind to workload when absent' {
             $result = @(ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]")
-            $result[0].switchName | Should -Be 'VmLAN'
-        }
-
-        It 'defaults natName to VmLAN-NAT when absent' {
-            $result = @(ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]")
-            $result[0].natName | Should -Be 'VmLAN-NAT'
-        }
-
-        It 'preserves explicit switchName and natName values' {
-            $custom = (New-ValidVmJson | ConvertFrom-Json)
-            $custom | Add-Member -MemberType NoteProperty -Name switchName -Value 'E2E-VmLAN'
-            $custom | Add-Member -MemberType NoteProperty -Name natName    -Value 'E2E-VmLAN-NAT'
-            $result = @(ConvertFrom-VmConfigJson -Json "[$(ConvertTo-Json $custom -Compress)]")
-            $result[0].switchName | Should -Be 'E2E-VmLAN'
-            $result[0].natName    | Should -Be 'E2E-VmLAN-NAT'
+            $result[0].kind | Should -Be 'workload'
         }
 
         It 'returns all VM objects for a multi-VM JSON array' {
@@ -143,7 +130,13 @@ Describe 'ConvertFrom-VmConfigJson' {
             # the result is a string, not a PSCustomObject. Assert-RequiredProperties
             # is called on it - this test pins the current behaviour so any
             # future guard added here is a deliberate, tested change.
+            #
+            # Per-kind validators (Assert-WorkloadVmField default-dispatched
+            # for missing kind) get mocked to no-ops; their behaviour lives
+            # in their own .Tests.ps1 files, and pinning the dispatch
+            # contract here does not require their throw paths to fire.
             Mock Assert-RequiredProperties {}
+            Mock Assert-WorkloadVmField {}
             { ConvertFrom-VmConfigJson -Json '"hello"' } | Should -Not -Throw
             Should -Invoke Assert-RequiredProperties -Times 1 -Exactly
         }
@@ -173,6 +166,10 @@ Describe 'ConvertFrom-VmConfigJson' {
             # must fall back to (unknown) so the error is still meaningful.
             $json = '[{ "cpuCount": 2 }]'
             Mock Assert-RequiredProperties {}
+            # Default-kind dispatch routes to Assert-WorkloadVmField; mock
+            # to no-op so the dispatch contract test does not run into
+            # the validator's required-field check.
+            Mock Assert-WorkloadVmField {}
             @(ConvertFrom-VmConfigJson -Json $json)
             Should -Invoke Assert-RequiredProperties -Times 1 -Exactly -ParameterFilter {
                 $Context -like "*(unknown)*"
@@ -337,7 +334,7 @@ Describe 'ConvertFrom-VmConfigJson' {
                 Should -Throw -ExpectedMessage "*envVars*"
         }
 
-        It 'runs validators before applying switchName / natName defaults' {
+        It 'runs validators before applying the kind default' {
             # If validation threw mid-way after a default had been applied,
             # a later consumer could observe a half-defaulted VM object.
             # Pinning the order here keeps defaults strictly post-validation.
@@ -345,8 +342,7 @@ Describe 'ConvertFrom-VmConfigJson' {
             $custom = (New-ValidVmJson | ConvertFrom-Json)
             { @(ConvertFrom-VmConfigJson -Json "[$(ConvertTo-Json $custom -Compress)]") } |
                 Should -Throw
-            $custom.PSObject.Properties['switchName'] | Should -BeNullOrEmpty
-            $custom.PSObject.Properties['natName']    | Should -BeNullOrEmpty
+            $custom.PSObject.Properties['kind'] | Should -BeNullOrEmpty
         }
     }
 
@@ -388,6 +384,108 @@ Describe 'ConvertFrom-VmConfigJson' {
             # had no envVars field at all and that intent must still parse.
             $result = @(ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]")
             $result[0].PSObject.Properties['envVars'] | Should -BeNullOrEmpty
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'kind field dispatch' {
+    # ------------------------------------------------------------------
+        # Behaviour of the router-specific rules lives in
+        # Assert-RouterVmField.Tests.ps1; these cases only assert that
+        # ConvertFrom-VmConfigJson dispatches by kind correctly:
+        # workload (default) skips router rules; router invokes them
+        # and propagates their throws.
+        #
+        # Router-VM JSON is built inline per test (no Context-local
+        # helper) for the same reason the 'files round-trip' Context
+        # does it: Pester 5 hoists BeforeAll function definitions but
+        # not helpers defined inside a Context body.
+
+        It 'accepts an explicit workload kind' {
+            $core = (New-ValidVmJson) -replace '\}\s*$', ''
+            $result = @(ConvertFrom-VmConfigJson -Json "[$core, ""kind"": ""workload"" }]")
+            $result[0].kind | Should -Be 'workload'
+        }
+
+        It 'accepts a router kind with all router fields present' {
+            $core = (New-ValidVmJson 'router-prod') -replace '\}\s*$', ''
+            $extras = ', "kind": "router"' +
+                      ', "externalSwitchName": "ExternalSwitch-Shared"' +
+                      ', "externalAdapterName": "Ethernet"' +
+                      ', "privateSwitchName": "PrivateSwitch-Production"' +
+                      ', "privateIpAddress": "10.10.0.1"'
+            $result = @(ConvertFrom-VmConfigJson -Json "[$core$extras }]")
+            $result[0].kind                | Should -Be 'router'
+            $result[0].externalSwitchName  | Should -Be 'ExternalSwitch-Shared'
+            $result[0].externalAdapterName | Should -Be 'Ethernet'
+            $result[0].privateSwitchName   | Should -Be 'PrivateSwitch-Production'
+            $result[0].privateIpAddress    | Should -Be '10.10.0.1'
+        }
+
+        It 'rejects an unknown kind' {
+            $core = (New-ValidVmJson) -replace '\}\s*$', ''
+            { ConvertFrom-VmConfigJson -Json "[$core, ""kind"": ""firewall"" }]" } |
+                Should -Throw -ExpectedMessage "*not recognised*"
+        }
+
+        It 'does not invoke Assert-RouterVmField on a workload VM' {
+            # Default-kind path: router-specific rules must not fire so
+            # workload VMs are not forced to declare router-only fields.
+            Mock Assert-RouterVmField {}
+            @(ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]")
+            Should -Invoke Assert-RouterVmField -Times 0
+        }
+
+        It 'invokes Assert-RouterVmField on a router VM' {
+            Mock Assert-RouterVmField {}
+            $core = (New-ValidVmJson 'router-prod') -replace '\}\s*$', ''
+            $extras = ', "kind": "router"' +
+                      ', "externalSwitchName": "ExternalSwitch-Shared"' +
+                      ', "externalAdapterName": "Ethernet"' +
+                      ', "privateSwitchName": "PrivateSwitch-Production"' +
+                      ', "privateIpAddress": "10.10.0.1"'
+            @(ConvertFrom-VmConfigJson -Json "[$core$extras }]")
+            Should -Invoke Assert-RouterVmField -Times 1 -Exactly -ParameterFilter {
+                $Vm.vmName -eq 'router-prod'
+            }
+        }
+
+        It 'propagates a throw from Assert-RouterVmField' {
+            Mock Assert-RouterVmField {
+                throw "router-prod: missing required field 'privateIpAddress'"
+            }
+            $core = (New-ValidVmJson 'router-prod') -replace '\}\s*$', ''
+            $extras = ', "kind": "router"' +
+                      ', "externalSwitchName": "ExternalSwitch-Shared"' +
+                      ', "externalAdapterName": "Ethernet"' +
+                      ', "privateSwitchName": "PrivateSwitch-Production"' +
+                      ', "privateIpAddress": "10.10.0.1"'
+            { ConvertFrom-VmConfigJson -Json "[$core$extras }]" } |
+                Should -Throw -ExpectedMessage "*privateIpAddress*"
+        }
+
+        It 'throws end-to-end when a router VM omits privateIpAddress' {
+            # End-to-end through the real validator (no mock) so the
+            # router rejection message reaches callers unchanged. Every
+            # other router-required field is present so the throw is
+            # unambiguously about the missing privateIpAddress.
+            # (privateSwitchName is now a base required field validated
+            # by Assert-RequiredProperties - not Assert-RouterVmField - so
+            # a different router-only field is omitted here.)
+            $core = (New-ValidVmJson 'router-prod') -replace '\}\s*$', ''
+            $extras = ', "kind": "router"' +
+                      ', "externalSwitchName": "ExternalSwitch-Shared"' +
+                      ', "externalAdapterName": "Ethernet"'
+            { ConvertFrom-VmConfigJson -Json "[$core$extras }]" } |
+                Should -Throw -ExpectedMessage "*privateIpAddress*"
+        }
+
+        It 'does not require router fields when kind is workload' {
+            # Regression guard: the kind dispatch must leave existing
+            # workload VMs untouched. A workload VM with no router
+            # fields is still valid.
+            { ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]" } |
+                Should -Not -Throw
         }
     }
 

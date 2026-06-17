@@ -50,7 +50,7 @@ fetches it from `nuget.org` (or any configured source), unpacks it
 into `${DOTNET_TOOLS_ROOT}/.store/`, and writes a shim into
 `${DOTNET_TOOLS_ROOT}` that invokes the tool via the runtime.
 
-The immediate driver is `DotNet-Common`'s reusable workflow
+The immediate driver is `Common-DotNet`'s reusable workflow
 `ci-dotnet.yml`, which asserts `reportgenerator --version` and fails
 fast with a message pointing at `Infrastructure-GitHubRunners` when
 the tool is missing. Once feature 42 puts the SDK on the box, this
@@ -205,7 +205,7 @@ provenance.
 
 ## Why Now
 
-- `DotNet-Common`'s `ci-dotnet.yml` asserts `reportgenerator
+- `Common-DotNet`'s `ci-dotnet.yml` asserts `reportgenerator
   --version` and fails the job if missing. Without this feature,
   every coverage-bearing CI run is red on day one.
 - Feature 42 (.NET SDK) is the only hard prerequisite, so this

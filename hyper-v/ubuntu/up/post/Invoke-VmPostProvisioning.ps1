@@ -43,7 +43,15 @@ function Invoke-VmPostProvisioning {
     # operator's explicit "remove the managed block" intent, so it must
     # still route through to the transport.
     $hasEnvVars = $Vm.PSObject.Properties['envVars']
-    if (-not ($hasFiles -or $hasJdk -or $hasEnvVars)) {
+    # Router VMs MUST run post-provisioning even with no opt-in fields:
+    # Assert-RouterServicesActive (below) is the fail-fast gate for
+    # nftables / dnsmasq service state, and the cloud-init wait gives
+    # those services time to bind interfaces before the check fires.
+    # Without this branch, router VMs short-circuit out and a dead
+    # dnsmasq is only caught later by the E2E assertion phase.
+    $isRouter   = $Vm.PSObject.Properties['kind'] -and
+                  $Vm.kind -eq 'router'
+    if (-not ($hasFiles -or $hasJdk -or $hasEnvVars -or $isRouter)) {
         return
     }
 
@@ -66,10 +74,11 @@ function Invoke-VmPostProvisioning {
     # below sees them when invoked from another module (Invoke-WithVmFileServer
     # lives in Infrastructure.HyperV - function-scoped variables are not in
     # its lookup chain at invocation time without GetNewClosure()).
+    # username / password are read off $vmRef inside the closure now
+    # that New-VmSshClientWithJump is the connect path, so they no
+    # longer need their own locals.
     $vmIp     = $Vm.ipAddress
     $vmName   = $Vm.vmName
-    $username = $Vm.username
-    $password = $Vm.password
     $vmRef    = $Vm
     # vmConfigPath is the diagnostic-output root. PSObject.Properties
     # guard because the reconcile path on an existing VM (and unit
@@ -78,7 +87,17 @@ function Invoke-VmPostProvisioning {
     $vmConfigPath               = if ($Vm.PSObject.Properties['vmConfigPath']) {
         $Vm.vmConfigPath
     } else { $null }
-    $invokeCloudInitDiagnostics = ${function:Invoke-CloudInitDiagnostics}
+    $invokeCloudInitDiagnostics  = ${function:Invoke-CloudInitDiagnostics}
+    # Cloud-init poll-with-progress wait. Captured as a closure local
+    # for the same scope reason as the other per-step functions; lives
+    # in its own file (Wait-CloudInitFinished.ps1) so the polling
+    # loop, parse, and budget logic is independently testable.
+    $waitCloudInitFinished       = ${function:Wait-CloudInitFinished}
+    # Router-only post-cloud-init service check. Captured by the
+    # closure below for the same scope reason as the other per-step
+    # functions; the call is gated on $vmRef.kind -eq 'router' so
+    # workload VMs skip it.
+    $assertRouterServicesActive  = ${function:Assert-RouterServicesActive}
 
     # Capture the per-step functions as scriptblock locals so the closure
     # below can invoke them via the call operator. Name-based command
@@ -88,9 +107,15 @@ function Invoke-VmPostProvisioning {
     # entirely - the variables themselves are preserved by GetNewClosure().
     # Module-exported cmdlets (e.g. Copy-VmFiles) work the same way under
     # this approach, so the dispatch is uniform.
-    $copyVmFiles             = ${function:Copy-VmFiles}
-    $copyVmFilesByPattern    = ${function:Copy-VmFilesByPattern}
     $setEnvironmentVariables = ${function:Set-EnvironmentVariables}
+    # Files-dispatch helper. Captured as a closure local so the
+    # orchestrator's closure can invoke it across the module
+    # boundary; lives in its own file (Invoke-VmFilesDispatch.ps1)
+    # so the single-vs-bulk routing + optional-flag defaults are
+    # independently testable. Copy-VmFiles / Copy-VmFilesByPattern
+    # are now resolved by Invoke-VmFilesDispatch itself - the
+    # orchestrator no longer captures them.
+    $invokeVmFilesDispatch   = ${function:Invoke-VmFilesDispatch}
     # Reconciler entry points - same capture pattern as the per-step
     # functions above for the same reason (closure does not see
     # provision.ps1's script scope at invocation time).
@@ -107,11 +132,18 @@ function Invoke-VmPostProvisioning {
     # Wraps the real SshClient with a tee-to-file logger covering the
     # whole post-provisioning phase. See New-DiagnosticSshClientWrapper.ps1.
     $newDiagSshWrapper       = ${function:New-DiagnosticSshClientWrapper}
+    # Connect helper that decides between a direct SSH session and a
+    # jump-through-router session based on $vmRef._RouterVm. Same
+    # closure-capture reason as the per-step functions above; without
+    # capturing it as a variable, name-based resolution from inside
+    # Invoke-WithVmFileServer's module scope would not find it.
+    $newSshClientWithJump    = ${function:New-VmSshClientWithJump}
 
     $postBlock = {
         param($server)
 
         $sshClient = $null
+        $sshSession = $null
         try {
             # Generous Timeout because ssh.socket binds port 22 early via
             # socket activation, so the upstream 'wait for SSH' TCP probe
@@ -127,15 +159,24 @@ function Invoke-VmPostProvisioning {
             # Connect is synchronous with no progress output. The leading
             # Write-Host below tells the operator the silence is expected,
             # so a multi-minute wait does not read like a hang.
+            #
+            # New-VmSshClientWithJump branches on $vmRef._RouterVm
+            # (stamped by provision.ps1 step 7 onto every workload):
+            # router VMs and pre-feature-53 callers get a direct
+            # New-VmSshClient session; workload VMs get a session
+            # tunnelled through the router so the host's lack of a
+            # route into the private subnet does not block post-
+            # provisioning. The session wraps both the client and
+            # (when used) the tunnel; the finally below disposes
+            # them together.
             Write-Host (
                 "  Connecting to $vmIp (this may take several minutes " +
                 "while cloud-init finishes) ..."
             )
-            $sshClient = New-VmSshClient `
-                             -IpAddress $vmIp `
-                             -Username  $username `
-                             -Password  $password `
-                             -Timeout   ([TimeSpan]::FromMinutes(10))
+            $sshSession = & $newSshClientWithJump `
+                              -Vm      $vmRef `
+                              -Timeout ([TimeSpan]::FromMinutes(10))
+            $sshClient  = $sshSession.Client
 
             # Replace $sshClient with a duck-type-compatible wrapper that
             # tees every RunCommand to ssh.log under the per-run diag
@@ -152,30 +193,55 @@ function Invoke-VmPostProvisioning {
 
             # cloud-init may still be running its later modules (apt holding
             # the dpkg lock, runcmd not yet started). Wait once, here, so no
-            # downstream step has to know about it. timeout(1) caps the wait
-            # server-side because SSH.NET has no client-side command timeout.
+            # downstream step has to know about it. The polling helper
+            # (Wait-CloudInitFinished.ps1) streams dots while status is
+            # unchanged and injects " [<state>]" inline on a transition;
+            # the elapsed/budget summary below is stamped on the same
+            # line after it returns. SSH-polling output style.
             #
             # Sub-step timer wraps just the wait so the report attributes
             # cloud-init's late-module duration to its own row rather
             # than blending it with the file/reconcile/env work.
-            Write-Host "  Waiting for cloud-init to finish ..."
+            Write-Host "  Waiting for cloud-init to finish ..." -NoNewline
             & $invokeWithSubStepTimer `
                 -Parent 'Post-provisioning' `
                 -Name   'cloud-init wait' `
                 -Action {
-                    $waitResult = Invoke-SshClientCommand -SshClient $sshClient `
-                        -Command 'timeout 600 cloud-init status --wait'
+                    $waitResult = & $waitCloudInitFinished `
+                        -SshClient $sshClient `
+                        -VmName    $vmName
+                    Write-Host (" {0}s / {1}s ({2})" -f `
+                        $waitResult.ElapsedSeconds,
+                        $waitResult.BudgetSeconds,
+                        $waitResult.Output)
                     if ($waitResult.ExitStatus -ne 0) {
-                        # Non-zero here is most often unrelated to our steps
-                        # (cloud-init may have logged a warning in some
-                        # module). Proceed and let downstream assertions
-                        # surface a real problem rather than abort here on
-                        # a false positive. Logged, not thrown, so the
-                        # sub-step's status stays OK - the wait completed,
-                        # cloud-init merely flagged an internal concern.
-                        Write-Warning ("cloud-init reported a non-zero status " +
-                            "($($waitResult.ExitStatus)) on $vmName. Proceeding " +
-                            "with post-provisioning steps.")
+                        # Fatal. cloud-init reports non-zero specifically
+                        # when a runcmd, write_files, or packages step
+                        # failed - the operator-facing seed contract. The
+                        # 2026-06 dnsmasq-not-installed regression rode in
+                        # under a previous "warn and continue" policy that
+                        # let a broken VM cascade into the assertion
+                        # phase. Better to fail here with a clear
+                        # cloud-init-side cause than to debug a
+                        # downstream symptom.
+                        #
+                        # Diagnostic data: the cloud-init-output.log and
+                        # cloud-init.log captures from
+                        # Invoke-CloudInitDiagnostics (run above) sit in
+                        # <vmConfigPath>/diagnostics/<vmName>/<timestamp>/
+                        # next to console.log; the message points the
+                        # operator at them so they do not have to know
+                        # where to look.
+                        $diagHint = if ($vmConfigPath) {
+                            " Check cloud-init-output.log and cloud-init.log under $vmConfigPath\diagnostics\$vmName\$($vmRef._diagTimestamp)\."
+                        } else { '' }
+                        throw (
+                            "cloud-init on '$vmName' completed with " +
+                            "ExitStatus=$($waitResult.ExitStatus) " +
+                            "(status: $($waitResult.Output)). One of the " +
+                            "seed's write_files / runcmd steps failed." +
+                            $diagHint
+                        )
                     }
                 }
 
@@ -191,6 +257,22 @@ function Invoke-VmPostProvisioning {
                 -VmName        $vmName `
                 -Timestamp     $vmRef._diagTimestamp
 
+            # Router-only: assert load-bearing services are active
+            # NOW so a service that ended up inactive (the 2026-06
+            # dnsmasq race is the motivator) surfaces at provision
+            # time with a clear message, not later in the E2E
+            # assertion phase. Workload VMs skip this - they have
+            # no router-specific services. PSObject.Properties
+            # guard because tests may build a VM def without kind.
+            $kind = if ($vmRef.PSObject.Properties['kind']) {
+                $vmRef.kind
+            } else { '' }
+            if ($kind -eq 'router') {
+                & $assertRouterServicesActive `
+                    -SshClient $sshClient `
+                    -VmName    $vmName
+            }
+
             # Manifest store init runs unconditionally near the top of
             # the per-VM loop: it costs one cheap mkdir + chown + chmod
             # and is the single place /var/lib/infra-provisioner/ gets
@@ -203,59 +285,21 @@ function Invoke-VmPostProvisioning {
             # not depend on each other's outputs - if a future install needs
             # an artefact, it acquires its own copy.
             if ($hasFiles) {
-                # Provisioner policy: every user file lands as root:root, 0644.
-                # User-owned files belong in Vm-Users (which runs after the
-                # users exist). Each entry is dispatched in JSON order so
-                # operator-visible logging and any later side effects appear
-                # in the same order the operator wrote them - per-entry
-                # routing (not "all singles then all bulks") keeps that
-                # contract while letting each bulk entry surface its
-                # resolver errors (zero matches, target collisions) against
-                # the specific files entry that triggered them, so the
-                # operator knows which entry to fix.
-                Write-Host "  [files] processing $(@($vmRef.files).Count) entry(s) ..."
+                # Per-entry routing (single vs bulk), optional-flag
+                # defaults, and ordering contract all live in
+                # Invoke-VmFilesDispatch.ps1; see its docstring for
+                # the policy + rationale.
                 & $invokeWithSubStepTimer `
                     -Parent 'Post-provisioning' `
                     -Name   'files' `
                     -Action {
-                        foreach ($entry in @($vmRef.files)) {
-                            # Discriminator: presence of 'pattern' => bulk form,
-                            # otherwise the existing single-file form. Step 2's
-                            # schema guarantees the entry is well-formed for
-                            # whichever branch matches.
-                            if ($entry.PSObject.Properties['pattern']) {
-                                $pattern   = $entry.pattern
-                                $targetDir = $entry.targetDir
-                                # Optional booleans default to $false when absent so
-                                # the JSON round-trip in the schema stays a pure
-                                # pass-through (default applied here, not in the
-                                # validator).
-                                $recurseProp = $entry.PSObject.Properties['recurse']
-                                $recurse = if ($null -ne $recurseProp) {
-                                    [bool]$recurseProp.Value
-                                } else { $false }
-                                $preserveProp = $entry.PSObject.Properties['preserveRelativePath']
-                                $preserveRelativePath = if ($null -ne $preserveProp) {
-                                    [bool]$preserveProp.Value
-                                } else { $false }
-                                Write-Host "  [files] bulk: $pattern -> $targetDir"
-                                & $copyVmFilesByPattern -SshClient $sshClient `
-                                                        -Server $server `
-                                                        -Pattern $pattern `
-                                                        -TargetDir $targetDir `
-                                                        -Recurse:$recurse `
-                                                        -PreserveRelativePath:$preserveRelativePath
-                            } else {
-                                $singleEntries = @(
-                                    [PSCustomObject]@{ Source = $entry.source; Target = $entry.target }
-                                )
-                                Write-Host "  [files] single: $($entry.source) -> $($entry.target)"
-                                & $copyVmFiles -SshClient $sshClient -Server $server -Entries $singleEntries
-                            }
-                        }
-                        Write-Host "  [files] [OK] all copies complete." -ForegroundColor Green
+                        & $invokeVmFilesDispatch `
+                            -SshClient $sshClient `
+                            -Server    $server `
+                            -Entries   @($vmRef.files)
                     }
             }
+            
             # Reconciler dispatch. Get-Providers is parameterised by the
             # VM so each provider can capture VM-scoped state (e.g. the
             # JDK provider closes over _jdkTarballPath / _jdkResolvedVersion
@@ -319,12 +363,44 @@ function Invoke-VmPostProvisioning {
             }
         }
         finally {
-            if ($null -ne $sshClient) {
-                if ($sshClient.IsConnected) { $sshClient.Disconnect() }
-                $sshClient.Dispose()
+            # $sshSession owns both the client AND (for workload VMs)
+            # the underlying jump tunnel. Its Dispose tears them down
+            # in the right order so the workload-side connection
+            # drops before the forwarded port closes. Safe to call
+            # when the session was never opened ($sshSession is $null).
+            if ($null -ne $sshSession) {
+                try { $sshSession.Dispose() } catch {}
             }
         }
     }.GetNewClosure()
 
-    Invoke-WithVmFileServer -VmIpAddress $vmIp -ScriptBlock $postBlock
+    # File-server binding decision. Get-VmSwitchHostIp (called by
+    # Invoke-WithVmFileServer's -VmIpAddress path) walks Get-NetIPAddress
+    # for a host adapter on the SAME /24 as the supplied VM IP. That works
+    # for legacy VMs sitting on a Hyper-V Internal vSwitch the host has
+    # its own address on, but a feature-53 workload's IP lives on a
+    # private switch the host has no route into - the lookup throws
+    # "No host adapter found on the same /24" and post-provisioning
+    # aborts before touching the workload.
+    #
+    # When _RouterVm is stamped on the VM, we instead bind the file
+    # server on the host adapter that sits on the same upstream LAN as
+    # the router's ext0 (the External vSwitch's underlying physical NIC).
+    # The workload reaches that bind via its default route -> router
+    # priv0 -> router MASQUERADE on ext0 -> host. Address discovery uses
+    # the same Get-VmSwitchHostIp helper, just keyed off the router's
+    # discovered upstream IP instead of the workload's unreachable one.
+    $hasRouter = $Vm.PSObject.Properties['_RouterVm'] -and $Vm._RouterVm
+    if ($hasRouter) {
+        # Get-VmSwitchHostIp resolves a host adapter on the same /24 as
+        # the supplied VM IP. Keyed off the router's discovered upstream
+        # address rather than the workload's unreachable private IP -
+        # the host's External vSwitch adapter shares that /24 by
+        # construction, so the file server binds where the router's
+        # MASQUERADE NAT can route workload traffic back.
+        $hostIp = Get-VmSwitchHostIp -VmIpAddress $Vm._RouterVm.ipAddress
+        Invoke-WithVmFileServer -HostIp $hostIp -ScriptBlock $postBlock
+    } else {
+        Invoke-WithVmFileServer -VmIpAddress $vmIp -ScriptBlock $postBlock
+    }
 }

@@ -42,6 +42,7 @@ BeforeAll {
         'Initialize-VmManifestStore'       = @()
         'Get-Providers'                    = @()
         'Invoke-ToolchainReconciliation'   = @()
+        'Assert-RouterServicesActive'      = @()
     }
     function global:Reset-PostProvCallLog {
         foreach ($k in @($global:_PostProv_Calls.Keys)) {
@@ -69,13 +70,32 @@ BeforeAll {
 
     # Outer (orchestrator-scope) stub. Forwards to the captured scriptblock
     # so the closure executes in-process and records its own calls below.
+    # The orchestrator picks one of two parameter sets - -VmIpAddress
+    # (legacy / router VMs the host can route to directly) or -HostIp
+    # (workloads behind a router, host IP pre-derived from the router's
+    # upstream IP). Record both so assertions can target either path.
     function global:Invoke-WithVmFileServer {
-        param($VmIpAddress, $Port, [scriptblock]$ScriptBlock)
+        param($VmIpAddress, $HostIp, $Port, [scriptblock]$ScriptBlock)
         $global:_PostProv_Calls['Invoke-WithVmFileServer'] += @{
             VmIpAddress = $VmIpAddress
+            HostIp      = $HostIp
             Port        = $Port
         }
         & $ScriptBlock $global:_PostProv_FakeServer
+    }
+
+    # Get-VmSwitchHostIp (Infrastructure.HyperV >= 0.11.0) is called by
+    # the orchestrator BEFORE Invoke-WithVmFileServer when _RouterVm is
+    # present, to derive a host bind IP on the same upstream LAN as the
+    # router's ext0. Default returns a sentinel; tests assert on the
+    # input IP.
+    $global:_PostProv_Calls['Get-VmSwitchHostIp'] = @()
+    function global:Get-VmSwitchHostIp {
+        param($VmIpAddress)
+        $global:_PostProv_Calls['Get-VmSwitchHostIp'] += @{
+            VmIpAddress = $VmIpAddress
+        }
+        '192.168.1.10'
     }
 
     # PSSA's plain-text password warning is suppressed for the same reason
@@ -95,10 +115,68 @@ BeforeAll {
         return $global:_PostProv_FakeSshClient
     }
 
+    # Real Invoke-VmPostProvisioning now reaches the SSH session through
+    # New-VmSshClientWithJump - branches between a direct New-VmSshClient
+    # (router VMs, or pre-feature-53 callers) and a jumped session
+    # (workloads on the per-env private switch). The stub here mimics
+    # both branches:
+    #   - For VMs without _RouterVm: forward to the New-VmSshClient stub
+    #     above so existing tests (which assert on those credentials)
+    #     keep working.
+    #   - For VMs WITH _RouterVm: record the jump credentials separately
+    #     so a jump-host test can pin them.
+    # The returned session object exposes a .Client property the
+    # closure pulls into $sshClient and a .Dispose() method the finally
+    # block calls.
+    $global:_PostProv_Calls['New-VmSshClientWithJump'] = @()
+    function global:New-VmSshClientWithJump {
+        param($Vm, $Timeout)
+        $hasRouter = $Vm.PSObject.Properties['_RouterVm'] -and $Vm._RouterVm
+        if ($hasRouter) {
+            $global:_PostProv_Calls['New-VmSshClientWithJump'] += @{
+                TargetIp     = $Vm.ipAddress
+                JumpHostIp   = $Vm._RouterVm.ipAddress
+                JumpUsername = $Vm._RouterVm.username
+            }
+        }
+        # Always forward to New-VmSshClient so existing assertions on
+        # the workload's IP / username / password remain valid - the
+        # real New-VmSshClientWithJump also delegates to it on the
+        # no-jump path.
+        $client = New-VmSshClient `
+                      -IpAddress $Vm.ipAddress `
+                      -Username  $Vm.username `
+                      -Password  $Vm.password `
+                      -Timeout   $Timeout
+        $session = [PSCustomObject]@{ Client = $client; Tunnel = $null }
+        Add-Member -InputObject $session -MemberType ScriptMethod `
+                   -Name Dispose -Value {
+            # Mirror the real session: dispose the underlying SshClient
+            # so tests that patch FakeSshClient.Dispose to record
+            # teardown still see the call through this layer.
+            if ($null -ne $this.Client) { $this.Client.Dispose() }
+        }
+        return $session
+    }
+
     function global:Invoke-SshClientCommand {
         param($SshClient, $Command)
         $global:_PostProv_Calls['Invoke-SshClientCommand'] += @{
             Command = $Command
+        }
+        # cloud-init status poll: the post-provisioning loop expects
+        # 'status: done' / 'status: error' to exit. Without that line
+        # the loop spins forever. _PostProv_SshExitStatus piggybacks
+        # the cloud-init status: 0 -> done, non-zero -> error. Other
+        # commands fall through to the original empty-output shape.
+        if ($Command -match 'cloud-init status') {
+            $ciStatus = if ($global:_PostProv_SshExitStatus -eq 0) { 'done' }
+                        else { 'error' }
+            return [PSCustomObject]@{
+                ExitStatus = 0
+                Output     = "status: $ciStatus"
+                Error      = ''
+            }
         }
         [PSCustomObject]@{
             ExitStatus = $global:_PostProv_SshExitStatus
@@ -170,6 +248,65 @@ BeforeAll {
     function global:Invoke-CloudInitDiagnostics {
         param($SshClient, $VmConfigPath, $VmName, $Timestamp)
     }
+    # Cloud-init poll helper. Stubbed at global scope so the
+    # orchestrator's ${function:Wait-CloudInitFinished} capture
+    # resolves to this no-op (real polling behaviour is tested in
+    # Wait-CloudInitFinished.Tests.ps1, not here). _PostProv_SshExitStatus
+    # piggybacks the return so the "still dispatches steps when
+    # cloud-init wait reports non-zero" test keeps working.
+    function global:Wait-CloudInitFinished {
+        param($SshClient, $VmName, $BudgetSeconds, $PollIntervalSeconds)
+        [PSCustomObject]@{
+            ExitStatus     = $global:_PostProv_SshExitStatus
+            Output         = if ($global:_PostProv_SshExitStatus -eq 0) {
+                                 'done'
+                             } else { 'error' }
+            ElapsedSeconds = 0
+            BudgetSeconds  = 600
+        }
+    }
+    # Files-dispatch helper. Stubbed at global scope so the
+    # orchestrator's ${function:Invoke-VmFilesDispatch} capture
+    # resolves. The stub delegates to the Copy-VmFiles /
+    # Copy-VmFilesByPattern stubs (already tracked in
+    # _PostProv_Calls) so the orchestrator's per-entry routing
+    # tests keep observing Copy-VmFiles* calls the same way.
+    # Real per-entry routing behaviour is tested in
+    # Invoke-VmFilesDispatch.Tests.ps1, not here.
+    function global:Invoke-VmFilesDispatch {
+        param($SshClient, $Server, [object[]] $Entries)
+        foreach ($entry in @($Entries)) {
+            if ($entry.PSObject.Properties['pattern']) {
+                $recurseProp = $entry.PSObject.Properties['recurse']
+                $recurse = if ($null -ne $recurseProp) {
+                    [bool]$recurseProp.Value
+                } else { $false }
+                $preserveProp = $entry.PSObject.Properties['preserveRelativePath']
+                $preserveRelativePath = if ($null -ne $preserveProp) {
+                    [bool]$preserveProp.Value
+                } else { $false }
+                Copy-VmFilesByPattern -SshClient $SshClient -Server $Server `
+                    -Pattern $entry.pattern -TargetDir $entry.targetDir `
+                    -Recurse:$recurse -PreserveRelativePath:$preserveRelativePath
+            } else {
+                $singleEntries = @(
+                    [PSCustomObject]@{ Source = $entry.source; Target = $entry.target }
+                )
+                Copy-VmFiles -SshClient $SshClient -Server $Server `
+                    -Entries $singleEntries
+            }
+        }
+    }
+    # Router-only service check the orchestrator runs after
+    # cloud-init wait. Stubbed at global scope and tracked so tests
+    # can assert it fires for routers AND does not fire for workloads.
+    function global:Assert-RouterServicesActive {
+        param($SshClient, $VmName, $RequiredServices)
+        $global:_PostProv_Calls['Assert-RouterServicesActive'] += @{
+            VmName           = $VmName
+            RequiredServices = $RequiredServices
+        }
+    }
     function global:New-DiagnosticSshClientWrapper {
         param($RealClient, $VmConfigPath, $VmName, $Timestamp)
         return $RealClient
@@ -195,6 +332,16 @@ BeforeAll {
             username  = 'admin'
             password  = 'unit-test-password-not-real'
         }
+    }
+
+    function New-RouterVm {
+        # Minimal router VM def: no files / javaDevKit / envVars
+        # (routers do not get any opt-in fields by design) but with
+        # kind='router'. Mirrors what New-RouterEntry produces in the
+        # E2E test path - schema-valid for the orchestrator to act on.
+        $vm = New-PlainVm
+        $vm | Add-Member -NotePropertyName 'kind' -NotePropertyValue 'router' -Force
+        $vm
     }
 
     function New-VmWithJdk {
@@ -257,6 +404,22 @@ BeforeAll {
         $vm
     }
 
+    # Workload VM with _RouterVm stamped (the shape provision.ps1 step 7
+    # produces). The orchestrator's file-server binding decision branches
+    # on the presence of this property.
+    function New-VmWithRouter {
+        $vm = New-VmWithJdk
+        $router = [PSCustomObject]@{
+            vmName    = 'router-prod'
+            ipAddress = '192.168.1.211'
+            username  = 'routeradmin'
+            password  = 'unit-test-router-password-not-real'
+        }
+        Add-Member -InputObject $vm -MemberType NoteProperty -Name '_RouterVm' `
+            -Value $router
+        $vm
+    }
+
     function New-VmWithMixedFiles {
         $vm = New-PlainVm
         Add-Member -InputObject $vm -MemberType NoteProperty -Name 'files' -Value @(
@@ -303,6 +466,40 @@ Describe 'Invoke-VmPostProvisioning' {
         $global:_PostProv_SshExitStatus = 0
     }
 
+    Context 'router VMs (kind = router)' {
+        # Router VMs intentionally have no files / javaDevKit /
+        # envVars; the per-field early-return must NOT short-
+        # circuit on them because Assert-RouterServicesActive
+        # is the fail-fast gate for the seed's nftables / dnsmasq
+        # services. Without these tests, the 2026-06 regression
+        # where the strict check silently never ran could come
+        # back the next time someone tweaks the gate.
+
+        It 'does NOT short-circuit on a router VM with no opt-in fields' {
+            Invoke-VmPostProvisioning -Vm (New-RouterVm)
+
+            # File server + SSH session must open; reconciler /
+            # files / envVars are not gated to router, they just
+            # don't apply, so we assert specifically on the
+            # router-only check that's the reason post runs at all.
+            $global:_PostProv_Calls['Invoke-WithVmFileServer'].Count | Should -BeGreaterThan 0
+            $global:_PostProv_Calls['Assert-RouterServicesActive'].Count | Should -Be 1
+        }
+
+        It 'calls Assert-RouterServicesActive with the router vmName' {
+            Invoke-VmPostProvisioning -Vm (New-RouterVm)
+
+            $call = $global:_PostProv_Calls['Assert-RouterServicesActive'][0]
+            $call.VmName | Should -Be 'node-01'
+        }
+
+        It 'does NOT call Assert-RouterServicesActive for a workload VM' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
+
+            $global:_PostProv_Calls['Assert-RouterServicesActive'].Count | Should -Be 0
+        }
+    }
+
     Context 'no opt-in fields' {
 
         It 'is a no-op when none of files, javaDevKit, envVars is set' {
@@ -342,12 +539,43 @@ Describe 'Invoke-VmPostProvisioning' {
             $calls[0].Password  | Should -Be 'unit-test-password-not-real'
         }
 
-        It 'waits for cloud-init exactly once, capped with timeout(1)' {
-            Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
+        It 'delegates the cloud-init wait to Wait-CloudInitFinished' {
+            # Polling behaviour (heartbeat, status parsing, budget
+            # timeout) is exercised in Wait-CloudInitFinished.Tests.ps1.
+            # The orchestrator's contract is "call it exactly once
+            # per VM with the same SshClient + vmName" - track that.
+            $script:_waitCalls = @()
+            function global:Wait-CloudInitFinished {
+                param($SshClient, $VmName, $BudgetSeconds, $PollIntervalSeconds)
+                $script:_waitCalls += @{ VmName = $VmName }
+                [PSCustomObject]@{
+                    ExitStatus     = 0
+                    Output         = 'done'
+                    ElapsedSeconds = 0
+                    BudgetSeconds  = 600
+                }
+            }
+            try {
+                Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
 
-            $calls = $global:_PostProv_Calls['Invoke-SshClientCommand']
-            $calls.Count | Should -Be 1
-            $calls[0].Command | Should -Match '^timeout \d+ cloud-init status --wait'
+                $script:_waitCalls.Count        | Should -Be 1
+                $script:_waitCalls[0].VmName    | Should -Be 'node-01'
+            }
+            finally {
+                # Restore the shared stub so subsequent tests in this
+                # Describe block see the global behaviour again.
+                function global:Wait-CloudInitFinished {
+                    param($SshClient, $VmName, $BudgetSeconds, $PollIntervalSeconds)
+                    [PSCustomObject]@{
+                        ExitStatus     = $global:_PostProv_SshExitStatus
+                        Output         = if ($global:_PostProv_SshExitStatus -eq 0) {
+                            'done'
+                        } else { 'error' }
+                        ElapsedSeconds = 0
+                        BudgetSeconds  = 600
+                    }
+                }
+            }
         }
 
         It 'opens the file server when javaDevKit is set even with no other opt-in field' {
@@ -643,15 +871,78 @@ Describe 'Invoke-VmPostProvisioning' {
             }
         }
 
-        It 'still dispatches steps when cloud-init wait reports non-zero' {
-            # Non-zero cloud-init status is most often unrelated to our
-            # steps - dispatch and let downstream assertions catch real
-            # problems.
+        It 'throws fatally when cloud-init wait reports non-zero' {
+            # Previous policy was "warn and proceed" - the 2026-06
+            # dnsmasq-not-installed regression rode in under it. A
+            # cloud-init exit 1 specifically means a runcmd /
+            # write_files / packages step failed; better to abort
+            # here with a clear cloud-init-side cause than to debug
+            # a downstream symptom (assertion-phase failure on a
+            # service that never got installed).
             $global:_PostProv_SshExitStatus = 1
 
+            { Invoke-VmPostProvisioning -Vm (New-VmWithJdk) } |
+                Should -Throw -ExpectedMessage "*cloud-init on 'node-01'*ExitStatus=1*"
+
+            # And no downstream step runs after the throw.
+            $global:_PostProv_Calls['Invoke-ToolchainReconciliation'].Count |
+                Should -Be 0
+        }
+
+        It 'includes a pointer to the diagnostics folder in the throw message' {
+            # The orchestrator's Invoke-CloudInitDiagnostics call (above
+            # the wait) drops cloud-init-output.log and cloud-init.log
+            # under <vmConfigPath>/diagnostics/<vmName>/<timestamp>/.
+            # The throw should name that path so the operator does
+            # not have to guess where to look.
+            $global:_PostProv_SshExitStatus = 1
+            $vm = New-VmWithJdk
+            $vm | Add-Member -NotePropertyName vmConfigPath `
+                              -NotePropertyValue 'C:\diag-root' -Force
+
+            { Invoke-VmPostProvisioning -Vm $vm } |
+                Should -Throw -ExpectedMessage '*cloud-init-output.log*C:\diag-root\diagnostics\node-01*'
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'file-server binding (workload behind a NAT router)' {
+    # ------------------------------------------------------------------
+        # provision.ps1 step 7 stamps _RouterVm onto every workload. The
+        # workload's IP lives on a private switch the host has no route
+        # into, so the legacy -VmIpAddress code path of
+        # Invoke-WithVmFileServer (which scans Get-NetIPAddress for a
+        # host adapter on the same /24 as the VM) throws "No host
+        # adapter found". The orchestrator must instead resolve a host
+        # IP on the upstream LAN (the same /24 as the router's ext0)
+        # and pass it as -HostIp.
+
+        It 'resolves the host IP from the router upstream IP when _RouterVm is stamped' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithRouter)
+
+            $calls = $global:_PostProv_Calls['Get-VmSwitchHostIp']
+            $calls.Count               | Should -Be 1
+            $calls[0].VmIpAddress      | Should -Be '192.168.1.211'
+        }
+
+        It 'binds the file server with -HostIp (not -VmIpAddress) for a workload behind a router' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithRouter)
+
+            $calls = $global:_PostProv_Calls['Invoke-WithVmFileServer']
+            $calls.Count           | Should -Be 1
+            $calls[0].HostIp       | Should -Be '192.168.1.10'
+            # The workload IP must NOT be passed - the legacy -VmIpAddress
+            # path would call Get-VmSwitchHostIp on the private-switch IP
+            # and explode with "No host adapter found".
+            $calls[0].VmIpAddress  | Should -BeNullOrEmpty
+        }
+
+        It 'does NOT resolve the router upstream IP for a VM without _RouterVm' {
+            # Static / pre-feature-53 VMs the host can route to keep the
+            # original -VmIpAddress code path; no upstream resolve runs.
             Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
 
-            $global:_PostProv_Calls['Invoke-ToolchainReconciliation'].Count | Should -Be 1
+            $global:_PostProv_Calls['Get-VmSwitchHostIp'].Count | Should -Be 0
         }
     }
 }

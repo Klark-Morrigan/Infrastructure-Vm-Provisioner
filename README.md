@@ -7,6 +7,7 @@
 - [Overview](#overview)
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
+- [Networking](#networking)
 - [setup-secrets.ps1](#setup-secretsps1)
   - [Optional: install a JDK](#optional-install-a-jdk)
   - [Removing a JDK](#removing-a-jdk)
@@ -16,7 +17,10 @@
   - [Optional: copy files to the VM](#optional-copy-files-to-the-vm)
     - [Bulk entries](#bulk-entries)
   - [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables)
+  - [Router VM (kind: router)](#router-vm-kind-router)
 - [provision.ps1](#provisionps1)
+- [Test-HostNetworkPreflight.ps1](#test-hostnetworkpreflightps1)
+- [Get-VmRuntimeDiag.ps1](#get-vmruntimediagps1)
 - [start-vms.ps1](#start-vmsps1)
 - [deprovision.ps1](#deprovisionps1)
 - [CI](#ci)
@@ -48,7 +52,7 @@ PowerShell 7+ (`pwsh`). Windows PowerShell 5.1 is not supported.
 **Prerequisites:** Windows 11 with Hyper-V enabled, PowerShell 7+, and
 Administrator privileges. WSL2 is installed automatically by `provision.ps1`
 on first run if not already present (a reboot may be required).
-`PowerShell.Common` and `Infrastructure.Secrets` are installed from
+`Common.PowerShell` and `Infrastructure.Secrets` are installed from
 PSGallery automatically on first run.
 
 ```powershell
@@ -64,6 +68,78 @@ PSGallery automatically on first run.
 # 4. Remove VMs when no longer needed (run as Administrator)
 .\hyper-v\ubuntu\deprovision.ps1
 ```
+
+---
+
+## Networking
+
+VMs are organised into **environments**. An environment is one Hyper-V
+Private switch (`privateSwitchName`) plus exactly one router VM whose
+private NIC carries the environment's gateway IP. Every workload VM in
+the environment attaches its only NIC to the same Private switch and
+routes its egress through the router VM. Multiple environments can
+coexist on one host - each owns an independent subnet and an
+independent router VM that MASQUERADEs out the host's shared External
+switch.
+
+```mermaid
+flowchart LR
+  subgraph Host[Hyper-V host]
+    direction LR
+    EXT[External vSwitch<br/>host-bridged]
+    subgraph PROD[Production environment]
+      direction LR
+      PR[Router VM<br/>prod]
+      P1[Workload VM] & P2[Workload VM]
+      PSW[Private vSwitch<br/>prod]
+      PR --- PSW
+      PSW --- P1
+      PSW --- P2
+    end
+    subgraph E2E[E2E environment]
+      direction LR
+      ER[Router VM<br/>e2e]
+      E1[Workload VM] & E2[Workload VM]
+      ESW[Private vSwitch<br/>e2e]
+      ER --- ESW
+      ESW --- E1
+      ESW --- E2
+    end
+    PR --- EXT
+    ER --- EXT
+  end
+  EXT --- LAN[(Upstream LAN / internet)]
+```
+
+The host itself is not the gateway anymore. `provision.ps1` no longer
+creates a singleton Internal switch, no longer assigns a host vNIC IP,
+and no longer registers a `New-NetNat` rule. The host's only role in
+the data plane is the External switch the router VMs share. See the
+[problem statement](docs/dev/implementation/53%20-%20nat%20router%20vm/problem.md)
+for why this matters (Windows allows only one `New-NetNat` to carry
+real egress, and production owns that slot).
+
+**Per-environment invariants** (preflight enforces every one):
+
+- Every VM in the JSON declares `privateSwitchName`. VMs sharing a
+  value are in the same environment.
+- Every environment with workload VMs has **exactly one** router VM in
+  the JSON. A router-only batch is allowed (bootstrap path); a
+  workload-only batch is rejected.
+- Within an environment, all VMs share the same `gateway` and
+  `subnetMask`. The workloads' `gateway` equals the router VM's
+  `privateIpAddress`.
+
+**Migration from the legacy singleton-NAT topology.** Hosts originally
+provisioned under the pre-feature-53 layout had a `VmLAN` Internal
+switch with `VmLAN-NAT` registered against it. Both `provision.ps1`
+(via `Invoke-NetworkSetup`) and `deprovision.ps1` (via
+`Invoke-NetworkTeardown`) idempotently clean up that state: any
+`New-NetNat` whose prefix covers an environment's gateway IP is
+removed, and any host vNIC carrying the gateway IP is unassigned. The
+legacy `VmLAN` switch itself is not torn down by either flow - it is
+free to remove with `Remove-VMSwitch VmLAN -Force` once no VMs are
+attached.
 
 ---
 
@@ -89,24 +165,61 @@ Re-running safely updates the stored config.
 ```jsonc
 [
   {
-    "vmName":        "ubuntu-01-ci",
-    "cpuCount":      2,
-    "ramGB":         4,
-    "diskGB":        40,
-    "ubuntuVersion": "24.04",
-    "username":      "u-01-admin",
-    "password":      "...",
-    "ipAddress":     "192.168.1.101",
-    "subnetMask":    "24",
-    "gateway":       "192.168.1.1",
-    "dns":           "8.8.8.8",
-    "vmConfigPath":  "E:\\a_VMs\\Hyper-V\\Config",
-    "vhdPath":       "E:\\a_VMs\\Hyper-V\\Disks"
+    "vmName":            "ubuntu-01-ci",
+    "cpuCount":          2,
+    "ramGB":             4,
+    "diskGB":            40,
+    "ubuntuVersion":     "24.04",
+    "username":          "u-01-admin",
+    "password":          "...",
+    "ipAddress":         "192.168.1.101",
+    "subnetMask":        "24",
+    "gateway":           "10.10.0.1",
+    "dns":               "8.8.8.8",
+    "vmConfigPath":      "E:\\a_VMs\\Hyper-V\\Config",
+    "vhdPath":           "E:\\a_VMs\\Hyper-V\\Disks",
+    "privateSwitchName": "PrivateSwitch-Production"
+  },
+  {
+    "vmName":             "router-prod",
+    "cpuCount":           1,
+    "ramGB":              1,
+    "diskGB":             20,
+    "ubuntuVersion":      "24.04",
+    "username":           "admin",
+    "password":           "...",
+    "subnetMask":         "24",
+    "dns":                "8.8.8.8",
+    "vmConfigPath":       "E:\\a_VMs\\Hyper-V\\Config",
+    "vhdPath":            "E:\\a_VMs\\Hyper-V\\Disks",
+    "privateSwitchName":  "PrivateSwitch-Production",
+    "kind":               "router",
+    "externalSwitchName":  "ExternalSwitch-Shared",
+    "externalAdapterName": "Ethernet",
+    "privateIpAddress":    "10.10.0.1"
   }
 ]
 ```
 
-All fields are required. After first boot, connect via `ssh username@ipAddress`.
+A workload VM's `gateway` must equal **its environment's router VM's**
+`privateIpAddress` - the workload's egress traffic flows through that
+router. The two VMs sit on the same `privateSwitchName`. See
+[Networking](#networking) for the full topology and
+[Router VM](#router-vm-kind-router) for the router-specific fields.
+
+Router VMs do not carry `ipAddress` / `gateway` in the default
+`externalDhcp: true` mode shown above - the upstream NIC gets its
+address from whatever LAN the host's External vSwitch is currently
+bridged to, so the same config keeps working when the operator
+moves the workstation between networks. Set `externalDhcp: false`
+to pin a static; the two fields become required again. Workload VMs
+always require both because their gateway is a config-time choice
+(see the table below).
+
+All listed fields are required. After first boot, connect via
+`ssh username@ipAddress`; for router VMs in DHCP mode the IP is
+discovered via Hyper-V KVP after boot - inspect with
+`Get-VMNetworkAdapter -VMName <router> | Select IPAddresses`.
 
 | Field           | Type   | Description                                        |
 |-----------------|--------|----------------------------------------------------|
@@ -117,15 +230,19 @@ All fields are required. After first boot, connect via `ssh username@ipAddress`.
 | `ubuntuVersion` | string | Ubuntu release, e.g. `"24.04"`                     |
 | `username`      | string | OS user created by cloud-init on first boot        |
 | `password`      | string | Password for that user (plain text in vault only)  |
-| `ipAddress`     | string | Static IPv4 address assigned inside the VM         |
-| `subnetMask`    | string | CIDR prefix length, e.g. `"24"`                    |
-| `gateway`       | string | Default gateway — also assigned to the host vNIC   |
-| `dns`           | string | DNS server IP                                      |
+| `ipAddress`     | string | Static IPv4 address inside the VM. **Required** for workload VMs, and for router VMs only when `externalDhcp: false`. Router VMs with `externalDhcp: true` (the default) get their upstream IP via DHCP and discover it through Hyper-V KVP after boot. |
+| `subnetMask`    | string | CIDR prefix length, e.g. `"24"`. Required on every VM - workloads use it for their NIC; router VMs use it for the priv0 (downstream) NIC even under DHCP. |
+| `gateway`       | string | Default gateway for the VM. **Required** for workload VMs (and **must equal** the matching router VM's `privateIpAddress` - preflight enforced). For router VMs, required only when `externalDhcp: false`. |
+| `dns`           | string | DNS server IP. On workloads this is the resolver (set to the router VM's `privateIpAddress`); on routers this is netplan's nameserver AND dnsmasq's upstream forwarder. **Topology note:** when the host is on Internal+ICS, set router `dns` to the **ICS gateway** (typically `192.168.137.1`), NOT a public resolver like `8.8.8.8` — ICS NAT for outbound UDP/53 to public IPs is unreliable, whereas the ICS gateway's built-in DNS proxy is a local hop. |
 | `vmConfigPath`  | string | Windows path where seed ISO is written             |
 | `vhdPath`       | string | Windows path where VHDX files are stored           |
-| `switchName`    | string | Hyper-V Internal switch name. Default: `VmLAN`     |
-| `natName`       | string | Windows NAT rule name. Default: `VmLAN-NAT`        |
-| `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. See [Optional: install a JDK](#optional-install-a-jdk). |
+| `privateSwitchName`  | string  | Per-environment Hyper-V Private switch this VM attaches to. Required on both VM kinds (workloads attach their only NIC to it; router VMs attach their downstream NIC to it). Created on demand by `Ensure-PrivateSwitch` when absent. |
+| `kind`          | string? | Optional. `"workload"` (default) or `"router"`. See [Router VM](#router-vm-kind-router). |
+| `externalSwitchName` | string | Required when `kind: router`. Host-bridged Hyper-V switch the router's upstream NIC attaches to; created on demand if absent (see `externalAdapterName`). |
+| `externalAdapterName`| string | Required when `kind: router`. Physical NIC the External switch binds to when `Ensure-ExternalSwitch` needs to create it. Ignored at runtime if the switch already exists. Find the name with `Get-NetAdapter`. |
+| `externalDhcp`  | bool?   | Optional, defaults to `true`. Addressing mode for the router VM's upstream NIC. `true` = DHCP from whatever LAN the host's External vSwitch is bridged to (portable across networks); `false` = static (requires `ipAddress` / `gateway`). Only meaningful when `kind: router`. |
+| `privateIpAddress`   | string | Required when `kind: router`. IP the router carries on its private-side NIC; downstream VMs use it as their default gateway and DNS server. Always static - no DHCP path can pre-commit a value workloads can be configured against. |
+| `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. Not supported on `kind: router`. See [Optional: install a JDK](#optional-install-a-jdk). |
 | `dotnetSdk`     | object? | Optional. Installs a .NET SDK system-wide on first boot. See [Optional: install a .NET SDK](#optional-install-a-net-sdk). |
 | `dotnetTools`   | array?  | Optional. Installs .NET global tools system-wide on first boot. Requires `dotnetSdk` on the same VM. See [Optional: install .NET global tools](#optional-install-net-global-tools). |
 | `files`         | array?  | Optional. Copies arbitrary host files onto the VM. See [Optional: copy files to the VM](#optional-copy-files-to-the-vm). |
@@ -500,6 +617,125 @@ The transport is delegated to `Infrastructure.HyperV`'s
 see its notes for the exact managed-block, atomic-write, and
 skip-unchanged semantics.
 
+### Router VM (kind: router)
+
+Set `"kind": "router"` on a VM entry to provision a dual-NIC Linux
+gateway instead of a single-NIC workload VM. A router VM replaces the
+host's single `New-NetNat` slot (Windows allows only one NetNat to
+carry traffic out to the upstream LAN) with a per-environment VM that
+MASQUERADEs outbound and forwards DNS, so multiple isolated
+environments can each have a real egress without competing for the
+host's NAT slot. Background: see
+[docs/dev/implementation/53 - nat router vm/problem.md](docs/dev/implementation/53%20-%20nat%20router%20vm/problem.md).
+
+```jsonc
+{
+  "vmName":             "router-prod",
+  "cpuCount":           1,
+  "ramGB":              1,
+  "diskGB":             20,
+  "ubuntuVersion":      "24.04",
+  "username":           "admin",
+  "password":           "...",
+  "subnetMask":         "24",
+  "dns":                "8.8.8.8",
+  "vmConfigPath":       "E:\\a_VMs\\Hyper-V\\Config",
+  "vhdPath":            "E:\\a_VMs\\Hyper-V\\Disks",
+  "kind":                "router",
+  "externalSwitchName":  "ExternalSwitch-Shared",
+  "externalAdapterName": "Ethernet",
+  "privateSwitchName":   "PrivateSwitch-Production",
+  "privateIpAddress":    "10.10.0.1"
+}
+```
+
+The upstream NIC defaults to DHCP (`externalDhcp: true`). The router
+picks up its IP from whatever LAN the host's External vSwitch is
+currently bridged to, so the same config keeps working when the
+workstation moves between Wi-Fi networks. To pin a static instead,
+add `"externalDhcp": false` and the three matching fields:
+
+```jsonc
+{
+  "vmName":             "router-prod",
+  ...
+  "kind":                "router",
+  "externalDhcp":        false,
+  "ipAddress":           "192.168.1.10",
+  "subnetMask":          "24",
+  "gateway":             "192.168.1.1",
+  "externalSwitchName":  "ExternalSwitch-Shared",
+  "externalAdapterName": "Ethernet",
+  "privateSwitchName":   "PrivateSwitch-Production",
+  "privateIpAddress":    "10.10.0.1"
+}
+```
+
+In DHCP mode the orchestrator discovers the router's actual upstream
+IP via Hyper-V's KVP integration services after the VM boots (polls
+`Get-VMNetworkAdapter -VMName <router>` for an IPv4 on the External
+switch). The wait-for-SSH timer covers both the DHCP-lease wait and
+the SSH-readiness wait under one 10-minute budget.
+
+`externalAdapterName` is the host's physical NIC the External switch
+will bind to when `Ensure-ExternalSwitch` needs to create it. Run
+`Get-NetAdapter` to see the available names on the host. If the
+External switch with the configured `externalSwitchName` already
+exists, this field is ignored at runtime.
+
+**NIC layout.** Two adapters, both with statically pinned MACs so the
+cloud-init netplan's match-by-MAC blocks find their NIC across reboots
+and kernel-naming changes:
+
+| Adapter            | Hyper-V switch                  | Guest name (via `set-name`) | Addresses                                                                                       | Role                                           |
+|--------------------|---------------------------------|------------------------------|-------------------------------------------------------------------------------------------------|------------------------------------------------|
+| `Network Adapter`  | `externalSwitchName` (existing) | `ext0`                       | DHCP (default) or `ipAddress/subnetMask` + default via `gateway` + DNS = `dns` (`externalDhcp: false`) | Upstream egress; MASQUERADE source.            |
+| `Private`          | `privateSwitchName` (created)   | `priv0`                      | `privateIpAddress/subnetMask` (always static)                                                   | Downstream gateway / DNS for environment VMs.  |
+
+**Cloud-init payload.** The router seed ISO lands:
+
+- `/etc/netplan/99-router.yaml` — both NICs, match-by-MAC, with
+  `set-name: ext0 / priv0`.
+- `/etc/sysctl.d/99-router.conf` — `net.ipv4.ip_forward = 1`.
+- `/etc/nftables.conf` — `inet filter forward` chain allowing
+  `priv0 -> ext0` (new connections) and `ext0 -> priv0`
+  (established/related only), plus `ip nat postrouting` with
+  `oifname "ext0" masquerade`.
+- `/etc/dnsmasq.d/router.conf` — dnsmasq bound to `priv0` and the
+  configured `privateIpAddress`, `no-resolv`, upstream resolver =
+  the VM's own `dns`.
+- `packages: nftables, dnsmasq` — installed via `apt` on first boot
+  (the router has real upstream egress as soon as `netplan apply`
+  runs, so `apt-get update` works).
+- `runcmd:` `netplan apply` → `sysctl --system` →
+  `systemctl enable --now nftables.service` →
+  `systemctl enable --now dnsmasq.service`, with diagnostic dumps
+  before and after `netplan apply` (`/etc/netplan/` listing +
+  contents, `netplan get`, `networkctl`, `ip -4 addr`/`route`).
+  Order matters: netplan must bind `priv0` before dnsmasq tries to
+  listen on it; forwarding must be on before any packet traverses
+  the FORWARD chain; the nftables ruleset must be loaded before
+  dnsmasq starts serving requests.
+
+**Idempotency.**
+
+- The external switch is ensured (created on demand bound to
+  `externalAdapterName` with `-AllowManagementOS:$true` so the host
+  keeps its connection; reused if an `External`-type switch with
+  that name already exists; rejected if the existing switch is
+  `Internal` or `Private`).
+- The private switch is ensured (created if absent, reused if a
+  `Private`-type switch with that name already exists, rejected if
+  the existing switch is `Internal` or `External`).
+- Re-running `provision.ps1` against an already-provisioned router VM
+  takes the normal "existing VM" path — no destructive re-creation.
+
+**Restrictions.** Router VMs do not accept `javaDevKit`, `dotnetSdk`, or
+`dotnetTools` blocks. The router is intentionally minimal — its only
+software is `nftables` and `dnsmasq`. Surfacing the rejection at
+schema-time keeps a stray toolchain entry from silently flowing
+through reconcile and installing a JDK on the gateway.
+
 ---
 
 ## provision.ps1
@@ -575,18 +811,74 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
    activates the config during first boot. Netplan - not cloud-init -
    owns the on-disk file for the life of the VM, so reboots and
    cloud-init re-evaluations cannot revert the static config to DHCP.
-7. **(always)** Creates a Hyper-V Internal switch named `VmLAN` (if
-   absent), assigns the `gateway` IP to the host-side virtual NIC, and
-   adds a `New-NetNat` rule for the subnet so VMs can reach the internet
-   through the host. Idempotent; runs even when only existing VMs are
-   being reconciled so a rebuilt host gets the network re-applied.
+   Router VMs (`kind: router`) take the router-seed path instead - see
+   [Router VM](#router-vm-kind-router) for the dual-NIC netplan and
+   the nftables / dnsmasq / sysctl payload it lands.
+7. **(always)** **Host network setup.** Hoisted to fire **before**
+   disk acquisition and host-side downloads so a misconfigured host
+   fails in seconds instead of after minutes of wasted setup. For
+   each router VM in the batch, in dependency order:
+   1. **Legacy NetNat / vNIC cleanup** first, so stale state from a
+      partially-migrated host cannot falsely fail the preflight's
+      IP-collision check.
+   2. **External + Private switch ensures** (the preflight's first
+      check is "switch exists").
+   3. **`Assert-HostNetworkPreflight`** — throws on any of:
+      missing/wrong-type switch, host vNIC down or unbound, Internal
+      vSwitch sharing MAC with a Wi-Fi adapter (stale config from
+      an unfinished External -> Internal+ICS migration), External
+      vSwitch bridged to Wi-Fi (guaranteed host-vs-VM IP collision
+      via shared MAC at the AP), missing connected route, IP
+      collision between host vNIC and any VM on that switch,
+      vEthernet's network profile being `Public` (which blocks ICS's
+      DNS-In firewall rule and silently breaks VM DNS), or the ICS
+      DNS proxy not answering at `192.168.137.1`. The last two are
+      **auto-repaired** in the provisioner gate: profile gets
+      flipped to `Private`, and ICS sharing is toggled off+on via
+      the `HNetCfg` COM API to kick a hung DNS proxy. One repair
+      attempt per check; if it doesn't take, surfaces as a clean
+      FAIL with the next steps named in the error. See
+      [`Test-HostNetworkPreflight.ps1`](#test-hostnetworkpreflightps1)
+      for the manual entry point with the same checks.
+   4. **Router-IP discovery** for existing routers
+      (`Resolve-ExistingRouterIp` — looks up the IP via Hyper-V
+      KVP; new-state routers get theirs at step 8's create-vm.ps1
+      KVP discovery, then a follow-up portproxy pass closes the
+      loop).
+   5. **Localhost portproxy** `127.0.0.1:2222 -> <routerIp>:22` so
+      WSL-based tools (the Ansible flow) can reach the router VM
+      without crossing ICS NAT. Static routers get theirs now; DHCP
+      routers get theirs at the end of step 8.
+   6. **Workload `_RouterVm` stamping** so step 8's wait-for-SSH
+      and step 9's post-provisioning can find the jump host.
 8. **(new VMs only)** Creates each VM (Gen 2, static RAM, VHDX from
-   step 4), sets Secure Boot to `MicrosoftUEFICertificateAuthority`
-   (required for Ubuntu), attaches the seed ISO, connects to `VmLAN`,
-   and starts the VM. Polls port 22 until cloud-init finishes, then
-   detaches and deletes the seed ISO.
+   step 5), sets Secure Boot to `MicrosoftUEFICertificateAuthority`
+   (required for Ubuntu), attaches the seed ISO, connects to its
+   `privateSwitchName` (workload VMs) or `externalSwitchName`
+   (router VMs), and starts the VM. Router VMs additionally get a
+   second NIC on `privateSwitchName`, and both NICs are pinned to
+   deterministic MACs that match the seed's netplan blocks. Polls
+   port 22 until cloud-init finishes, then detaches and deletes the
+   seed ISO. On wait-for-SSH timeout (and on router-side
+   reachability-gate timeout for workloads behind a router VM), a
+   host-side + best-effort guest-side runtime snapshot is captured
+   to `runtime-diag.log` next to `console.log` so a failed run
+   leaves forensic data without operator intervention. See
+   [`Get-VmRuntimeDiag.ps1`](#get-vmruntimediagps1) for the manual
+   entry point and the on-disk layout under
+   `<vhdPath>/diagnostics/<vmName>/<timestamp>/`.
 9. **(new AND existing VMs)** Runs post-provisioning. Opens one host file server and
-    one SSH session per VM, waits once for cloud-init to finish, then
+    one SSH session per VM, **waits for cloud-init to finish** by
+    polling `cloud-init status` every 5s and streaming a dot per
+    poll (line wraps every 60 dots = 5 min) so a slow first-boot
+    looks like progress, not a hang. Wall-clock cap is 600s. When
+    cloud-init terminates with **non-zero exit** (its way of
+    reporting a `runcmd` / `write_files` / `packages` failure), the
+    provisioner **throws fatally** with a message pointing at the
+    `<vhdPath>/diagnostics/<vmName>/<timestamp>/` folder where
+    `Invoke-CloudInitDiagnostics` already dropped
+    `cloud-init-output.log` + `cloud-init.log` + the network
+    snapshot, so the underlying failure is one Read away. Then
     dispatches each enabled step:
     - **`files`** copies host files to declared VM paths (each entry is
       dispatched in JSON order: single entries via `Copy-VmFiles`, bulk
@@ -680,6 +972,94 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
 
 ---
 
+## Test-HostNetworkPreflight.ps1
+
+Run as Administrator to sanity-check the host's Hyper-V networking
+before kicking off `provision.ps1`, or after any host networking
+change (switch recreate, ICS toggle, Wi-Fi LAN change).
+
+```powershell
+.\scripts\Test-HostNetworkPreflight.ps1
+```
+
+Thin wrapper around `Assert-HostNetworkPreflight` that
+`provision.ps1`'s `Host network preflight` phase already fires automatically as the very first network operation, before any disk acquisition or VM
+creation. Surfaces the same checks as a standalone command so the
+operator can confirm a clean host without committing to a full
+provisioning run.
+
+**Checks (PASS / WARN / FAIL inline; non-zero exit on any FAIL):**
+
+| # | Check | Smoking-gun failure mode it catches |
+|---|---|---|
+| 1 | External vSwitch exists, recognized SwitchType | Switch missing, or accidentally Private (no upstream egress) |
+| 2 | Host vNIC `vEthernet (<switch>)` Up + IPv4 | ICS flipped off, switch torn down without recreate |
+| 3 | Switch-type-specific MAC story | **Internal**: vEthernet MAC matches a Wi-Fi NIC -> stale config (forgot to recreate as Internal after External -> ICS migration). **External**: vEthernet MAC matches a Wi-Fi NIC -> Hyper-V is MAC-translating every VM's egress to the host's Wi-Fi MAC, so the AP gives the host vNIC and every VM the same DHCP lease and they collide on the same IP. |
+| 4 | Connected route to host vNIC subnet via that vNIC | Route missing -> host routes VM-subnet traffic out the Wi-Fi default gateway by mistake (the "duplicate-IP / SourceAddress=WiFi" symptom). |
+| 5 | No IP collision between host vNIC and any VM on the switch | The Wi-Fi External-bridge MAC-sharing smoking gun -> host steals VM traffic via local routing. |
+| 6 | vEthernet network profile = Private (Internal switches only) | `Public` blocks ICS's auto-generated DNS-In firewall rule so VM DNS queries silently drop. Auto-repaired when `-AutoRepair` is set (only toggles when current is Public; never redundantly). |
+| 7 | ICS DNS proxy answers at `$DnsProbeTarget` | The proxy's known broken state: it answers UDP/53 queries with TCP RSTs. Auto-repaired via `Reset-IcsSharing` (the programmatic equivalent of toggling the WiFi Sharing checkbox), one attempt + one re-probe; failure surfaces as a clean FAIL pointing at `Get-Service SharedAccess` + firewall rules. |
+
+**Parameters:**
+
+| Param | Default | Effect |
+|---|---|---|
+| `-SwitchName` | `ExternalSwitch-Shared` | The External vSwitch to inspect (matches `secret.json`'s `externalSwitchName`). |
+| `-DnsProbeTarget` | `192.168.137.1` | Address the DNS-via-ICS check probes (the host-side ICS gateway IP). |
+| `-WanAdapterName` | `Wi-Fi` | WAN side passed to `Reset-IcsSharing` during auto-repair. |
+| `-AutoRepair` | off | Opt INTO check 6/7 auto-repair. Default off for the manual entry point because an interactive operator may have other VMs alive that would lose their default route during an ICS toggle. The provisioner gate calls `Assert-HostNetworkPreflight` directly with auto-repair on (no live VMs at preflight time). |
+
+---
+
+## Get-VmRuntimeDiag.ps1
+
+Run as Administrator to capture host-side networking truth plus
+(best-effort) inside-VM runtime state for a named VM, written next
+to `console.log` under
+`<vhdPath>/diagnostics/<vmName>/<timestamp>/runtime-diag.log`.
+
+```powershell
+.\scripts\Get-VmRuntimeDiag.ps1 -VmName router-e2e -SecretSuffix 'E2E'
+```
+
+Same helper (`Invoke-VmRuntimeDiag`) that fires automatically from
+`create-vm.ps1`'s wait-for-SSH and router-side reachability timeout
+paths - this script is the manual entry point for probing a VM
+without aborting an in-flight run, or for diagnosing VMs that have
+drifted IPs / lost connectivity after a successful provision.
+
+**Captures (always; no SSH required):**
+
+- `Get-VM` state, uptime, CPU/memory utilization
+- `Get-VMNetworkAdapter` for every NIC: switch, IPs (from Hyper-V
+  integration services), MAC, status
+- `Get-NetIPConfiguration` for each host vEthernet the VM is
+  attached to
+- `Get-NetNeighbor` for every IPv4 the VM has held (catches the
+  IP-drift case where Hyper-V reports one IP but the host's ARP
+  cache shows another)
+- `Get-NetRoute` for the /24 derived from each VM IP
+- `arp -a` full dump
+
+**Captures (best-effort; only when SSH opens within 30s):**
+
+- `ip -4 addr show` and `ip route` (current netplan state)
+- `ss -tln` (what's listening)
+- `cat /etc/resolv.conf` + `resolvectl status` (DNS resolution path)
+- `sudo nft list ruleset` (router NAT + filter rules)
+- `journalctl -u systemd-networkd` excerpt filtered to ext0 / priv0 /
+  DHCP / lease / address (catches DHCP-drift via netplan double-apply)
+- `journalctl -u cloud-init` excerpt filtered to netplan / network /
+  apply / reboot / error (catches cloud-init mid-run reconfigures)
+
+SSH-open failures are logged into the same file rather than thrown,
+so the host-side capture always lands.
+
+`SecretSuffix` matches `provision.ps1` / `deprovision.ps1` -
+appended to `VmProvisionerConfig` to form the vault entry name.
+
+---
+
 ## start-vms.ps1
 
 Run as Administrator after VMs have been created by `provision.ps1` to bring
@@ -731,7 +1111,7 @@ Reads the same `VmProvisionerConfig` from the vault and for each VM definition:
 3. Deletes the per-VM VHDX (`{vmName}.vhdx`) in `vhdPath`. If Windows VMMS
    still holds a handle after `Remove-VM`, deletion is retried up to 5 times
    with exponential backoff (capped at 30 s) via `Invoke-WithRetry` from
-   `PowerShell.Common` using the file-lock retry strategy. If the file is
+   `Common.PowerShell` using the file-lock retry strategy. If the file is
    still locked after all retries the script throws with the path identified
    — re-running after a few seconds retries the deletion.
 4. Deletes the seed ISO (`{vmName}-seed.iso`) in `vmConfigPath` if present.
@@ -741,10 +1121,23 @@ Reads the same `VmProvisionerConfig` from the vault and for each VM definition:
 
 After all VMs are processed:
 
-6. Removes the `VmLAN-NAT` NAT rule, the gateway IP from the host vNIC, and
-   the `VmLAN` Internal switch — but only when no VMs remain connected to the
-   switch. If VMs outside the config are still attached (e.g. provisioned
-   separately), the network teardown is skipped to preserve their connectivity.
+6. Per environment (one group per unique `privateSwitchName` in the
+   config), tears down the network state owned by that environment:
+   - Any `New-NetNat` rule whose prefix covers the environment's gateway
+     IP is removed (idempotent legacy cleanup carried over from
+     feature 53 step 2).
+   - Any host vNIC carrying the gateway IP is unassigned (same legacy
+     migration story).
+   - The Private switch is removed **only when no VMs remain attached**.
+     If VMs outside the config are still connected (e.g. provisioned by
+     another lifecycle), that switch's removal is skipped and the
+     other VMs keep their network.
+
+   The environment's gateway IP is taken from the router VM's
+   `privateIpAddress` when one is in the config; otherwise it falls
+   back to the first workload VM's `gateway` (covers configs that
+   predate the router VM but still describe the singleton-NAT
+   topology).
 
 **The base Ubuntu image is not deleted.** It is shared across all VMs of the
 same Ubuntu version and is not specific to any single config entry. Delete it
@@ -756,14 +1149,53 @@ manually from `vhdPath` if it is no longer needed.
 
 CI runs on pull requests targeting `master` via `.github/workflows/ci.yml`,
 which delegates to the shared reusable workflow in
-[PowerShell-Common](https://github.com/VitaliiAndreev/PowerShell-Common):
+[Common-PowerShell](https://github.com/VitaliiAndreev/Common-PowerShell):
 
 ```
-VitaliiAndreev/PowerShell-Common/.github/workflows/ci-powershell.yml@master
+VitaliiAndreev/Common-PowerShell/.github/workflows/ci-powershell.yml@master
 ```
 
 The shared workflow runs `scripts\Run-Tests.ps1` on PowerShell 7.
 No additional CI configuration is needed in this repo.
+
+Two more thin workflows lint the YAML and Bash surfaces by delegating to
+**Common-Automation**, so the lint config is single-sourced and cannot drift
+per repo:
+
+| Workflow | Runs |
+|---|---|
+| `.github/workflows/ci-yaml.yml` | actionlint, action-validator, yamllint, ansible-lint |
+| `.github/workflows/ci-bash.yml` | shellcheck, check-sh-executable, bats |
+
+Each linter auto-skips when its surface is absent. To reproduce CI locally
+(Git Bash + Docker), use the main runner. It runs the full lint suite AND the
+bats tests - the local equivalent of this repo's `ci-yaml.yml` + `ci-bash.yml`:
+
+```bash
+# MAIN entry: full lint suite + bats tests (local ci-yaml.yml + ci-bash.yml).
+scripts/run-ci-yaml-and-bash.sh              # or double-click scripts\run-ci-yaml-and-bash.bat
+```
+
+To run just one half:
+
+```bash
+# Lint half only (shellcheck, actionlint, action-validator, yamllint,
+# ansible-lint). Distinct from the Pester runner Run-Tests.ps1; runs no
+# PowerShell tests.
+scripts/run-lint-yaml-and-bash.sh            # or double-click scripts\run-lint-yaml-and-bash.bat
+
+# Bats test half only.
+scripts/run-tests-bash.sh                    # or double-click scripts\run-tests-bash.bat
+
+# Re-stage the +x bit on tracked *.sh files (Windows checkouts drop it,
+# tripping the check-sh-executable gate).
+scripts/fix-permissions.sh     # or scripts\fix-permissions.bat
+```
+
+All three runners are thin shims over Common-Automation's engine, pointed at
+this repo via the `COMMON_AUTOMATION_TARGET_REPO` env var, so a sibling
+checkout at `..\Common-Automation` is required. `.gitattributes` pins `*.sh`
+to LF and `*.bat` to CRLF - Linux CI runners reject CRLF shebangs.
 
 ---
 
@@ -771,9 +1203,12 @@ No additional CI configuration is needed in this repo.
 
 ```
 Infrastructure-VM-Provisioner/
+|- .gitattributes           # Pins *.sh to LF and *.bat to CRLF
 |- .github/
 |  `- workflows/
-|     `- ci.yml              # Delegates to shared ci-powershell.yml in PowerShell-Common
+|     |- ci.yml             # Delegates to shared ci-powershell.yml in Common-PowerShell
+|     |- ci-yaml.yml        # Delegates to Common-Automation reusable ci-yaml.yml
+|     `- ci-bash.yml        # Delegates to Common-Automation reusable ci-bash.yml
 |- hyper-v/
 |  `- ubuntu/
 |     |- provision.ps1       # Entry point - orchestrates all provisioning steps
@@ -781,14 +1216,29 @@ Infrastructure-VM-Provisioner/
 |     |- deprovision.ps1     # Entry point - reverses provision.ps1
 |     |- setup-secrets.ps1   # One-time vault setup
 |     |- common/
-|     |  `- config/
-|     |     |- ConvertFrom-VmConfigJson.ps1  # JSON parsing and validation; delegates the optional 'files' array to Infrastructure.HyperV's Assert-VmFilesField
-|     |     |- Assert-JavaDevKitField.ps1    # Validates optional javaDevKit field
-|     |     |- Get-SanitizedVmDisplay.ps1    # Masks password in diagnostic output
-|     |     `- Read-VmProvisionerConfig.ps1  # Shared bootstrap helper: vault read + schema validation, reused by provision / start-vms / deprovision
+|     |  |- config/
+|     |  |  |- ConvertFrom-VmConfigJson.ps1  # JSON parsing and validation; delegates the optional 'files' array to Infrastructure.HyperV's Assert-VmFilesField
+|     |  |  |- Assert-JavaDevKitField.ps1    # Validates optional javaDevKit field
+|     |  |  |- Get-SanitizedVmDisplay.ps1    # Masks password in diagnostic output
+|     |  |  |- Group-VmsByEnvironment.ps1    # Per-environment view: groups VM defs by privateSwitchName and partitions each group into RouterVms / WorkloadVms. Single source of truth shared by preflight, provision step 7, and deprovision teardown.
+|     |  |  `- Read-VmProvisionerConfig.ps1  # Shared bootstrap helper: vault read + schema validation, reused by provision / start-vms / deprovision
+|     |  |- diag/
+|     |  |  |- Get-VmDiagFolder.ps1          # Pure helper: the single source of truth for <vhdPath>/diagnostics/<vmName>/<timestamp>/ - every diag artifact (console.log, cloud-init-*.txt, ssh.log, runtime-diag.log) lands at the same path.
+|     |  |  `- Invoke-VmRuntimeDiag.ps1      # Host-side + best-effort guest-side runtime snapshot. Auto-fires from create-vm.ps1's wait-for-SSH and router-side reachability timeout paths. Manual entry point: scripts\Get-VmRuntimeDiag.ps1.
+|     |  `- network/
+|     |     |- preflight/
+|     |     |  |- Assert-HostNetworkPreflight.ps1   # Orchestrator: seven host-side network checks (switch type, vNIC up + IP, MAC story, connected route, host-vs-VM IP collision, vEthernet profile, ICS DNS proxy reachability). The profile + DNS checks delegate to Infrastructure.Network.Windows (Test-HostNetworkProfileSetting / Test-IcsDnsProxyReachable). Throws on FAIL via Assert-PreflightFindings. Gate at provision.ps1 step 4; manual entry: scripts\Test-HostNetworkPreflight.ps1.
+|     |     |  |- Assert-PreflightFindings.ps1      # Multi-line throw collector: consolidates every FAIL finding into one operator-facing error.
+|     |     |  `- checks/
+|     |     |     `- Test-IsCurrentSessionElevated.ps1   # Pure predicate: WindowsPrincipal admin check used by check 0. (The Profile / DNS-reachable / ICS-DNS-proxy / Reset-IcsSharing checks moved to Infrastructure.Network.Windows.)
+|     |     |- Assert-WorkloadReachableViaRouter.ps1 # Workload-side reachability gate: SSHs through the router VM jump host to a workload's private IP. Surfaces dead workloads before per-VM dispatch.
+|     |     |- Get-VmAdapterIPv4.ps1                # Pure helper: extracts IPv4 from VMNetworkAdapter objects under StrictMode (PSObject.Properties guard + IPv4 anchor regex).
+|     |     |- Resolve-ExistingRouterIp.ps1        # Router-IP lookup from existing Hyper-V state when the router is already up (reconcile path).
+|     |     `- Remove-LegacySingletonNat.ps1       # Idempotent NetNat + host vNIC cleanup at a given gateway IP. Shared by Invoke-NetworkSetup (provision) and Invoke-NetworkTeardown (deprovision); also exports Test-IpInPrefix.
 |     |- up/
 |     |  |- config/
-|     |  |  `- Select-VmsForProvisioning.ps1 # Pre-flight VM-existence and IP-conflict checks
+|     |  |  |- Assert-EnvironmentConsistency.ps1 # Per-env preflight: shared gateway/subnet, exactly-one router per env, gateway = router's privateIpAddress. Built on Group-VmsByEnvironment.
+|     |  |  `- Select-VmsForProvisioning.ps1     # Pre-flight VM-existence and IP-conflict checks; dispatches the per-env preflight to Assert-EnvironmentConsistency before any per-VM classification
 |     |  |- disk/
 |     |  |  |- Invoke-DiskImageAcquisition.ps1  # Downloads, converts, caches base VHDX
 |     |  |  `- Invoke-BaseImagePatch.ps1        # Patches cloud-init datasource via WSL2
@@ -820,10 +1270,16 @@ Infrastructure-VM-Provisioner/
 |     |  |- acquire/
 |     |  |  `- Invoke-VmAcquisitions.ps1        # Per-VM host-side acquisition orchestrator; dispatches each per-software acquirer guarded by its opt-in field
 |     |  |- post/
-|     |  |  |- Invoke-VmPostProvisioning.ps1    # Per-VM transport orchestrator (file server + SSH + cloud-init wait), dispatches steps; calls Infrastructure.HyperV's Copy-VmFiles for the 'files' step
+|     |  |  |- Invoke-VmPostProvisioning.ps1    # Per-VM transport orchestrator (file server + SSH + cloud-init wait), dispatches steps; throws fatally on cloud-init non-zero exit with a pointer at the diagnostics folder
+|     |  |  |- Wait-CloudInitFinished.ps1       # Polls 'cloud-init status' over SSH; streams a dot per poll (line-wraps every 60), returns elapsed/budget/status so the caller stamps a summary line. 600s wall-clock cap.
+|     |  |  |- Invoke-VmFilesDispatch.ps1       # Single-vs-bulk router for the 'files' step entries (presence of 'pattern' = bulk). Owns the operator-visible "[files] processing N entry(s)" cadence and the JSON-order contract.
+|     |  |  |- Assert-RouterServicesActive.ps1  # Strict post-cloud-init check that nftables.service + dnsmasq.service are active on router VMs. Fail-fast for the dnsmasq-install regression.
+|     |  |  |- Invoke-CloudInitDiagnostics.ps1  # Captures cloud-init-output.log + cloud-init.log + netplan + reachability into <vhdPath>/diagnostics/<vmName>/<timestamp>/ alongside console.log. Fires on every post-provisioning run, not just failures.
+|     |  |  |- Invoke-SerialConsoleCapture.ps1  # Mirrors the VM's serial console to console.log during VM-creation wait.
+|     |  |  |- New-DiagnosticSshClientWrapper.ps1 # Wraps the real SshClient with a tee-to-file logger covering the whole post-provisioning phase (writes ssh.log next to console.log).
 |     |  |  `- Set-EnvironmentVariables.ps1     # Step: writes a managed block of NAME="VALUE" lines into /etc/environment via Infrastructure.HyperV's Set-VmEnvironmentVariables
 |     |  |- network/
-|     |  |  `- setup-network.ps1               # Creates VmLAN switch, host IP, NAT rule
+|     |  |  `- setup-network.ps1               # Per-env wrapper around Remove-LegacySingletonNat; switch creation lives in Ensure-PrivateSwitch / Ensure-ExternalSwitch
 |     |  |- seed/
 |     |  |  |- generate-seed-iso.ps1           # Builds cloud-init seed ISO
 |     |  |  |- New-StaticNetplanYaml.ps1       # Builds netplan v2 YAML for the VM's static NIC (embedded in user-data write_files)
@@ -831,14 +1287,15 @@ Infrastructure-VM-Provisioner/
 |     |  `- vm/
 |     |     `- create-vm.ps1                   # Creates, boots, and polls each VM
 |     `- down/
-|        |- config/
-|        |  `- Assert-GatewayConsistency.ps1 # Validates all VMs share one gateway
 |        |- network/
-|        |  `- teardown-network.ps1         # Removes NAT rule, host IP, and switch
+|        |  `- teardown-network.ps1         # Per-env teardown: delegates legacy NetNat + host IP cleanup to Remove-LegacySingletonNat, then removes the Private switch when empty
 |        `- vm/
 |           `- remove-vm.ps1               # Stops, removes VM, deletes VHDX and config dir
 |- Tests/
-|  |- common/config/         # Unit tests for common/config helpers
+|  |- common/
+|  |  |- config/             # Unit tests for common/config helpers
+|  |  |- diag/               # Unit tests for common/diag helpers
+|  |  `- network/            # Unit tests for common/network helpers
 |  |- up/
 |  |  |- config/             # Unit tests for up/config helpers
 |  |  |- disk/               # Unit tests for up/disk
@@ -847,10 +1304,18 @@ Infrastructure-VM-Provisioner/
 |  |  |- seed/               # Unit tests for up/seed
 |  |  `- vm/                 # Unit tests for up/vm
 |  `- down/
-|     |- config/             # Unit tests for down/config helpers
 |     |- network/            # Unit tests for down/network
 |     `- vm/                 # Unit tests for down/vm
-|- Run-Tests.ps1             # Runs Pester tests (called by ci-powershell.yml)
+|- scripts/
+|  |- Run-Tests.ps1                       # Unit-test runner (delegates to Common-PowerShell)
+|  |- Run-IntegrationTests.ps1            # Docker-host integration runner (delegates to Common-PowerShell)
+|  |- Run-IntegrationTests-AgainstDockerTarget.ps1  # Docker-target integration runner
+|  |- Test-HostNetworkPreflight.ps1       # Manual entry point: host-side network sanity-check (Assert-HostNetworkPreflight)
+|  |- Get-VmRuntimeDiag.ps1               # Manual entry point: host + guest runtime diag snapshot (Invoke-VmRuntimeDiag)
+|  |- run-ci-yaml-and-bash.sh / run-ci-yaml-and-bash.bat              # MAIN local runner: full lint suite + bats tests (Common-Automation engine)
+|  |- run-lint-yaml-and-bash.sh / run-lint-yaml-and-bash.bat          # Lint half only (shellcheck, actionlint, action-validator, yamllint, ansible-lint)
+|  |- run-tests-bash.sh / run-tests-bash.bat                          # Bats test half only
+|  `- fix-permissions.sh / fix-permissions.bat  # Re-stage +x on tracked *.sh via the shared engine
 `- README.md
 ```
 

@@ -1,7 +1,7 @@
 <#
 .NOTES
     Do not run this file directly. It is intended to be dot-sourced by
-    provision.ps1 and setup-secrets.ps1 after PowerShell.Common is loaded.
+    provision.ps1 and setup-secrets.ps1 after Common.PowerShell is loaded.
 #>
 
 # Sibling validators dot-sourced here so callers of ConvertFrom-VmConfigJson
@@ -12,6 +12,13 @@
 . "$PSScriptRoot\Assert-JavaDevKitField.ps1"
 . "$PSScriptRoot\Assert-DotnetSdkField.ps1"
 . "$PSScriptRoot\Assert-DotnetToolsField.ps1"
+. "$PSScriptRoot\Assert-RouterVmField.ps1"
+. "$PSScriptRoot\Assert-WorkloadVmField.ps1"
+
+# Allowed values for the 'kind' field. 'workload' is the default and
+# carries the historical schema; 'router' selects the dual-NIC NAT/DNS
+# gateway path added in feature 53.
+$script:AllowedVmKinds = @('workload', 'router')
 
 # ---------------------------------------------------------------------------
 # ConvertFrom-VmConfigJson
@@ -46,22 +53,60 @@ function ConvertFrom-VmConfigJson {
         throw "Config must be a non-empty JSON array of VM definitions."
     }
 
-    # Every VM definition must supply all of these fields. This list is the
-    # authoritative schema - setup-secrets.ps1 and provision.ps1 both rely
-    # on it via dot-source.
+    # Every VM definition must supply all of these fields regardless of
+    # kind. This list is the authoritative shared schema -
+    # setup-secrets.ps1 and provision.ps1 both rely on it via dot-source.
+    #
+    # 'privateSwitchName' is in the base list because both VM kinds need it:
+    # router VMs attach their downstream NIC to it; workload VMs attach their
+    # only NIC to it (and use the matching router VM's privateIpAddress as
+    # gateway). Feature 53 step 2.
+    #
+    # 'ipAddress' and 'gateway' are kind-specific and live in the per-
+    # kind validators (Assert-WorkloadVmField requires them;
+    # Assert-RouterVmField requires them only when externalDhcp is
+    # false). The router VM's upstream NIC defaults to DHCP because the
+    # host's External vSwitch is often bridged to a Wi-Fi adapter whose
+    # subnet changes per location - pinning a static there is what kept
+    # breaking provisioning whenever the operator changed networks.
+    #
+    # 'subnetMask' stays in the base list. Workloads use it for their
+    # only NIC; router VMs always use it for the priv0 (downstream) NIC
+    # regardless of how ext0 is addressed. Even a DHCP-mode router VM
+    # carries a static priv0 (10.10.0.1/24 etc.) so subnetMask is
+    # never optional.
+    #
+    # 'dns' stays in the base list - on router VMs it is dnsmasq's
+    # upstream forwarder (unrelated to ext0's address mode); on workload
+    # VMs it is the resolver in netplan.
     $requiredFields = @(
         'vmName', 'cpuCount', 'ramGB', 'diskGB', 'ubuntuVersion',
         'username', 'password',
-        'ipAddress', 'subnetMask', 'gateway', 'dns',
-        'vmConfigPath', 'vhdPath'
+        'subnetMask', 'dns',
+        'vmConfigPath', 'vhdPath',
+        'privateSwitchName'
     )
 
     foreach ($vm in $vmDefs) {
-        # Assert-RequiredProperties is provided by PowerShell.Common.
+        # Assert-RequiredProperties is provided by Common.PowerShell.
         Assert-RequiredProperties `
             -Object      $vm `
             -Properties  $requiredFields `
             -Context     "VM '$(if ($vm.PSObject.Properties['vmName']) { $vm.vmName } else { '(unknown)' })'"`
+
+        # 'kind' selects the provisioning path. Validated up front so
+        # later validators run against a known kind. The allow-list is
+        # closed - an unknown value is a typo, not a "future kind".
+        $vmName = if ($vm.PSObject.Properties['vmName']) { $vm.vmName } else { '(unknown)' }
+        if ($vm.PSObject.Properties['kind']) {
+            if ($vm.kind -notin $script:AllowedVmKinds) {
+                throw (
+                    "VM '$vmName': kind '$($vm.kind)' is not recognised. " +
+                    "Allowed: $($script:AllowedVmKinds -join ', ')."
+                )
+            }
+        }
+        $kind = if ($vm.PSObject.Properties['kind']) { $vm.kind } else { 'workload' }
 
         # Optional-field validators. Each one is a no-op when its field is
         # absent and throws with a descriptive message when present-but-malformed.
@@ -88,14 +133,26 @@ function ConvertFrom-VmConfigJson {
             -PostEntryValidator $null
         Assert-VmEnvVarsField -Vm $vm
 
+        # Kind-specific schema rules run after the toolchain validators
+        # so a router VM declaring (e.g.) javaDevKit fails the router
+        # rejection rule with a clear message instead of being rejected
+        # first by the javaDevKit shape check.
+        if ($kind -eq 'router') {
+            Assert-RouterVmField -Vm $vm
+        }
+        else {
+            # 'workload' is the default. The validator pins ipAddress /
+            # subnetMask / gateway as required - workloads must have a
+            # static IP because their gateway (= router's private IP)
+            # is a config-time choice no DHCP path can provide.
+            Assert-WorkloadVmField -Vm $vm
+        }
+
         # Apply defaults for optional fields. Using Add-Member rather than
         # property assignment so the field is added when absent without
         # overwriting an explicitly supplied value.
-        if (-not $vm.PSObject.Properties['switchName']) {
-            $vm | Add-Member -MemberType NoteProperty -Name switchName -Value 'VmLAN'
-        }
-        if (-not $vm.PSObject.Properties['natName']) {
-            $vm | Add-Member -MemberType NoteProperty -Name natName -Value 'VmLAN-NAT'
+        if (-not $vm.PSObject.Properties['kind']) {
+            $vm | Add-Member -MemberType NoteProperty -Name kind -Value 'workload'
         }
 
         # Output each validated VM object individually to the pipeline.
