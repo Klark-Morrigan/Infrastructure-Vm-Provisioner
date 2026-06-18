@@ -55,7 +55,7 @@ $checks    = Join-Path $preflight 'checks'
 # Reset-IcsSharing + the four Ics/Profile/DNS check functions now
 # ship in Infrastructure.Network.Windows. The orchestrator + its
 # elevation/findings helpers stay local to the provisioner.
-Import-Module Infrastructure.Network.Windows -MinimumVersion 0.1.0 -ErrorAction Stop
+Import-Module Infrastructure.Network.Windows -MinimumVersion 1.1.0 -ErrorAction Stop
 . (Join-Path $checks    'Test-IsCurrentSessionElevated.ps1')
 . (Join-Path $preflight 'Assert-PreflightFindings.ps1')
 . (Join-Path $preflight 'Assert-HostNetworkPreflight.ps1')
