@@ -160,8 +160,11 @@ function Invoke-VmCreation {
     # cloud-init-*.txt, runtime-diag.log, ssh.log all collocated).
     # Sweep before this run drops its first artifact so the
     # operator's disk does not grow without bound across repeated
-    # provisions. Keep the last 30 runs (over a year of weekly
-    # runs) or 60 days of them, whichever is smaller.
+    # provisions. The age pass runs first: keep only runs from the
+    # last 7 days, then cap at the 30 most recent of those so a burst
+    # of rapid re-provisions within the window still cannot grow the
+    # folder without bound. 7 days is the load-bearing limit; MaxItems
+    # is the burst backstop.
     if ($Vm.PSObject.Properties['vmConfigPath'] -and $Vm.vmConfigPath) {
         $perVmDiagRoot = Join-Path (Join-Path $Vm.vmConfigPath 'diagnostics') `
                                    $Vm.vmName
