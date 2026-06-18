@@ -120,13 +120,13 @@ Invoke-ModuleInstall -ModuleName 'Infrastructure.HyperV' -MinimumVersion '0.11.0
 # Infrastructure.Wsl via its RequiredModules manifest entry, so
 # Invoke-WslShell becomes available without an explicit install
 # call here.
-# Floor 0.6.0: Set-RouterSshPortProxyFirewall scopes its inbound 2222
-# allow by the WSL NAT source range instead of the WSL adapter
-# interface. The adapter GUID is regenerated across shutdowns/reboots,
-# which stranded an interface-pinned rule and needed a re-provision to
-# fix; range scoping has nothing volatile to go stale, so it survives
-# reboots of long-lived VMs without re-provisioning.
-Invoke-ModuleInstall -ModuleName 'Infrastructure.Network.Windows' -MinimumVersion '0.6.0'
+# Floor 1.1.0: the host-network preflight's ICS-DNS-proxy check relies
+# on Get-IcsDnsFailureDiagnostics (added in 1.1.0), which turns a wedged
+# ICS proxy into a single named next-step (start SharedAccess / fix host
+# network / restart+reboot) instead of the manual checklist the terminal
+# FAIL used to print. Subsumes the older 0.6.0 floor (which pinned
+# Set-RouterSshPortProxyFirewall's reboot-stable WSL-NAT-range scoping).
+Invoke-ModuleInstall -ModuleName 'Infrastructure.Network.Windows' -MinimumVersion '1.1.0'
 
 # Infrastructure.Wsl provides Invoke-WslShell (used by
 # Test-WslRouterReachability) and Assert-Wsl2Ready / Assert-WslHasBash
