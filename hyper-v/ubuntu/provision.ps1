@@ -278,10 +278,20 @@ try {
                                   -NetAdapterName $routerVm.externalAdapterName
             Ensure-PrivateSwitch -Name $routerVm.privateSwitchName
 
+            # 'gateway' is an optional, kind-specific field: the schema
+            # only populates it when externalDhcp=false (static upstream).
+            # A DHCP router (the default) has no gateway, so read it the
+            # guarded way - an absent value leaves DnsProbeTarget empty
+            # and Assert-HostNetworkPreflight simply skips the DNS-via-ICS
+            # probe. Unconditional $routerVm.gateway tripped StrictMode.
+            $dnsProbeTarget = if ($routerVm.PSObject.Properties['gateway']) {
+                $routerVm.gateway
+            } else { $null }
+
             Assert-HostNetworkPreflight `
                 -SwitchName      $routerVm.externalSwitchName `
                 -WanAdapterName  $routerVm.externalAdapterName `
-                -DnsProbeTarget  $routerVm.gateway
+                -DnsProbeTarget  $dnsProbeTarget
 
             Resolve-ExistingRouterIp -RouterVm $routerVm
 
