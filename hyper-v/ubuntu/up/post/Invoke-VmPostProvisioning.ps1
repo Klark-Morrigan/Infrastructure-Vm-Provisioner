@@ -369,7 +369,7 @@ function Invoke-VmPostProvisioning {
             # drops before the forwarded port closes. Safe to call
             # when the session was never opened ($sshSession is $null).
             if ($null -ne $sshSession) {
-                try { $sshSession.Dispose() } catch {}
+                try { $sshSession.Dispose() } catch { $null = $_ }
             }
         }
     }.GetNewClosure()

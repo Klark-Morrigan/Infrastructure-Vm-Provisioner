@@ -164,7 +164,7 @@ Describe 'Assert-WorkloadReachableViaRouter' {
                     -RouterVmName   'router-prod' `
                     -DiagFolder     $script:diagFolder `
                     -TimeoutSeconds 0
-            } catch { }
+            } catch { $null = $_ }
 
             $logPath = Join-Path $script:diagFolder 'router-side-probe.log'
             Test-Path -Path $logPath -PathType Leaf | Should -BeTrue
@@ -184,7 +184,7 @@ Describe 'Assert-WorkloadReachableViaRouter' {
                     -RouterVmName   'router-prod' `
                     -DiagFolder     $script:diagFolder `
                     -TimeoutSeconds 0
-            } catch { }
+            } catch { $null = $_ }
 
             Test-Path -Path $script:diagFolder -PathType Container | Should -BeTrue
         }
