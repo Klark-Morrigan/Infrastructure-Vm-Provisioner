@@ -7,7 +7,7 @@ BeforeAll {
     # ConvertTo-Array ships in Common.PowerShell in production. The
     # SUT uses it to keep the manifest list array-shaped.
     function ConvertTo-Array {
-        param([Parameter(ValueFromPipeline)] $InputObject)
+        param($InputObject)
         if ($null -eq $InputObject) { return ,@() }
         return ,@($InputObject)
     }

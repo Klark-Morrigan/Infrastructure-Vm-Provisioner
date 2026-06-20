@@ -16,7 +16,7 @@ BeforeAll {
     # ConvertTo-Array ships in Common.PowerShell in production. The
     # SUT relies on it to keep the manifest sub-arrays array-shaped.
     function ConvertTo-Array {
-        param([Parameter(ValueFromPipeline)] $InputObject)
+        param($InputObject)
         if ($null -eq $InputObject) { return ,@() }
         return ,@($InputObject)
     }

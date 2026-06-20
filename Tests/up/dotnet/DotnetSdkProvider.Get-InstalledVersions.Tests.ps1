@@ -9,7 +9,7 @@ BeforeAll {
     # into the @()-in-if-expression collapse-to-$null trap. Tests
     # reproduce its minimal contract.
     function ConvertTo-Array {
-        param([Parameter(ValueFromPipeline)] $InputObject)
+        param($InputObject)
         if ($null -eq $InputObject) { return ,@() }
         return ,@($InputObject)
     }

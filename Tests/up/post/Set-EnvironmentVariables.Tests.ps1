@@ -13,7 +13,7 @@ BeforeAll {
     # property access (PSCustomObject -> object unwraps single-element
     # arrays). Tests reproduce its minimal contract.
     function ConvertTo-Array {
-        param([Parameter(ValueFromPipeline)] $InputObject)
+        param($InputObject)
         if ($null -eq $InputObject) { return ,@() }
         return ,@($InputObject)
     }

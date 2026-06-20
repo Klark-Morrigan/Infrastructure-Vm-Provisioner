@@ -9,7 +9,7 @@ BeforeAll {
     function Remove-VmManifest       { param($SshClient, $Path) }
 
     function ConvertTo-Array {
-        param([Parameter(ValueFromPipeline)] $InputObject)
+        param($InputObject)
         if ($null -eq $InputObject) { return ,@() }
         return ,@($InputObject)
     }
