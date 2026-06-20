@@ -5,12 +5,12 @@
 #>
 
 # ---------------------------------------------------------------------------
-# Ensure-ExternalSwitch
+# Initialize-ExternalSwitch
 #   Idempotently makes sure a Hyper-V External switch named <Name> exists on
 #   the host. Used by feature 53 (router VM) so the operator only declares
 #   the switch and the physical adapter it should bind to; provisioning
 #   creates the switch when absent and reuses it when present. Sibling of
-#   Ensure-PrivateSwitch.
+#   Initialize-PrivateSwitch.
 #
 #   -AllowManagementOS:$true is non-negotiable: the physical NIC the
 #   switch binds to is typically the host's only path to the network, so
@@ -39,7 +39,7 @@
 #       correct name on the host.
 # ---------------------------------------------------------------------------
 
-function Ensure-ExternalSwitch {
+function Initialize-ExternalSwitch {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]

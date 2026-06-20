@@ -131,8 +131,8 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\seed\Write-VmSeedIso.ps1"
 . "$PSScriptRoot\up\seed\generate-seed-iso.ps1"
 . "$PSScriptRoot\up\seed\Invoke-RouterSeedIsoGeneration.ps1"
-. "$PSScriptRoot\up\network\Ensure-ExternalSwitch.ps1"
-. "$PSScriptRoot\up\network\Ensure-PrivateSwitch.ps1"
+. "$PSScriptRoot\up\network\Initialize-ExternalSwitch.ps1"
+. "$PSScriptRoot\up\network\Initialize-PrivateSwitch.ps1"
 . "$PSScriptRoot\up\network\setup-network.ps1"
 . "$PSScriptRoot\up\vm\Remove-VmSeedIso.ps1"
 . "$PSScriptRoot\up\vm\create-vm.ps1"
@@ -274,9 +274,9 @@ try {
             Invoke-NetworkSetup -RouterVm    $routerVm `
                                 -WorkloadVms $env.WorkloadVms
 
-            Ensure-ExternalSwitch -Name           $routerVm.externalSwitchName `
+            Initialize-ExternalSwitch -Name           $routerVm.externalSwitchName `
                                   -NetAdapterName $routerVm.externalAdapterName
-            Ensure-PrivateSwitch -Name $routerVm.privateSwitchName
+            Initialize-PrivateSwitch -Name $routerVm.privateSwitchName
 
             # 'gateway' is an optional, kind-specific field: the schema
             # only populates it when externalDhcp=false (static upstream).

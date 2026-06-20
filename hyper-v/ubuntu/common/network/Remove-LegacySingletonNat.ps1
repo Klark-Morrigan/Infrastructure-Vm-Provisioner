@@ -26,7 +26,7 @@
 #
 #   What it does NOT touch:
 #     - Switches. The Private switch lifecycle belongs to the router-VM
-#       loop in provision.ps1 (Ensure-PrivateSwitch) and to
+#       loop in provision.ps1 (Initialize-PrivateSwitch) and to
 #       Invoke-NetworkTeardown's attached-VMs-guarded removal.
 #     - NAT rules covering other subnets. Scoping is by network prefix,
 #       not name, so this function is safe to call once per environment

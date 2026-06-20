@@ -236,10 +236,10 @@ discovered via Hyper-V KVP after boot - inspect with
 | `dns`           | string | DNS server IP. On workloads this is the resolver (set to the router VM's `privateIpAddress`); on routers this is netplan's nameserver AND dnsmasq's upstream forwarder. **Topology note:** when the host is on Internal+ICS, set router `dns` to the **ICS gateway** (typically `192.168.137.1`), NOT a public resolver like `8.8.8.8` — ICS NAT for outbound UDP/53 to public IPs is unreliable, whereas the ICS gateway's built-in DNS proxy is a local hop. |
 | `vmConfigPath`  | string | Windows path where seed ISO is written             |
 | `vhdPath`       | string | Windows path where VHDX files are stored           |
-| `privateSwitchName`  | string  | Per-environment Hyper-V Private switch this VM attaches to. Required on both VM kinds (workloads attach their only NIC to it; router VMs attach their downstream NIC to it). Created on demand by `Ensure-PrivateSwitch` when absent. |
+| `privateSwitchName`  | string  | Per-environment Hyper-V Private switch this VM attaches to. Required on both VM kinds (workloads attach their only NIC to it; router VMs attach their downstream NIC to it). Created on demand by `Initialize-PrivateSwitch` when absent. |
 | `kind`          | string? | Optional. `"workload"` (default) or `"router"`. See [Router VM](#router-vm-kind-router). |
 | `externalSwitchName` | string | Required when `kind: router`. Host-bridged Hyper-V switch the router's upstream NIC attaches to; created on demand if absent (see `externalAdapterName`). |
-| `externalAdapterName`| string | Required when `kind: router`. Physical NIC the External switch binds to when `Ensure-ExternalSwitch` needs to create it. Ignored at runtime if the switch already exists. Find the name with `Get-NetAdapter`. |
+| `externalAdapterName`| string | Required when `kind: router`. Physical NIC the External switch binds to when `Initialize-ExternalSwitch` needs to create it. Ignored at runtime if the switch already exists. Find the name with `Get-NetAdapter`. |
 | `externalDhcp`  | bool?   | Optional, defaults to `true`. Addressing mode for the router VM's upstream NIC. `true` = DHCP from whatever LAN the host's External vSwitch is bridged to (portable across networks); `false` = static (requires `ipAddress` / `gateway`). Only meaningful when `kind: router`. |
 | `privateIpAddress`   | string | Required when `kind: router`. IP the router carries on its private-side NIC; downstream VMs use it as their default gateway and DNS server. Always static - no DHCP path can pre-commit a value workloads can be configured against. |
 | `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. Not supported on `kind: router`. See [Optional: install a JDK](#optional-install-a-jdk). |
@@ -678,7 +678,7 @@ switch). The wait-for-SSH timer covers both the DHCP-lease wait and
 the SSH-readiness wait under one 10-minute budget.
 
 `externalAdapterName` is the host's physical NIC the External switch
-will bind to when `Ensure-ExternalSwitch` needs to create it. Run
+will bind to when `Initialize-ExternalSwitch` needs to create it. Run
 `Get-NetAdapter` to see the available names on the host. If the
 External switch with the configured `externalSwitchName` already
 exists, this field is ignored at runtime.
@@ -1279,7 +1279,7 @@ Infrastructure-VM-Provisioner/
 |     |  |  |- New-DiagnosticSshClientWrapper.ps1 # Wraps the real SshClient with a tee-to-file logger covering the whole post-provisioning phase (writes ssh.log next to console.log).
 |     |  |  `- Set-EnvironmentVariables.ps1     # Step: writes a managed block of NAME="VALUE" lines into /etc/environment via Infrastructure.HyperV's Set-VmEnvironmentVariables
 |     |  |- network/
-|     |  |  `- setup-network.ps1               # Per-env wrapper around Remove-LegacySingletonNat; switch creation lives in Ensure-PrivateSwitch / Ensure-ExternalSwitch
+|     |  |  `- setup-network.ps1               # Per-env wrapper around Remove-LegacySingletonNat; switch creation lives in Initialize-PrivateSwitch / Initialize-ExternalSwitch
 |     |  |- seed/
 |     |  |  |- generate-seed-iso.ps1           # Builds cloud-init seed ISO
 |     |  |  |- New-StaticNetplanYaml.ps1       # Builds netplan v2 YAML for the VM's static NIC (embedded in user-data write_files)
