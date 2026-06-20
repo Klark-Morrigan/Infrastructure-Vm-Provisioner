@@ -36,11 +36,16 @@ function Invoke-VmCreation {
     Write-Host ""
     Write-Host "--- Creating VM: $($Vm.vmName) ---" -ForegroundColor Cyan
 
-    # Serial-console capture handle. Declared at function scope so the
-    # wait-for-SSH finally block can call Stop-SerialConsoleCapture even
-    # when Start-VM threw or the 'create + start' sub-step fails. See
+    # Serial-console capture handle, held in a [ref] box. The capture is
+    # started inside the 'create + start' sub-step, whose body runs via
+    # '& $Action' (a child scope) in Invoke-WithSubStepTimer; a plain
+    # variable assigned there would write to that child scope and never
+    # reach the wait-for-SSH teardown below. The [ref] is shared across
+    # scopes, so the teardown reads $consoleCapture.Value. Declared here
+    # so Stop-SerialConsoleCapture still runs when Start-VM threw or the
+    # sub-step failed before the capture started. See
     # Invoke-SerialConsoleCapture.ps1.
-    $consoleCapture = $null
+    $consoleCapture = [ref] $null
 
     # Phase split: 'create + start' covers everything up to and including
     # Start-VM (Hyper-V API work, typically sub-second). 'wait for SSH'
@@ -174,7 +179,7 @@ function Invoke-VmCreation {
                            -MaxAgeDays 7
     }
 
-    $consoleCapture = Start-SerialConsoleCapture `
+    $consoleCapture.Value = Start-SerialConsoleCapture `
                           -VmName       $Vm.vmName `
                           -VmConfigPath $Vm.vmConfigPath `
                           -Timestamp    $diagTimestamp
@@ -431,7 +436,7 @@ function Invoke-VmCreation {
         # may have thrown). The reader normally exits on its own when the
         # VM stops; this is belt-and-braces for the orchestrator-tears-
         # down-first case.
-        Stop-SerialConsoleCapture -Capture $consoleCapture
+        Stop-SerialConsoleCapture -Capture $consoleCapture.Value
 
         Remove-VmSeedIso -VmName $Vm.vmName -SeedIsoPath $Vm._seedIsoPath
     }
