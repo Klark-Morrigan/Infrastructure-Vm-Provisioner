@@ -1,3 +1,12 @@
+# PSAvoidOverwritingBuiltInCmdlets is suppressed file-wide: the BeforeAll
+# stubs deliberately shadow built-in cmdlets so Pester has a symbol to
+# mock and no call reaches the real host. This is the test-double seam,
+# not accidental shadowing.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+    'PSAvoidOverwritingBuiltInCmdlets', '',
+    Justification = 'Test stubs deliberately shadow built-ins as a Pester mock seam')]
+param()
+
 BeforeAll {
     # Stub every cmdlet that touches the network or real filesystem.
     # Individual tests override these with Mock; the BeforeAll bodies

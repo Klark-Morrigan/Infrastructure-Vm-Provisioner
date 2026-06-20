@@ -40,6 +40,14 @@
 
 function Assert-HostNetworkPreflight {
     [CmdletBinding()]
+    # Add-Finding (defined below) is an internal status/label/detail
+    # reporting DSL; its calls read as a compact PASS/WARN/FAIL table.
+    # Naming the three positional args at every call site would bloat
+    # that table for no readability gain, so the positional-parameter
+    # rule is suppressed for this function only.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSAvoidUsingPositionalParameters', '',
+        Justification = 'Add-Finding is an internal 3-arg reporting DSL')]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]

@@ -1,8 +1,26 @@
 BeforeAll {
-    function Get-NetNat          { param($ErrorAction) }
-    function Remove-NetNat       { param([string]$Name, [switch]$Confirm) }
-    function Get-NetIPAddress    { param([string]$IPAddress, $ErrorAction) }
-    function Remove-NetIPAddress { param([string]$IPAddress, [switch]$Confirm) }
+    # Stub the host-networking cmdlets the production script calls so the
+    # mocks have a command to shadow. The two -Confirm stubs declare a
+    # [switch]$Confirm only so Should -Invoke -ParameterFilter can assert
+    # callers pass -Confirm:$false. That bare $Confirm makes
+    # PSUseSupportsShouldProcess try to rewrite the function, and computing
+    # the rewrite extent for a function nested in this BeforeAll block
+    # crashes PSScriptAnalyzer 1.25.0 ("Reference Position should begin
+    # before start Position of Range"). The inline suppress sidesteps the
+    # analyzer bug while leaving the rule active everywhere else.
+    function Get-NetNat       { param($ErrorAction) }
+    function Get-NetIPAddress { param([string]$IPAddress, $ErrorAction) }
+
+    function Remove-NetNat {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+            'PSUseSupportsShouldProcess', '')]
+        param([string]$Name, [switch]$Confirm)
+    }
+    function Remove-NetIPAddress {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+            'PSUseSupportsShouldProcess', '')]
+        param([string]$IPAddress, [switch]$Confirm)
+    }
 
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\common\network\Remove-LegacySingletonNat.ps1"
 
