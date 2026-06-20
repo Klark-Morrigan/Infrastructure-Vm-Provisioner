@@ -1,3 +1,12 @@
+# PSAvoidGlobalVars is suppressed file-wide: the $global: invocation log
+# and global stub cmdlets are the only trackers that work here, because
+# the orchestrator's .GetNewClosure() scriptblock resolves commands
+# outside Pester's per-container scope (see the BeforeAll rationale).
+# A script-scoped tracker would be invisible to the closure's stubs.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '',
+    Justification = 'Pester v5 cross-scope mock-call trackers')]
+param()
+
 BeforeAll {
     # ---- Why this file uses global stubs instead of Pester Mock ------------
     # Invoke-VmPostProvisioning wraps its per-VM work in a scriptblock
@@ -106,6 +115,8 @@ BeforeAll {
     function global:New-VmSshClient {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
             'PSAvoidUsingPlainTextForPassword', 'Password')]
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+            'PSAvoidUsingUsernameAndPasswordParams', '')]
         param($IpAddress, $Username, $Password, $Timeout)
         $global:_PostProv_Calls['New-VmSshClient'] += @{
             IpAddress = $IpAddress

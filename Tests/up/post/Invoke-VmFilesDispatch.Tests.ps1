@@ -1,3 +1,12 @@
+# PSAvoidGlobalVars is suppressed file-wide: the $global: invocation log
+# and the global stub cmdlets below are the test-double trackers that
+# shadow the Infrastructure.HyperV module functions. Global scope is
+# required so the stubs and their log survive Pester v5's per-container
+# scope boundaries; a script-scoped tracker is not visible to the stubs.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '',
+    Justification = 'Pester v5 cross-scope mock-call trackers')]
+param()
+
 BeforeAll {
     # Stub the cmdlets Invoke-VmFilesDispatch resolves by name. In
     # production they come from the Infrastructure.HyperV module

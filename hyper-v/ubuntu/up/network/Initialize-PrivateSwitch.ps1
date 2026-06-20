@@ -5,7 +5,7 @@
 #>
 
 # ---------------------------------------------------------------------------
-# Ensure-PrivateSwitch
+# Initialize-PrivateSwitch
 #   Idempotently makes sure a Hyper-V Private switch named <Name> exists on
 #   the host. Used by feature 53 (router VM) so a router VM can attach its
 #   downstream NIC to a per-environment Private switch without each batch
@@ -38,7 +38,7 @@
 #       removed).
 # ---------------------------------------------------------------------------
 
-function Ensure-PrivateSwitch {
+function Initialize-PrivateSwitch {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]

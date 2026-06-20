@@ -34,6 +34,13 @@
 
 function Start-SerialConsoleCapture {
     [CmdletBinding()]
+    # The background reader scriptblock receives $pipeName/$logPath through
+    # its own param() block via -ArgumentList (see the Start-Job call), which
+    # is the explicit alternative to the $using: scope modifier. The analyzer
+    # cannot tell the two apart, so it false-positives here.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseUsingScopeModifierInNewRunspaces', '',
+        Justification = 'Job scriptblock takes values via param() + -ArgumentList')]
     param(
         [Parameter(Mandatory)]
         [string] $VmName,

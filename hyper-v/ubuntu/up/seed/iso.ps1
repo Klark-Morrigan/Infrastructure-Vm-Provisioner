@@ -17,7 +17,7 @@
 #     Files       - hashtable of { isoPath => content (string) }. Text files
 #                   are written UTF-8 without BOM (required by cloud-init).
 #
-#   The volume label is fixed to 'cidata' — that is the label cloud-init's
+#   The volume label is fixed to 'cidata' - that is the label cloud-init's
 #   NoCloud datasource scans for on all attached block devices at first boot.
 #
 #   A small C# shim (IsoStreamWriter) is compiled once per session via
@@ -67,7 +67,7 @@ public static class IsoStreamWriter {
     }
 
     # Write each cloud-init file to a temp directory so IMAPI2 can read them
-    # via AddTree. UTF-8 without BOM is required — a BOM in user-data causes
+    # via AddTree. UTF-8 without BOM is required - a BOM in user-data causes
     # cloud-init to reject the '#cloud-config' header and skip the file.
     $tempDir   = Join-Path $env:TEMP "seed-$(([System.Guid]::NewGuid().ToString('N')))"
     $utf8NoBom = [System.Text.UTF8Encoding]::new($false)

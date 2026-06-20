@@ -17,10 +17,10 @@
 #   because workload VMs also need it):
 #     - externalSwitchName  : Hyper-V switch the router's upstream NIC
 #                             attaches to. Created on demand by
-#                             Ensure-ExternalSwitch when absent; reused
+#                             Initialize-ExternalSwitch when absent; reused
 #                             when present.
 #     - externalAdapterName : Physical NIC the External switch binds to
-#                             when Ensure-ExternalSwitch needs to create
+#                             when Initialize-ExternalSwitch needs to create
 #                             it. Required at schema time because the
 #                             config layer cannot tell whether the
 #                             switch already exists; if it does, the

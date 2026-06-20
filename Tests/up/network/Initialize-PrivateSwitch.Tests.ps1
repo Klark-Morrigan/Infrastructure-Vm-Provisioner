@@ -4,10 +4,10 @@ BeforeAll {
     function Get-VMSwitch { param([string]$Name, $ErrorAction) }
     function New-VMSwitch { param([string]$Name, $SwitchType)  }
 
-    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\network\Ensure-PrivateSwitch.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\network\Initialize-PrivateSwitch.ps1"
 }
 
-Describe 'Ensure-PrivateSwitch' {
+Describe 'Initialize-PrivateSwitch' {
 
     # ------------------------------------------------------------------
     Context 'switch absent' {
@@ -17,7 +17,7 @@ Describe 'Ensure-PrivateSwitch' {
             Mock Get-VMSwitch { }
             Mock New-VMSwitch { }
 
-            Ensure-PrivateSwitch -Name 'PrivateSwitch-Production'
+            Initialize-PrivateSwitch -Name 'PrivateSwitch-Production'
 
             Should -Invoke New-VMSwitch -Times 1 -Exactly -ParameterFilter {
                 $Name -eq 'PrivateSwitch-Production' -and $SwitchType -eq 'Private'
@@ -33,7 +33,7 @@ Describe 'Ensure-PrivateSwitch' {
             Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'Private' } }
             Mock New-VMSwitch { }
 
-            Ensure-PrivateSwitch -Name 'PrivateSwitch-Production'
+            Initialize-PrivateSwitch -Name 'PrivateSwitch-Production'
 
             Should -Invoke New-VMSwitch -Times 0
         }
@@ -50,7 +50,7 @@ Describe 'Ensure-PrivateSwitch' {
             Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'Internal' } }
             Mock New-VMSwitch { }
 
-            { Ensure-PrivateSwitch -Name 'PrivateSwitch-Production' } |
+            { Initialize-PrivateSwitch -Name 'PrivateSwitch-Production' } |
                 Should -Throw -ExpectedMessage "*Internal*"
 
             Should -Invoke New-VMSwitch -Times 0
@@ -60,7 +60,7 @@ Describe 'Ensure-PrivateSwitch' {
             Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'External' } }
             Mock New-VMSwitch { }
 
-            { Ensure-PrivateSwitch -Name 'PrivateSwitch-Production' } |
+            { Initialize-PrivateSwitch -Name 'PrivateSwitch-Production' } |
                 Should -Throw -ExpectedMessage "*External*"
 
             Should -Invoke New-VMSwitch -Times 0
@@ -69,7 +69,7 @@ Describe 'Ensure-PrivateSwitch' {
         It 'includes the requested switch name in the error message' {
             Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'Internal' } }
 
-            { Ensure-PrivateSwitch -Name 'PrivateSwitch-Production' } |
+            { Initialize-PrivateSwitch -Name 'PrivateSwitch-Production' } |
                 Should -Throw -ExpectedMessage "*PrivateSwitch-Production*"
         }
     }

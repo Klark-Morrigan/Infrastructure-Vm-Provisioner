@@ -1,3 +1,12 @@
+# PSAvoidOverwritingBuiltInCmdlets is suppressed file-wide: the BeforeAll
+# stubs deliberately shadow built-in cmdlets so Pester has a symbol to
+# mock and no call reaches the real host. This is the test-double seam,
+# not accidental shadowing.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+    'PSAvoidOverwritingBuiltInCmdlets', '',
+    Justification = 'Test stubs deliberately shadow built-ins as a Pester mock seam')]
+param()
+
 BeforeAll {
     # New-SeedIso depends on IMAPI2FS (Windows COM server) and the
     # IsoStreamWriter C# shim compiled by Add-Type at runtime. Both are

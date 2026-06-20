@@ -445,7 +445,7 @@ Describe 'Assert-HostNetworkPreflight' {
             Initialize-HappyMocks
             Mock Get-VMSwitch { [PSCustomObject]@{ Name = 'ExternalSwitch-Shared'; SwitchType = 'External' } }
 
-            try { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } catch {}
+            try { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } catch { $null = $_ }
 
             Should -Invoke Test-HostNetworkProfileSetting -Times 0
         }

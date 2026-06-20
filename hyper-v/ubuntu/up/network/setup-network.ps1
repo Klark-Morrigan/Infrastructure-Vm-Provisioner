@@ -15,7 +15,7 @@
 #
 #   Switch creation and the actual NetNat / vNIC sweep both live elsewhere
 #   so the responsibilities are unambiguous:
-#     - Switch creation: Ensure-PrivateSwitch / Ensure-ExternalSwitch, called
+#     - Switch creation: Initialize-PrivateSwitch / Initialize-ExternalSwitch, called
 #       from the router-VM loop in provision.ps1.
 #     - Cleanup mechanics: Remove-LegacySingletonNat in
 #       common/network/Remove-LegacySingletonNat.ps1, shared with

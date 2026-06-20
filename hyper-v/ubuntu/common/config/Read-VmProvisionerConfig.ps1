@@ -69,5 +69,5 @@ function Read-VmProvisionerConfig {
     # -NoEnumerate so a single-VM config still arrives at the caller as
     # an array. A bare 'return $vmDefs' would unwrap the one-element
     # array and force every caller to remember the @(...) idiom.
-    Write-Output -NoEnumerate $vmDefs
+    Write-Output -NoEnumerate -InputObject $vmDefs
 }

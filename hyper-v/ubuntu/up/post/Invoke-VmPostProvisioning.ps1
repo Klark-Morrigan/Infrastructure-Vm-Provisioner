@@ -299,7 +299,7 @@ function Invoke-VmPostProvisioning {
                             -Entries   @($vmRef.files)
                     }
             }
-            
+
             # Reconciler dispatch. Get-Providers is parameterised by the
             # VM so each provider can capture VM-scoped state (e.g. the
             # JDK provider closes over _jdkTarballPath / _jdkResolvedVersion
@@ -369,7 +369,7 @@ function Invoke-VmPostProvisioning {
             # drops before the forwarded port closes. Safe to call
             # when the session was never opened ($sshSession is $null).
             if ($null -ne $sshSession) {
-                try { $sshSession.Dispose() } catch {}
+                try { $sshSession.Dispose() } catch { $null = $_ }
             }
         }
     }.GetNewClosure()

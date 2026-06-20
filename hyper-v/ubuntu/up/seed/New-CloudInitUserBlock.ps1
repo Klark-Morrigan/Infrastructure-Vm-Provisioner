@@ -34,6 +34,16 @@
 function New-CloudInitUserBlock {
     [CmdletBinding()]
     [OutputType([string])]
+    # cloud-init's plain_text_passwd field requires the literal password
+    # text, and the provisioner pipeline already carries it as a plain
+    # string (Get-Secret -AsPlainText). A [SecureString]/[PSCredential]
+    # here would be converted straight back to plain text to emit the
+    # YAML, adding ceremony with no security gain, so both credential
+    # rules are suppressed for this leaf function.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSAvoidUsingUsernameAndPasswordParams', '')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSAvoidUsingPlainTextForPassword', 'Password')]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]

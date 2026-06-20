@@ -5,14 +5,14 @@ BeforeAll {
     function New-VMSwitch   { param([string]$Name, $NetAdapterName, $AllowManagementOS) }
     function Get-NetAdapter { param([string]$Name, $ErrorAction) }
 
-    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\network\Ensure-ExternalSwitch.ps1"
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\network\Initialize-ExternalSwitch.ps1"
 
     function New-TestAdapter {
         [PSCustomObject]@{ Name = 'Ethernet'; Status = 'Up' }
     }
 }
 
-Describe 'Ensure-ExternalSwitch' {
+Describe 'Initialize-ExternalSwitch' {
 
     # ------------------------------------------------------------------
     Context 'switch absent' {
@@ -23,7 +23,7 @@ Describe 'Ensure-ExternalSwitch' {
             Mock Get-NetAdapter { New-TestAdapter }
             Mock New-VMSwitch   { }
 
-            Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet'
+            Initialize-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet'
 
             Should -Invoke New-VMSwitch -Times 1 -Exactly -ParameterFilter {
                 $Name              -eq 'ExternalSwitch-Shared' -and
@@ -39,7 +39,7 @@ Describe 'Ensure-ExternalSwitch' {
             Mock Get-NetAdapter { }
             Mock New-VMSwitch   { }
 
-            { Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet' } |
+            { Initialize-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet' } |
                 Should -Throw -ExpectedMessage "*Get-NetAdapter*"
 
             Should -Invoke New-VMSwitch -Times 0
@@ -49,7 +49,7 @@ Describe 'Ensure-ExternalSwitch' {
             Mock Get-VMSwitch   { }
             Mock Get-NetAdapter { }
 
-            { Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'WiFi-Custom' } |
+            { Initialize-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'WiFi-Custom' } |
                 Should -Throw -ExpectedMessage "*WiFi-Custom*"
         }
     }
@@ -66,7 +66,7 @@ Describe 'Ensure-ExternalSwitch' {
             Mock Get-NetAdapter { New-TestAdapter }
             Mock New-VMSwitch   { }
 
-            Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet'
+            Initialize-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet'
 
             Should -Invoke New-VMSwitch -Times 0
         }
@@ -76,7 +76,7 @@ Describe 'Ensure-ExternalSwitch' {
             Mock Get-NetAdapter { New-TestAdapter }
             Mock New-VMSwitch   { }
 
-            Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet'
+            Initialize-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet'
 
             Should -Invoke New-VMSwitch -Times 0
         }
@@ -89,7 +89,7 @@ Describe 'Ensure-ExternalSwitch' {
             Mock Get-NetAdapter { }
             Mock New-VMSwitch   { }
 
-            { Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'AnythingReally' } |
+            { Initialize-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'AnythingReally' } |
                 Should -Not -Throw
 
             Should -Invoke Get-NetAdapter -Times 0
@@ -106,7 +106,7 @@ Describe 'Ensure-ExternalSwitch' {
             Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'Private' } }
             Mock New-VMSwitch { }
 
-            { Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet' } |
+            { Initialize-ExternalSwitch -Name 'ExternalSwitch-Shared' -NetAdapterName 'Ethernet' } |
                 Should -Throw -ExpectedMessage "*Private*"
 
             Should -Invoke New-VMSwitch -Times 0
@@ -115,7 +115,7 @@ Describe 'Ensure-ExternalSwitch' {
         It 'includes the requested switch name in the error message' {
             Mock Get-VMSwitch { [PSCustomObject]@{ SwitchType = 'Private' } }
 
-            { Ensure-ExternalSwitch -Name 'ExternalSwitch-Shared-prod' -NetAdapterName 'Ethernet' } |
+            { Initialize-ExternalSwitch -Name 'ExternalSwitch-Shared-prod' -NetAdapterName 'Ethernet' } |
                 Should -Throw -ExpectedMessage "*ExternalSwitch-Shared-prod*"
         }
     }

@@ -91,7 +91,9 @@ function Invoke-VmRuntimeDiag {
             Out-File -FilePath $logPath -Append
     } finally {
         if ($null -ne $session) {
-            try { $session.Dispose() } catch { }
+            # Best-effort cleanup: a Dispose failure must not mask the
+            # original SSH error or the diag data already captured.
+            try { $session.Dispose() } catch { $null = $_ }
         }
     }
 

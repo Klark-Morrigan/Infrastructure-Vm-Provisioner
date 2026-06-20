@@ -43,11 +43,11 @@ dotnet-reportgenerator-globaltool       5.4.4        reportgenerator
     # returns ExitStatus 0. Tests override per-command via -ParameterFilter
     # to drive specific shapes (e.g. the list step needs Output populated).
     function New-SshResult {
-        param([int] $ExitStatus = 0, [string] $Output = '', [string] $Error = '')
+        param([int] $ExitStatus = 0, [string] $Output = '', [string] $ErrorText = '')
         [PSCustomObject]@{
             ExitStatus = $ExitStatus
             Output     = $Output
-            Error      = $Error
+            Error      = $ErrorText
         }
     }
 }
@@ -251,7 +251,7 @@ Describe 'Install-DotnetToolVersion' {
         It 'throws and skips install + manifest when staging fails' {
             Mock Invoke-SshClientCommand {
                 if ($Command -match 'curl') {
-                    New-SshResult -ExitStatus 1 -Error 'curl: (7) Failed to connect'
+                    New-SshResult -ExitStatus 1 -ErrorText 'curl: (7) Failed to connect'
                 } else {
                     New-SshResult
                 }
@@ -271,7 +271,7 @@ Describe 'Install-DotnetToolVersion' {
         It 'throws and skips list + symlink + manifest when dotnet tool install fails' {
             Mock Invoke-SshClientCommand {
                 if ($Command -match 'dotnet tool install') {
-                    New-SshResult -ExitStatus 1 -Error 'install error'
+                    New-SshResult -ExitStatus 1 -ErrorText 'install error'
                 } else {
                     New-SshResult
                 }
@@ -316,7 +316,7 @@ Describe 'Install-DotnetToolVersion' {
             # not a failure.
             Mock Invoke-SshClientCommand {
                 if ($Command -match 'rm -rf') {
-                    New-SshResult -ExitStatus 1 -Error 'rm: cannot remove'
+                    New-SshResult -ExitStatus 1 -ErrorText 'rm: cannot remove'
                 } elseif ($Command -match 'dotnet tool list') {
                     New-SshResult -Output $script:ListOutput
                 } else {

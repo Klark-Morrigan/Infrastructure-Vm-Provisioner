@@ -9,7 +9,7 @@ BeforeAll {
     function Remove-VmManifest       { param($SshClient, $Path) }
 
     function ConvertTo-Array {
-        param([Parameter(ValueFromPipeline)] $InputObject)
+        param($InputObject)
         if ($null -eq $InputObject) { return ,@() }
         return ,@($InputObject)
     }
@@ -63,8 +63,8 @@ BeforeAll {
     }
 
     function New-SshResult {
-        param([int] $ExitStatus = 0, [string] $Output = '', [string] $Error = '')
-        [PSCustomObject]@{ ExitStatus = $ExitStatus; Output = $Output; Error = $Error }
+        param([int] $ExitStatus = 0, [string] $Output = '', [string] $ErrorText = '')
+        [PSCustomObject]@{ ExitStatus = $ExitStatus; Output = $Output; Error = $ErrorText }
     }
 }
 
@@ -188,7 +188,7 @@ Describe 'Uninstall-DotnetToolVersion' {
             # the .store/ slot freeing is best-effort.
             Mock Invoke-SshClientCommand {
                 if ($Command -match 'dotnet tool uninstall') {
-                    New-SshResult -ExitStatus 1 -Error 'A tool with the package id ... could not be uninstalled'
+                    New-SshResult -ExitStatus 1 -ErrorText 'A tool with the package id ... could not be uninstalled'
                 } elseif ($Command -match 'readlink') {
                     New-SshResult -Output '/usr/local/share/dotnet/tools/reportgenerator'
                 } else {

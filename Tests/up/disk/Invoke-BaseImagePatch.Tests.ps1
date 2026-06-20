@@ -1,3 +1,12 @@
+# PSAvoidOverwritingBuiltInCmdlets is suppressed file-wide: the BeforeAll
+# stubs deliberately shadow built-in cmdlets so Pester has a symbol to
+# mock and no call reaches the real host. This is the test-double seam,
+# not accidental shadowing.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+    'PSAvoidOverwritingBuiltInCmdlets', '',
+    Justification = 'Test stubs deliberately shadow built-ins as a Pester mock seam')]
+param()
+
 BeforeAll {
     function Test-Path   { param($Path) }
     function New-Item    { param($ItemType, $Path, [switch]$Force) }
@@ -17,8 +26,10 @@ BeforeAll {
 
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\disk\Invoke-BaseImagePatch.ps1"
 
-    $BaseImage = 'C:\VHDs\ubuntu-24.04-server-cloudimg-amd64.vhdx'
-    $Sentinel  = 'C:\VHDs\ubuntu-24.04-server-cloudimg-amd64.image-patched-v4'
+    # script-scoped so the It blocks below can read them; Pester v5 shares
+    # BeforeAll script: variables with the container's tests.
+    $script:BaseImage = 'C:\VHDs\ubuntu-24.04-server-cloudimg-amd64.vhdx'
+    $script:Sentinel  = 'C:\VHDs\ubuntu-24.04-server-cloudimg-amd64.image-patched-v4'
 }
 
 Describe 'Invoke-BaseImagePatch' {

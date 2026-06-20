@@ -1,3 +1,12 @@
+# PSAvoidOverwritingBuiltInCmdlets is suppressed file-wide: the BeforeAll
+# stubs deliberately shadow built-in cmdlets so Pester has a symbol to
+# mock and no call reaches the real host. This is the test-double seam,
+# not accidental shadowing.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+    'PSAvoidOverwritingBuiltInCmdlets', '',
+    Justification = 'Test stubs deliberately shadow built-ins as a Pester mock seam')]
+param()
+
 BeforeAll {
     # Stub all Hyper-V and filesystem cmdlets unavailable outside a Hyper-V host.
     function Get-VM        { param($Name, [switch]$ErrorAction) }

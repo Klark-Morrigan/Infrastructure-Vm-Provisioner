@@ -40,6 +40,14 @@
 
 function Assert-HostNetworkPreflight {
     [CmdletBinding()]
+    # Add-Finding (defined below) is an internal status/label/detail
+    # reporting DSL; its calls read as a compact PASS/WARN/FAIL table.
+    # Naming the three positional args at every call site would bloat
+    # that table for no readability gain, so the positional-parameter
+    # rule is suppressed for this function only.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSAvoidUsingPositionalParameters', '',
+        Justification = 'Add-Finding is an internal 3-arg reporting DSL')]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -117,7 +125,7 @@ function Assert-HostNetworkPreflight {
     $sw = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
     if (-not $sw) {
         Add-Finding FAIL "VMSwitch '$SwitchName' exists" `
-            "Switch is missing. Expected to have been created by Ensure-ExternalSwitch, OR (if you migrated from External to Internal+ICS earlier) the switch was torn down by a Hyper-V service restart / Windows update. Recreate via: New-VMSwitch -Name '$SwitchName' -SwitchType Internal  (then re-enable ICS on WiFi -> vEthernet)."
+            "Switch is missing. Expected to have been created by Initialize-ExternalSwitch, OR (if you migrated from External to Internal+ICS earlier) the switch was torn down by a Hyper-V service restart / Windows update. Recreate via: New-VMSwitch -Name '$SwitchName' -SwitchType Internal  (then re-enable ICS on WiFi -> vEthernet)."
         # No point running downstream checks - they all depend on the switch.
         Assert-PreflightFindings -Findings $findings -SwitchName $SwitchName
         return
