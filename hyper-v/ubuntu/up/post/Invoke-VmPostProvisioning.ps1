@@ -299,7 +299,7 @@ function Invoke-VmPostProvisioning {
                             -Entries   @($vmRef.files)
                     }
             }
-            
+
             # Reconciler dispatch. Get-Providers is parameterised by the
             # VM so each provider can capture VM-scoped state (e.g. the
             # JDK provider closes over _jdkTarballPath / _jdkResolvedVersion
