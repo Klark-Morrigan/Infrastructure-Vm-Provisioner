@@ -80,7 +80,7 @@ function Remove-LegacySingletonNat {
 # Test-IpInPrefix
 #   Returns $true if $IpAddress falls inside the CIDR $Prefix
 #   (e.g. '192.168.1.0/24'). Pure function - no Hyper-V or networking
-#   cmdlets - so it is trivially unit-testable and safe to import into
+#   cmdlets - so it is side-effect-free and safe to import into
 #   any caller. Companion to Remove-LegacySingletonNat's prefix-based
 #   NetNat sweep.
 # ---------------------------------------------------------------------------

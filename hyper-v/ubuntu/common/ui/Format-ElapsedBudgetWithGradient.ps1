@@ -20,7 +20,7 @@
 #
 #   Returns a plain string the caller writes via Write-Host. Pure transform:
 #   no Write-Host, no Get-Date, no side effects. That keeps the helper
-#   trivially testable and lets the caller decide how (and whether) to
+#   a pure transform and lets the caller decide how (and whether) to
 #   render the result.
 # ---------------------------------------------------------------------------
 function Format-ElapsedBudgetWithGradient {

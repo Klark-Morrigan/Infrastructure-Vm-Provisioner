@@ -26,9 +26,9 @@ function Read-VmProvisionerConfig {
     param(
         # Required. The secret read is `VmProvisionerConfig-<SecretSuffix>`.
         # The suffix is the lifecycle / environment label - operator
-        # invocations pass `Production`; ephemeral fixtures (parallel
-        # workflows, test harnesses, multi-tenant deployments) pass
-        # their own label. Mandatory so a caller cannot silently fall
+        # invocations pass `Production`; ephemeral environments (parallel
+        # workflows, multi-tenant deployments) pass their own label.
+        # Mandatory so a caller cannot silently fall
         # through to a default name and collide with another lifecycle's
         # data.
         [Parameter(Mandatory)]

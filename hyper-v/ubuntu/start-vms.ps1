@@ -79,7 +79,7 @@ $vmDefs = Read-VmProvisionerConfig -SecretSuffix $SecretSuffix
 #    $transitions; failures land in $failed with the original exception
 #    message. Both accumulators are initialised to @() outside the loop -
 #    using an `if` expression here would yield $null on an empty match
-#    under strict mode (Pester-5 unrolling trap).
+#    under strict mode, so the explicit @() keeps them arrays.
 # ---------------------------------------------------------------------------
 
 $transitions = @()

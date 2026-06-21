@@ -26,8 +26,7 @@
 #   Invoke-JdkAcquisition onto $Vm._jdkTarballPath / $Vm._jdkResolvedVersion;
 #   the Get-JdkProvider wrapper closes over the Vm and forwards them.
 #   This keeps the Spec shape pure (parsed from JSON, no transient state)
-#   and lets the unit test mock the primitives without reaching for VM
-#   state.
+#   and confines the VM-scoped transient state to the wrapper's closure.
 #
 #   Uses Infrastructure.HyperV 0.9.0 primitives end to end - no inline
 #   bash here, so any future change to the on-VM mechanics (e.g. moving

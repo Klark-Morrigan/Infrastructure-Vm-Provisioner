@@ -12,11 +12,12 @@
 #   Microsoft's release-metadata channel feed.
 #
 #   Pure helper: no disk writes, no caching, no lockfile reads. Lives in
-#   its own file so it can be unit-tested in isolation.
+#   its own file so the resolution logic stays a self-contained unit.
 #
 #   The HTTP call is delegated to Invoke-DotnetSdkReleasesJson below.
-#   Wrapping it in a separate function gives tests a single seam to Mock
-#   instead of having to stub Invoke-RestMethod globally.
+#   Wrapping it in a separate function isolates the single outbound HTTP
+#   call behind one named boundary, keeping this resolver pure parsing
+#   logic.
 # ---------------------------------------------------------------------------
 
 # Microsoft's release-metadata host. Constant rather than literal so the
@@ -38,9 +39,9 @@ function Get-DotnetSdkReleasesUrl {
 
 function Invoke-DotnetSdkReleasesJson {
     # Thin wrapper around Invoke-RestMethod for the releases.json feed.
-    # Exists purely as a Mock seam for tests - the resolver does not call
-    # Invoke-RestMethod directly so tests do not need a global network
-    # stub. Wrapped in Invoke-WithRetry with the transient-network
+    # Isolates the lone network call behind one named boundary so the
+    # resolver above stays pure parsing logic with no direct HTTP
+    # dependency. Wrapped in Invoke-WithRetry with the transient-network
     # strategy so DNS / connectivity blips do not fail a provision run;
     # 4xx responses (e.g. an unknown channel) propagate immediately.
     [CmdletBinding()]

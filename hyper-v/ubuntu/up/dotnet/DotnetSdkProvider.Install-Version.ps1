@@ -61,7 +61,7 @@ function Install-DotnetSdkVersion {
         # caller (Get-DotnetSdkProvider) is responsible for resolving
         # the per-Vm child entry list via Get-VmDotnetToolChildren and
         # forwarding it here. Default empty so existing call sites
-        # (and SDK-only fixtures) stay unaffected.
+        # (SDK-only callers with no tool children) stay unaffected.
         [AllowEmptyCollection()]
         [object[]] $ChildEntries = @()
     )

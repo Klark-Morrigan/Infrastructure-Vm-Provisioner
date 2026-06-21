@@ -100,7 +100,7 @@ function Get-DotnetSdkDesiredVersions {
 
     # v1 hard-cap mirrors Assert-DotnetSdkField. Defensive: the validator
     # should have caught this already, but the provider may be invoked
-    # in test harnesses that bypass schema validation.
+    # through a path that bypasses schema validation.
     if ($entries.Count -gt 1) {
         throw (
             "dotnetSdk v1 supports one SDK per VM; got $($entries.Count) " +

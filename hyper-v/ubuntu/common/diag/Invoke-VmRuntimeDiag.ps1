@@ -36,9 +36,9 @@
 #   Invoke-SerialConsoleCapture and Invoke-CloudInitDiagnostics, so
 #   all per-run artifacts land in one folder.
 #
-#   Split into three functions so the host-side capture can be
-#   tested in isolation (no SSH stubbing needed) and the orchestrator
-#   wiring can be tested by mocking the two halves.
+#   Split into three functions so the host-side capture stays isolated
+#   from the SSH transport and the orchestrator just wires the two
+#   halves together.
 # ---------------------------------------------------------------------------
 
 function Invoke-VmRuntimeDiag {

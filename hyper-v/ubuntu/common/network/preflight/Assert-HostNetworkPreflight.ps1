@@ -109,9 +109,9 @@ function Assert-HostNetworkPreflight {
     #    silently returns nothing, which the rest of the script
     #    would misread as "switch missing". Catching it here gives
     #    the operator an actionable error instead of a misleading
-    #    one. Delegates to Test-IsCurrentSessionElevated so tests
-    #    can mock the admin state without invoking the real
-    #    WindowsPrincipal API.
+    #    one. Delegates to Test-IsCurrentSessionElevated so the
+    #    elevation check sits behind one named predicate instead of a
+    #    raw WindowsPrincipal call inline here.
     if (-not (Test-IsCurrentSessionElevated)) {
         Add-Finding FAIL "PowerShell session is elevated" `
             "Hyper-V and Get-Net* cmdlets need admin (or Hyper-V Administrators group). Re-run from an elevated PowerShell."

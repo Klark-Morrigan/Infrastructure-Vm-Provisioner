@@ -26,7 +26,7 @@
 #   with more than one entry is a hard error here (same v1 cap the
 #   provider's Get-DesiredVersions enforces).
 #
-#   Lives in its own file so the rule set is independently testable and
+#   Lives in its own file so the rule set stays self-contained and
 #   ConvertFrom-VmConfigJson.ps1 stays a thin orchestrator.
 #
 #   Strict-by-design: unknown sub-fields throw. This catches silent typos

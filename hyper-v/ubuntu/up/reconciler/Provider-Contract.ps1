@@ -96,7 +96,7 @@ function Assert-ToolchainProvider {
     }
 
     # Accept both PSCustomObject (the common composition shape) and
-    # hashtable (handy for tests and ad-hoc registrations).
+    # hashtable (handy for ad-hoc / inline registrations).
     $isHashtable    = $Provider -is [hashtable]
     $isPsCustomObj  = $Provider -is [System.Management.Automation.PSCustomObject]
     if (-not ($isHashtable -or $isPsCustomObj)) {
