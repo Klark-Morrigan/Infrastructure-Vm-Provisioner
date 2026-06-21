@@ -18,9 +18,9 @@
 #   is exactly what diagnoses the failure modes that motivated this
 #   helper:
 #     - WiFi-on-External MAC collision (host vNIC and VM both bound
-#       to the same IP - hyperv-external-switch-wifi memory)
+#       to the same IP)
 #     - ICS-on-Internal DHCP drift (VM cycling through ICS leases on
-#       every netplan reapply - hyperv-internal-plus-ics memory)
+#       every netplan reapply)
 #   Both show up at a glance in Get-VMNetworkAdapter / Get-NetNeighbor
 #   / arp -a side by side.
 #

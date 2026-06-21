@@ -401,8 +401,8 @@ test surface small.
   (new) - reads `$VmConfig.dotnetTools` and returns one Spec per
   entry. Spec carries: `Name` (`'{id}@{version}'`), `Id`, `Version`,
   `NupkgPath` (from `$Vm._dotnetToolNupkgPaths`). Empty / absent
-  field returns `@()`. `return ,@()` form per the memory note on
-  empty-array unrolling.
+  field returns `@()`, in the `return ,@()` form so it does not unroll
+  to `$null` through a call-operator closure.
 - `hyper-v/ubuntu/up/dotnet/DotnetToolsProvider.Get-InstalledVersions.ps1`
   (new) - SSH-side: lists
   `/var/lib/infra-provisioner/manifests/dotnetTool-*.json` and

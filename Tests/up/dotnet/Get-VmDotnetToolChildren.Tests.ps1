@@ -8,8 +8,8 @@ BeforeAll {
 # value (the array itself) as one element rather than enumerating
 # its contents. Existing tests on sister functions (e.g.
 # Get-DotnetToolsDesiredVersions) follow the same `$x = call; @($x).Count`
-# pattern - see the empty-array memory note for the producer-side
-# rationale behind the comma operator.
+# pattern - the comma operator in the producer keeps a bare `return @()`
+# from unrolling to $null through the SDK provider's call-operator closure.
 
 Describe 'Get-VmDotnetToolChildren' {
 
@@ -43,9 +43,8 @@ Describe 'Get-VmDotnetToolChildren' {
     It 'survives the call-operator path without unrolling to $null' {
         # Get-DotnetSdkProvider invokes this helper via `& $childEntriesFn`
         # at composition time. A bare `return @()` would unroll to $null
-        # through that path (see feedback_powershell_return_empty_array
-        # memory) - the children manifest field would then be $null
-        # instead of an empty array, surprising the walker. This test
+        # through that path - the children manifest field would then be
+        # $null instead of an empty array, surprising the walker. This test
         # pins the closure-safe behaviour rather than just the direct-call
         # behaviour above.
         $vm      = [PSCustomObject]@{ vmName = 'node-01' }

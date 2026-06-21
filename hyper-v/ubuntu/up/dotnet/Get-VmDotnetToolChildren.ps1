@@ -30,10 +30,9 @@
 #   is '/var/lib/infra-provisioner/manifests/dotnetTools-{id}-{rawVersion}.json'.
 #
 #   Returns @() (comma-operator wrapped to survive call-operator unrolling
-#   in the SDK provider's closure - see feedback_powershell_return_empty_array
-#   memory) for any VM that has no dotnetTools field, has it set to null,
-#   or has it as an empty array. Operator entries are declaration-order-
-#   preserving.
+#   in the SDK provider's closure) for any VM that has no dotnetTools
+#   field, has it set to null, or has it as an empty array. Operator
+#   entries are declaration-order-preserving.
 # ---------------------------------------------------------------------------
 function Get-VmDotnetToolChildren {
     [CmdletBinding()]
