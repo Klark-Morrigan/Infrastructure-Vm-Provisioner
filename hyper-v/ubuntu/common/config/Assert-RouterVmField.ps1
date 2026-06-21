@@ -33,22 +33,50 @@
 #
 #   Optional:
 #     - externalDhcp        : addressing mode for the upstream (ext0)
-#                             NIC. Defaults to $true (DHCP). Set $false
-#                             to pin a static address - typically for
-#                             a fixed-workstation deployment whose LAN
-#                             never changes. When $false,
-#                             ipAddress/subnetMask/gateway from the base
-#                             schema become REQUIRED here; when $true,
-#                             they are ignored if present (DHCP supplies
-#                             everything ext0 needs).
+#                             NIC. Defaults to $false (static). When $false
+#                             or absent, ipAddress/gateway become REQUIRED
+#                             here (subnetMask lives in the base schema);
+#                             when $true they are ignored if present (DHCP
+#                             supplies everything ext0 needs).
 #
-#                             Default of $true exists because the host's
-#                             External vSwitch is often Wi-Fi-bridged
-#                             on a mobile workstation, and a static IP
-#                             on the wrong LAN leaves the router with
-#                             no upstream connectivity. DHCP picks up
-#                             whichever LAN is currently bridged and
-#                             "just works" across networks.
+#                             The right mode depends on the External
+#                             vSwitch topology, and the two cases invert:
+#                               - Internal + ICS vSwitch (the default, and
+#                                 the only validated host topology): ICS
+#                                 always owns 192.168.137.0/24 regardless
+#                                 of the upstream Wi-Fi, so a static ext0
+#                                 on that subnet is stable across roams -
+#                                 and ICS's own DHCP allocator is the flaky
+#                                 part (it reassigns the lease, stranding
+#                                 the provisioner's cached jump-host IP).
+#                                 DHCP-on-ICS is unsupported; the
+#                                 production secret pins a static ext0.
+#                                 See the README's Networking section.
+#                               - Bridged-Wi-Fi/Ethernet External vSwitch:
+#                                 ext0 sits directly on the physical LAN,
+#                                 whose subnet changes per location. A
+#                                 static IP lands on the wrong LAN after a
+#                                 move, so this topology opts into DHCP
+#                                 (externalDhcp=true) to pick up whichever
+#                                 LAN is currently bridged.
+#
+#                             Default $false makes the working topology the
+#                             default; a bridged deployment opts into DHCP
+#                             explicitly.
+#
+#   TODO(dhcp-unfinished): externalDhcp=true (the bridged-External path)
+#     is NOT a finished, validated feature. It exists in the schema, the
+#     seed (Invoke-RouterSeedIsoGeneration), the create-vm KVP discovery,
+#     and Select-VmsForProvisioning, but has never worked end-to-end - the
+#     bridged-Wi-Fi External switch it targets never reached its upstream
+#     gateway (duplicate-IP via shared MAC; see the README's Networking
+#     section), and no E2E scenario
+#     exercises it. Only static ext0 on Internal+ICS is supported and
+#     tested. Until a bridged deployment is validated end-to-end and
+#     covered by E2E, externalDhcp=true is REJECTED outright by the gate
+#     below (so it cannot enter the secret JSON or be provisioned). This
+#     note is the single source for that status; the DHCP code branches
+#     point here rather than repeating it.
 #
 #   Rejected:
 #     - javaDevKit, dotnetSdk, dotnetTools - a router VM is intentionally
@@ -78,35 +106,65 @@ function Assert-RouterVmField {
         }
     }
 
-    # externalDhcp defaults to $true. The default is captured in
-    # provision-time code (Invoke-RouterSeedIsoGeneration consults the
-    # field) so we don't mutate $Vm here - keeps the validator pure
-    # (no side effects on its input) and the default decision in one
-    # place. Tests pass $Vm in both shapes (field present or absent).
-    $externalDhcp = if ($Vm.PSObject.Properties['externalDhcp']) {
-        # Booleans round-trip from JSON as System.Boolean already; the
-        # type cast is defensive against operators writing "true" /
-        # "false" as strings (still parses).
-        [bool] $Vm.externalDhcp
-    } else { $true }
+    # externalDhcp, when supplied, must be a real JSON boolean. This guard
+    # inspects the RAW property on purpose - NOT via
+    # Test-RouterUsesExternalDhcp, whose [bool] cast would coerce a quoted
+    # "false" (or a number) to $true and mask the bad type, the exact
+    # footgun we are rejecting. The helper resolves the value just below,
+    # once this guard has proven it is a real boolean. Reject a non-boolean
+    # here so the malformed config fails fast with a directed message
+    # instead of being coerced the wrong way.
+    if ($Vm.PSObject.Properties['externalDhcp'] -and
+        $Vm.externalDhcp -isnot [bool]) {
+        $actual = if ($null -eq $Vm.externalDhcp) {
+            'null'
+        } else {
+            $Vm.externalDhcp.GetType().Name
+        }
+        throw (
+            "${ctx}.externalDhcp must be a JSON boolean (true or false), " +
+            "not $actual. If you wrote it as a quoted string, remove the quotes."
+        )
+    }
 
-    if (-not $externalDhcp) {
-        # Static-mode requires the two ext0-specific fields workloads
-        # always use. subnetMask is universal (it lives in the base
-        # required-field set; the router uses it for priv0 even under
-        # DHCP) so it is not gated here.
-        foreach ($field in @('ipAddress', 'gateway')) {
-            if (-not $Vm.PSObject.Properties[$field]) {
-                throw (
-                    "${ctx} has externalDhcp=false but is missing required " +
-                    "static-address field '$field'."
-                )
-            }
-            $value = $Vm.$field
-            if ($null -eq $value -or
-                ($value -is [string] -and [string]::IsNullOrWhiteSpace($value))) {
-                throw "${ctx}.$field must be a non-empty string."
-            }
+    # externalDhcp defaults to $false; Test-RouterUsesExternalDhcp owns
+    # that default so the validator, the seed generator, and
+    # Select-VmsForProvisioning cannot drift. The type guard above
+    # guarantees a real boolean reaches it. We do not mutate $Vm here -
+    # the validator stays pure (no side effects on its input).
+    $externalDhcp = Test-RouterUsesExternalDhcp -Vm $Vm
+
+    # Hard gate: DHCP mode is unfinished/unsupported (see the
+    # dhcp-unfinished TODO above), so reject externalDhcp=true outright at
+    # schema time. This validator runs from BOTH setup-secrets.ps1 (before
+    # the config is stored in the vault) and provision.ps1 (when it is read
+    # back), so a DHCP router cannot enter the secret JSON in the first
+    # place, nor be provisioned if one already exists. Lift this gate when
+    # the bridged-External path is validated end-to-end and covered by E2E.
+    if ($externalDhcp) {
+        throw (
+            "${ctx} has externalDhcp=true, but DHCP mode is unfinished and " +
+            "unsupported - it has never worked end-to-end. Use static " +
+            "addressing (omit externalDhcp, or set it false) with ipAddress " +
+            "and gateway. See Assert-RouterVmField's externalDhcp note."
+        )
+    }
+
+    # Only static (the supported mode) reaches here. It requires the two
+    # ext0-specific fields workloads always use. subnetMask is universal
+    # (it lives in the base required-field set; the router uses it for
+    # priv0) so it is not gated here.
+    foreach ($field in @('ipAddress', 'gateway')) {
+        if (-not $Vm.PSObject.Properties[$field]) {
+            throw (
+                "${ctx} has externalDhcp=false (static, the default) " +
+                "but is missing required static-address field '$field'."
+            )
+        }
+        $value = $Vm.$field
+        if ($null -eq $value -or
+            ($value -is [string] -and [string]::IsNullOrWhiteSpace($value))) {
+            throw "${ctx}.$field must be a non-empty string."
         }
     }
 

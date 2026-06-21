@@ -16,8 +16,7 @@
 #     3. Switch-type expectations:
 #          External - WARN on MAC sharing with a physical Wi-Fi NIC
 #                     (expected when bridging Wi-Fi, but vulnerable to
-#                      AP-side DHCP collision - see
-#                      hyperv-external-switch-wifi memory).
+#                      AP-side DHCP collision).
 #          Internal - FAIL on MAC sharing (Internal switches give the
 #                     host its own private L3 via ICS; a shared MAC is
 #                     a stale-config smell from an unfinished
@@ -170,6 +169,7 @@ function Assert-HostNetworkPreflight {
         } elseif ($vIp) {
             Add-Finding PASS "ICS host IP = 192.168.137.1" "Matches ICS default."
         }
+
         if ($vAdapter -and $wifi) {
             $matched = @($wifi | Where-Object { $_.MacAddress -eq $vAdapter.MacAddress })
             if ($matched.Count -gt 0) {
@@ -195,7 +195,7 @@ function Assert-HostNetworkPreflight {
                 # no "lucky AP" workaround stable enough to recommend.
                 # Internal + ICS is the durable Wi-Fi answer.
                 Add-Finding FAIL "External switch bridged to WiFi" `
-                    "vEthernet shares MAC with WiFi adapter '$($sharedMacWifi.Name)'. Hyper-V External-on-WiFi MAC-translates all egress to one MAC, so the AP gives the host vNIC and every VM the same DHCP lease and they collide on the same IP. Recreate the switch as Internal + enable Windows ICS - see feedback_hyperv_internal_plus_ics memory."
+                    "vEthernet shares MAC with WiFi adapter '$($sharedMacWifi.Name)'. Hyper-V External-on-WiFi MAC-translates all egress to one MAC, so the AP gives the host vNIC and every VM the same DHCP lease and they collide on the same IP. Recreate the switch as Internal + enable Windows ICS (see the README's Networking section)."
             }
         }
     } else {

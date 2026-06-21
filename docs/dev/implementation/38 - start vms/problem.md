@@ -51,12 +51,10 @@ results, surface failures).
 identical bootstrap (SecretManagement provider-module import + vault
 existence check + `Get-Secret` + `ConvertFrom-VmConfigJson` + the
 "[OK] Config validated" line). Landing `start-vms.ps1` without
-addressing this would make it a third copy and lock the divergence in;
-the right move per
-[CLAUDE.md - Other rules](../../../../../../../Users/Klark%20Morgan/.claude/CLAUDE.md)
-("Prefer single sources of truth over duplication. Prefer minimal
-diffs over large refactors.") is to extract the helper now, while
-there are only two callers to retrofit.
+addressing this would make it a third copy and lock the divergence in.
+Preferring a single source of truth over duplication (and a minimal
+diff over a large refactor), the right move is to extract the helper
+now, while there are only two callers to retrofit.
 
 New file
 [hyper-v/ubuntu/common/config/Read-VmProvisionerConfig.ps1](../../../../hyper-v/ubuntu/common/config/Read-VmProvisionerConfig.ps1)

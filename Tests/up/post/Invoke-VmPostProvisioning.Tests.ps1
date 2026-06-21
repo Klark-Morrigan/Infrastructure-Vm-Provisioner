@@ -51,7 +51,7 @@ BeforeAll {
         'Initialize-VmManifestStore'       = @()
         'Get-Providers'                    = @()
         'Invoke-ToolchainReconciliation'   = @()
-        'Assert-RouterServicesActive'      = @()
+        'Assert-RouterReady'      = @()
     }
     function global:Reset-PostProvCallLog {
         foreach ($k in @($global:_PostProv_Calls.Keys)) {
@@ -308,13 +308,14 @@ BeforeAll {
             }
         }
     }
-    # Router-only service check the orchestrator runs after
+    # Router-only readiness check the orchestrator runs after
     # cloud-init wait. Stubbed at global scope and tracked so tests
     # can assert it fires for routers AND does not fire for workloads.
-    function global:Assert-RouterServicesActive {
-        param($SshClient, $VmName, $RequiredServices)
-        $global:_PostProv_Calls['Assert-RouterServicesActive'] += @{
+    function global:Assert-RouterReady {
+        param($SshClient, $VmName, $PrivateIpAddress, $RequiredServices)
+        $global:_PostProv_Calls['Assert-RouterReady'] += @{
             VmName           = $VmName
+            PrivateIpAddress = $PrivateIpAddress
             RequiredServices = $RequiredServices
         }
     }
@@ -348,10 +349,12 @@ BeforeAll {
     function New-RouterVm {
         # Minimal router VM def: no files / javaDevKit / envVars
         # (routers do not get any opt-in fields by design) but with
-        # kind='router'. Mirrors what New-RouterEntry produces in the
-        # E2E test path - schema-valid for the orchestrator to act on.
+        # kind='router' and privateIpAddress (Assert-RouterReady reads
+        # it to verify priv0). Mirrors what New-RouterEntry produces in
+        # the E2E test path - schema-valid for the orchestrator to act on.
         $vm = New-PlainVm
         $vm | Add-Member -NotePropertyName 'kind' -NotePropertyValue 'router' -Force
+        $vm | Add-Member -NotePropertyName 'privateIpAddress' -NotePropertyValue '10.10.0.1' -Force
         $vm
     }
 
@@ -480,7 +483,7 @@ Describe 'Invoke-VmPostProvisioning' {
     Context 'router VMs (kind = router)' {
         # Router VMs intentionally have no files / javaDevKit /
         # envVars; the per-field early-return must NOT short-
-        # circuit on them because Assert-RouterServicesActive
+        # circuit on them because Assert-RouterReady
         # is the fail-fast gate for the seed's nftables / dnsmasq
         # services. Without these tests, the 2026-06 regression
         # where the strict check silently never ran could come
@@ -494,20 +497,21 @@ Describe 'Invoke-VmPostProvisioning' {
             # don't apply, so we assert specifically on the
             # router-only check that's the reason post runs at all.
             $global:_PostProv_Calls['Invoke-WithVmFileServer'].Count | Should -BeGreaterThan 0
-            $global:_PostProv_Calls['Assert-RouterServicesActive'].Count | Should -Be 1
+            $global:_PostProv_Calls['Assert-RouterReady'].Count | Should -Be 1
         }
 
-        It 'calls Assert-RouterServicesActive with the router vmName' {
+        It 'calls Assert-RouterReady with the router vmName and privateIpAddress' {
             Invoke-VmPostProvisioning -Vm (New-RouterVm)
 
-            $call = $global:_PostProv_Calls['Assert-RouterServicesActive'][0]
-            $call.VmName | Should -Be 'node-01'
+            $call = $global:_PostProv_Calls['Assert-RouterReady'][0]
+            $call.VmName           | Should -Be 'node-01'
+            $call.PrivateIpAddress | Should -Be '10.10.0.1'
         }
 
-        It 'does NOT call Assert-RouterServicesActive for a workload VM' {
+        It 'does NOT call Assert-RouterReady for a workload VM' {
             Invoke-VmPostProvisioning -Vm (New-VmWithJdk)
 
-            $global:_PostProv_Calls['Assert-RouterServicesActive'].Count | Should -Be 0
+            $global:_PostProv_Calls['Assert-RouterReady'].Count | Should -Be 0
         }
     }
 

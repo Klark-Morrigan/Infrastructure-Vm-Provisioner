@@ -55,8 +55,8 @@ function Get-ProvisioningPlan {
     )
 
     # Normalise installed to a concrete array so a single-element pipeline
-    # does not scalar-unwrap under strict mode (Pester memory note:
-    # single-match pipeline .Count). $null entries are filtered out for
+    # does not scalar-unwrap under strict mode. $null entries are filtered
+    # out for
     # the same reason - a hashtable-shaped record without a value yields
     # $null on dot-access which would break the Provider check below.
     $installed = @($InstalledVersions | Where-Object { $null -ne $_ })

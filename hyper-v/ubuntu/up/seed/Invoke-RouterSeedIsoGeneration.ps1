@@ -117,28 +117,29 @@ function Invoke-RouterSeedIsoGeneration {
     # entries share one `network: / version: 2 / ethernets:` header.
     #
     # The external NIC has two modes:
-    #   - externalDhcp $true (the schema default): emit a minimal DHCP
-    #     entry. The router picks up whatever LAN the host's External
-    #     vSwitch is bridged to, so changing networks (operator moves
-    #     between Wi-Fi hotspots / different office VLANs) does not
-    #     require re-pinning the seed. The router's own DNS resolution
-    #     comes from DHCP; the router VM's `dns` field is used by
-    #     dnsmasq's upstream forwarder, not by ext0's resolver.
-    #   - externalDhcp $false: full static via New-StaticNetplanYaml,
-    #     same shape workload VMs use. The validator requires
-    #     ipAddress / subnetMask / gateway in that mode.
+    #   - externalDhcp $true (opt-in for a bridged-Wi-Fi External
+    #     vSwitch): emit a minimal DHCP entry. The router picks up
+    #     whatever LAN the host is bridged to, so changing networks
+    #     (operator moves between Wi-Fi hotspots / different office VLANs)
+    #     does not require re-pinning the seed. The router's own DNS
+    #     resolution comes from DHCP; the router VM's `dns` field is used
+    #     by dnsmasq's upstream forwarder, not by ext0's resolver. NOT
+    #     valid on an Internal+ICS switch (ICS reassigns the lease,
+    #     stranding the cached jump IP).
+    #   - externalDhcp $false (the default): full static via
+    #     New-StaticNetplanYaml, same shape workload VMs use. The
+    #     validator requires ipAddress / gateway in that mode.
     #
     # The private NIC is always static and carries neither gateway nor
     # nameservers - it IS the gateway and resolver for downstream VMs.
     # ------------------------------------------------------------------
-    $externalDhcp = if ($Vm.PSObject.Properties['externalDhcp']) {
-        [bool] $Vm.externalDhcp
-    } else { $true }
+    $externalDhcp = Test-RouterUsesExternalDhcp -Vm $Vm
 
     if ($externalDhcp) {
         # Minimal DHCP entry. Same indentation as New-StaticNetplanYaml
         # produces - the wrapper below assumes four-space indent on the
-        # interface key line.
+        # interface key line. NOTE: this path is unvalidated - see the
+        # dhcp-unfinished TODO in Assert-RouterVmField's externalDhcp note.
         $extEntry = @"
     ext0:
       match:
@@ -291,9 +292,9 @@ RestartSec=5
     # window (the diag history captured "Temporary failure
     # resolving" against an apt request seconds after `getent`
     # against the SAME host succeeded). Pointing at the ICS proxy
-    # sidesteps the NAT entirely - see
-    # feedback_router_seed_resolvconf_bypass memory for the deeper
-    # write-up of the broken path we abandoned.
+    # sidesteps the NAT entirely; writing public resolvers straight into
+    # /etc/resolv.conf (bypassing the stub) does NOT help - the breakage
+    # is in the NAT path itself, not the resolver layer.
     #
     # DNS-ready poll: belt-and-suspenders sanity check that at
     # least one resolver answers before firing apt. `timeout 120`

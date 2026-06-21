@@ -91,9 +91,9 @@ the symptom above:
    Putting cloud-init in the loop adds a regenerator we do not need
    and cannot easily silence after the fact.
 
-The relevant memory ([feedback_hyperv_nat_remoteaccess](../../../../../../.claude/projects/c--a-Code-Common-PowerShell/memory/feedback_hyperv_nat_remoteaccess.md))
-covers the converse case (don't auto-heal host networking from the
-provisioner); this problem is entirely VM-side and is fair game.
+A related but distinct concern is the converse case - don't auto-heal
+host networking from the provisioner; this problem is entirely VM-side
+and is fair game.
 
 ## What needs to change
 

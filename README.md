@@ -207,19 +207,24 @@ router. The two VMs sit on the same `privateSwitchName`. See
 [Networking](#networking) for the full topology and
 [Router VM](#router-vm-kind-router) for the router-specific fields.
 
-Router VMs do not carry `ipAddress` / `gateway` in the default
-`externalDhcp: true` mode shown above - the upstream NIC gets its
-address from whatever LAN the host's External vSwitch is currently
-bridged to, so the same config keeps working when the operator
-moves the workstation between networks. Set `externalDhcp: false`
-to pin a static; the two fields become required again. Workload VMs
-always require both because their gateway is a config-time choice
-(see the table below).
+Router VMs default to a static upstream (`externalDhcp: false`), so
+they require `ipAddress` / `gateway` like workloads. Static is the
+default because the only validated host topology - Internal + ICS -
+keeps a fixed `192.168.137.0/24` subnet across Wi-Fi roams, so a
+pinned ext0 is stable while ICS's own DHCP allocator drifts. Workload
+VMs always require both fields because their gateway is a config-time
+choice (see the table below).
 
-All listed fields are required. After first boot, connect via
-`ssh username@ipAddress`; for router VMs in DHCP mode the IP is
-discovered via Hyper-V KVP after boot - inspect with
-`Get-VMNetworkAdapter -VMName <router> | Select IPAddresses`.
+> **Status - DHCP mode is unfinished.** `externalDhcp: true` (the
+> bridged-External path) exists in the schema but has **never worked
+> end-to-end** and has no E2E coverage - the bridged-Wi-Fi switch it
+> targets never reached its upstream gateway (duplicate-IP via shared
+> MAC). The config validator **rejects** `externalDhcp: true` outright,
+> so it cannot enter the secret JSON or be provisioned. Use the static
+> default. See `Assert-RouterVmField`'s `externalDhcp` note for the
+> full status.
+
+After first boot, connect via `ssh username@ipAddress`.
 
 | Field           | Type   | Description                                        |
 |-----------------|--------|----------------------------------------------------|
@@ -230,9 +235,9 @@ discovered via Hyper-V KVP after boot - inspect with
 | `ubuntuVersion` | string | Ubuntu release, e.g. `"24.04"`                     |
 | `username`      | string | OS user created by cloud-init on first boot        |
 | `password`      | string | Password for that user (plain text in vault only)  |
-| `ipAddress`     | string | Static IPv4 address inside the VM. **Required** for workload VMs, and for router VMs only when `externalDhcp: false`. Router VMs with `externalDhcp: true` (the default) get their upstream IP via DHCP and discover it through Hyper-V KVP after boot. |
+| `ipAddress`     | string | Static IPv4 address inside the VM. **Required** for workload VMs, and for router VMs (static is the only supported router mode; `externalDhcp: true`, which would DHCP-discover the IP instead, is rejected by the validator - see `externalDhcp`). |
 | `subnetMask`    | string | CIDR prefix length, e.g. `"24"`. Required on every VM - workloads use it for their NIC; router VMs use it for the priv0 (downstream) NIC even under DHCP. |
-| `gateway`       | string | Default gateway for the VM. **Required** for workload VMs (and **must equal** the matching router VM's `privateIpAddress` - preflight enforced). For router VMs, required only when `externalDhcp: false`. |
+| `gateway`       | string | Default gateway for the VM. **Required** for workload VMs (and **must equal** the matching router VM's `privateIpAddress` - preflight enforced). For router VMs, required in the default static mode (`externalDhcp: false`). |
 | `dns`           | string | DNS server IP. On workloads this is the resolver (set to the router VM's `privateIpAddress`); on routers this is netplan's nameserver AND dnsmasq's upstream forwarder. **Topology note:** when the host is on Internal+ICS, set router `dns` to the **ICS gateway** (typically `192.168.137.1`), NOT a public resolver like `8.8.8.8` — ICS NAT for outbound UDP/53 to public IPs is unreliable, whereas the ICS gateway's built-in DNS proxy is a local hop. |
 | `vmConfigPath`  | string | Windows path where seed ISO is written             |
 | `vhdPath`       | string | Windows path where VHDX files are stored           |
@@ -240,7 +245,7 @@ discovered via Hyper-V KVP after boot - inspect with
 | `kind`          | string? | Optional. `"workload"` (default) or `"router"`. See [Router VM](#router-vm-kind-router). |
 | `externalSwitchName` | string | Required when `kind: router`. Host-bridged Hyper-V switch the router's upstream NIC attaches to; created on demand if absent (see `externalAdapterName`). |
 | `externalAdapterName`| string | Required when `kind: router`. Physical NIC the External switch binds to when `Initialize-ExternalSwitch` needs to create it. Ignored at runtime if the switch already exists. Find the name with `Get-NetAdapter`. |
-| `externalDhcp`  | bool?   | Optional, defaults to `true`. Addressing mode for the router VM's upstream NIC. `true` = DHCP from whatever LAN the host's External vSwitch is bridged to (portable across networks); `false` = static (requires `ipAddress` / `gateway`). Only meaningful when `kind: router`. |
+| `externalDhcp`  | bool?   | Optional, defaults to `false` (static). Addressing mode for the router VM's upstream NIC. `false` = static (requires `ipAddress` / `gateway`); `true` = DHCP from whatever LAN the host's External vSwitch is bridged to. **`true` is rejected by the config validator** (the DHCP path is unfinished) - see the Status note above and `Assert-RouterVmField`. Only meaningful when `kind: router`. |
 | `privateIpAddress`   | string | Required when `kind: router`. IP the router carries on its private-side NIC; downstream VMs use it as their default gateway and DNS server. Always static - no DHCP path can pre-commit a value workloads can be configured against. |
 | `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. Not supported on `kind: router`. See [Optional: install a JDK](#optional-install-a-jdk). |
 | `dotnetSdk`     | object? | Optional. Installs a .NET SDK system-wide on first boot. See [Optional: install a .NET SDK](#optional-install-a-net-sdk). |
@@ -637,8 +642,10 @@ host's NAT slot. Background: see
   "ubuntuVersion":      "24.04",
   "username":           "admin",
   "password":           "...",
+  "ipAddress":          "192.168.137.20",
   "subnetMask":         "24",
-  "dns":                "8.8.8.8",
+  "gateway":            "192.168.137.1",
+  "dns":                "192.168.137.1",
   "vmConfigPath":       "E:\\a_VMs\\Hyper-V\\Config",
   "vhdPath":            "E:\\a_VMs\\Hyper-V\\Disks",
   "kind":                "router",
@@ -649,33 +656,27 @@ host's NAT slot. Background: see
 }
 ```
 
-The upstream NIC defaults to DHCP (`externalDhcp: true`). The router
-picks up its IP from whatever LAN the host's External vSwitch is
-currently bridged to, so the same config keeps working when the
-workstation moves between Wi-Fi networks. To pin a static instead,
-add `"externalDhcp": false` and the three matching fields:
+The upstream NIC defaults to **static** (`externalDhcp: false`), shown
+above: a fixed `ipAddress` / `gateway` on the ICS subnet and `dns`
+pointing at the ICS gateway (`192.168.137.1`). This is the only
+validated topology - ICS owns a fixed `192.168.137.0/24` regardless of
+which Wi-Fi the host is on, so the pinned address survives roaming
+while ICS's own DHCP allocator does not.
 
-```jsonc
-{
-  "vmName":             "router-prod",
-  ...
-  "kind":                "router",
-  "externalDhcp":        false,
-  "ipAddress":           "192.168.1.10",
-  "subnetMask":          "24",
-  "gateway":             "192.168.1.1",
-  "externalSwitchName":  "ExternalSwitch-Shared",
-  "externalAdapterName": "Ethernet",
-  "privateSwitchName":   "PrivateSwitch-Production",
-  "privateIpAddress":    "10.10.0.1"
-}
-```
+**Config contrast** - static (the default and only usable mode):
+`externalDhcp` omitted or set `false`, with `ipAddress` + `gateway`
+present (as in the example above). DHCP would be `externalDhcp: true`
+with neither field - but that is rejected by the validator (see below).
 
-In DHCP mode the orchestrator discovers the router's actual upstream
-IP via Hyper-V's KVP integration services after the VM boots (polls
-`Get-VMNetworkAdapter -VMName <router>` for an IPv4 on the External
-switch). The wait-for-SSH timer covers both the DHCP-lease wait and
-the SSH-readiness wait under one 10-minute budget.
+> **DHCP mode (`externalDhcp: true`) is unfinished and unsupported.**
+> It targets a bridged-Wi-Fi / Ethernet External switch (the router
+> would lease an IP from the physical LAN, discovered via Hyper-V KVP
+> after boot), but that path has **never worked end-to-end** - the
+> bridged-Wi-Fi switch never reached its upstream gateway (duplicate-IP
+> via shared MAC) - and no E2E scenario exercises it. The config
+> validator **rejects `externalDhcp: true`** outright, so it cannot
+> enter the secret JSON or be provisioned; the gate lifts when the path
+> is validated end-to-end and covered by E2E.
 
 `externalAdapterName` is the host's physical NIC the External switch
 will bind to when `Initialize-ExternalSwitch` needs to create it. Run
@@ -689,7 +690,7 @@ and kernel-naming changes:
 
 | Adapter            | Hyper-V switch                  | Guest name (via `set-name`) | Addresses                                                                                       | Role                                           |
 |--------------------|---------------------------------|------------------------------|-------------------------------------------------------------------------------------------------|------------------------------------------------|
-| `Network Adapter`  | `externalSwitchName` (existing) | `ext0`                       | DHCP (default) or `ipAddress/subnetMask` + default via `gateway` + DNS = `dns` (`externalDhcp: false`) | Upstream egress; MASQUERADE source.            |
+| `Network Adapter`  | `externalSwitchName` (existing) | `ext0`                       | Static (default): `ipAddress/subnetMask` + default via `gateway` + DNS = `dns`. DHCP (`externalDhcp: true`) is unvalidated. | Upstream egress; MASQUERADE source.            |
 | `Private`          | `privateSwitchName` (created)   | `priv0`                      | `privateIpAddress/subnetMask` (always static)                                                   | Downstream gateway / DNS for environment VMs.  |
 
 **Cloud-init payload.** The router seed ISO lands:
@@ -1273,7 +1274,7 @@ Infrastructure-VM-Provisioner/
 |     |  |  |- Invoke-VmPostProvisioning.ps1    # Per-VM transport orchestrator (file server + SSH + cloud-init wait), dispatches steps; throws fatally on cloud-init non-zero exit with a pointer at the diagnostics folder
 |     |  |  |- Wait-CloudInitFinished.ps1       # Polls 'cloud-init status' over SSH; streams a dot per poll (line-wraps every 60), returns elapsed/budget/status so the caller stamps a summary line. 600s wall-clock cap.
 |     |  |  |- Invoke-VmFilesDispatch.ps1       # Single-vs-bulk router for the 'files' step entries (presence of 'pattern' = bulk). Owns the operator-visible "[files] processing N entry(s)" cadence and the JSON-order contract.
-|     |  |  |- Assert-RouterServicesActive.ps1  # Strict post-cloud-init check that nftables.service + dnsmasq.service are active on router VMs. Fail-fast for the dnsmasq-install regression.
+|     |  |  |- Assert-RouterReady.ps1           # Strict post-cloud-init check of a router VM's full state: IPv4 forwarding, nftables + dnsmasq active, MASQUERADE/FORWARD nft rules, priv0 carries the private IP. Fail-fast at provision time.
 |     |  |  |- Invoke-CloudInitDiagnostics.ps1  # Captures cloud-init-output.log + cloud-init.log + netplan + reachability into <vhdPath>/diagnostics/<vmName>/<timestamp>/ alongside console.log. Fires on every post-provisioning run, not just failures.
 |     |  |  |- Invoke-SerialConsoleCapture.ps1  # Mirrors the VM's serial console to console.log during VM-creation wait.
 |     |  |  |- New-DiagnosticSshClientWrapper.ps1 # Wraps the real SshClient with a tee-to-file logger covering the whole post-provisioning phase (writes ssh.log next to console.log).

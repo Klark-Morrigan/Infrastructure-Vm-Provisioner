@@ -44,11 +44,11 @@ function Invoke-VmPostProvisioning {
     # still route through to the transport.
     $hasEnvVars = $Vm.PSObject.Properties['envVars']
     # Router VMs MUST run post-provisioning even with no opt-in fields:
-    # Assert-RouterServicesActive (below) is the fail-fast gate for
-    # nftables / dnsmasq service state, and the cloud-init wait gives
-    # those services time to bind interfaces before the check fires.
-    # Without this branch, router VMs short-circuit out and a dead
-    # dnsmasq is only caught later by the E2E assertion phase.
+    # Assert-RouterReady (below) is the fail-fast gate for the router's
+    # forwarding / service / NAT-rule / priv0 state, and the cloud-init
+    # wait gives those services time to bind interfaces before the check
+    # fires. Without this branch, router VMs short-circuit out and a
+    # broken router is only caught later, downstream.
     $isRouter   = $Vm.PSObject.Properties['kind'] -and
                   $Vm.kind -eq 'router'
     if (-not ($hasFiles -or $hasJdk -or $hasEnvVars -or $isRouter)) {
@@ -93,11 +93,11 @@ function Invoke-VmPostProvisioning {
     # in its own file (Wait-CloudInitFinished.ps1) so the polling
     # loop, parse, and budget logic is independently testable.
     $waitCloudInitFinished       = ${function:Wait-CloudInitFinished}
-    # Router-only post-cloud-init service check. Captured by the
+    # Router-only post-cloud-init readiness check. Captured by the
     # closure below for the same scope reason as the other per-step
     # functions; the call is gated on $vmRef.kind -eq 'router' so
     # workload VMs skip it.
-    $assertRouterServicesActive  = ${function:Assert-RouterServicesActive}
+    $assertRouterReady           = ${function:Assert-RouterReady}
 
     # Capture the per-step functions as scriptblock locals so the closure
     # below can invoke them via the call operator. Name-based command
@@ -257,20 +257,20 @@ function Invoke-VmPostProvisioning {
                 -VmName        $vmName `
                 -Timestamp     $vmRef._diagTimestamp
 
-            # Router-only: assert load-bearing services are active
-            # NOW so a service that ended up inactive (the 2026-06
-            # dnsmasq race is the motivator) surfaces at provision
-            # time with a clear message, not later in the E2E
-            # assertion phase. Workload VMs skip this - they have
-            # no router-specific services. PSObject.Properties
+            # Router-only: assert the router's full internal state
+            # (forwarding, services, NAT rules, priv0 IP) NOW so a
+            # regression surfaces at provision time with a clear
+            # message, not later downstream. Workload VMs skip this -
+            # they have no router-specific state. PSObject.Properties
             # guard because tests may build a VM def without kind.
             $kind = if ($vmRef.PSObject.Properties['kind']) {
                 $vmRef.kind
             } else { '' }
             if ($kind -eq 'router') {
-                & $assertRouterServicesActive `
-                    -SshClient $sshClient `
-                    -VmName    $vmName
+                & $assertRouterReady `
+                    -SshClient        $sshClient `
+                    -VmName           $vmName `
+                    -PrivateIpAddress $vmRef.privateIpAddress
             }
 
             # Manifest store init runs unconditionally near the top of

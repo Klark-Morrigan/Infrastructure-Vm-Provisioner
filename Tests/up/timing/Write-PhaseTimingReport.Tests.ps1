@@ -21,8 +21,7 @@ Describe 'Write-PhaseTimingReport' {
         $output = (Write-PhaseTimingReport 6>&1 | Out-String) -split "`r?`n"
 
         # @() wraps each Where-Object so .Count works even when a
-        # single-element match would otherwise unwrap to a scalar
-        # (memory: feedback_pester5_single_match_count).
+        # single-element match would otherwise unwrap to a scalar.
         @($output | Where-Object {
             $_ -match '\bA\b' -and $_ -match '\[OK\]' }).Count |
             Should -Be 1

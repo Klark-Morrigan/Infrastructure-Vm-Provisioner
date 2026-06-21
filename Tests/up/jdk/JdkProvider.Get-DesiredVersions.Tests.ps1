@@ -47,7 +47,7 @@ Describe 'Get-JdkDesiredVersions' {
             $vm = New-VmConfigFromJson '{ "javaDevKit": null }'
             $result = Get-JdkDesiredVersions -VmConfig $vm
             # Wrap before .Count: a $null pipeline yields a scalar under
-            # strict mode (see feedback_pester5_single_match_count.md).
+            # strict mode, so @() / ,$result normalises it to an array.
             ,$result -is [array] | Should -BeTrue
             @($result).Count   | Should -Be 0
         }

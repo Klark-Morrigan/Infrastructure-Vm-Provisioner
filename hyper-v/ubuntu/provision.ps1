@@ -111,7 +111,7 @@ $ErrorActionPreference = 'Stop'
 # specific data it captures and where outputs land. All three write
 # under <vmConfigPath>\diagnostics\<vmName>\<timestamp>\ so a single
 # provisioning run produces one self-contained folder.
-. "$PSScriptRoot\up\post\Assert-RouterServicesActive.ps1"
+. "$PSScriptRoot\up\post\Assert-RouterReady.ps1"
 . "$PSScriptRoot\up\post\Invoke-CloudInitDiagnostics.ps1"
 . "$PSScriptRoot\up\post\Invoke-SerialConsoleCapture.ps1"
 . "$PSScriptRoot\up\post\New-DiagnosticSshClientWrapper.ps1"

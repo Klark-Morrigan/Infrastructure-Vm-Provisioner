@@ -9,6 +9,10 @@
 # ...). Dot-sourced here so this script remains the single entry point
 # operators dot-source from provision.ps1.
 . "$PSScriptRoot\Assert-EnvironmentConsistency.ps1"
+# Shared default for the optional externalDhcp field - the same helper the
+# schema validator and seed generator read, so the DHCP-vs-static default
+# is decided in exactly one place.
+. "$PSScriptRoot\..\..\common\config\Test-RouterUsesExternalDhcp.ps1"
 
 # ---------------------------------------------------------------------------
 # Select-VmsForProvisioning
@@ -71,17 +75,16 @@ function Select-VmsForProvisioning {
         # SilentlyContinue returns $null instead.
         $existing = $null -ne (Get-VM -Name $vm.vmName -ErrorAction SilentlyContinue)
 
-        # Router VMs in externalDhcp mode (the schema default) have no
-        # known static IP at config-load time, so the static-IP
-        # conflict probe does not apply. Classify them on VM presence
-        # alone: missing VM -> new (create); present VM -> existing
-        # (reconcile). The IP they pick up from DHCP gets discovered
-        # later by create-vm.ps1's wait-for-SSH via Hyper-V KVP.
+        # Router VMs in externalDhcp mode (an explicit opt-in; static is
+        # the default) have no known static IP at config-load time, so the
+        # static-IP conflict probe does not apply. Classify them on VM
+        # presence alone: missing VM -> new (create); present VM ->
+        # existing (reconcile). The IP they pick up from DHCP gets
+        # discovered later by create-vm.ps1's wait-for-SSH via Hyper-V KVP.
+        # NOTE: DHCP mode is unvalidated - see the dhcp-unfinished TODO in
+        # Assert-RouterVmField's externalDhcp note.
         $isRouter     = $vm.kind -eq 'router'
-        $externalDhcp = $isRouter -and (
-            -not $vm.PSObject.Properties['externalDhcp'] -or
-            [bool] $vm.externalDhcp
-        )
+        $externalDhcp = $isRouter -and (Test-RouterUsesExternalDhcp -Vm $vm)
 
         if ($externalDhcp) {
             $state = if ($existing) { 'existing' } else { 'new' }
