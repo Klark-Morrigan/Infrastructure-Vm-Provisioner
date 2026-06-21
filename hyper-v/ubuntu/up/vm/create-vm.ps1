@@ -221,10 +221,12 @@ function Invoke-VmCreation {
         -Name   'wait for SSH' `
         -Action {
 
-    # Router VMs in externalDhcp mode (the schema default) have no
-    # ipAddress in their VM def at this point - the upstream NIC's
-    # address gets handed to them by the LAN's DHCP server moments
-    # after boot. Discover it through Hyper-V's KVP integration
+    # Router VMs in externalDhcp mode (an opt-in for bridged External
+    # switches; static is the default) have no ipAddress in their VM def
+    # at this point - the upstream NIC's address gets handed to them by
+    # the LAN's DHCP server moments after boot. NOTE: DHCP mode is
+    # unvalidated - see the dhcp-unfinished TODO in Assert-RouterVmField's
+    # externalDhcp note. Discover it through Hyper-V's KVP integration
     # services BEFORE the SSH probe: poll Get-VMNetworkAdapter on
     # the external switch until an IPv4 appears, then write it back
     # onto $Vm.ipAddress so every downstream consumer (this loop's

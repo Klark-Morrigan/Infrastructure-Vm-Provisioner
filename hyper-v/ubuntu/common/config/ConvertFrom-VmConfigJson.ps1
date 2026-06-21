@@ -9,6 +9,7 @@
 # single entry point for the config schema. Assert-VmFilesField is supplied
 # by Infrastructure.HyperV (already imported by Install-ModuleDependencies)
 # so the shared shape checks are not duplicated across consumers.
+. "$PSScriptRoot\Test-RouterUsesExternalDhcp.ps1"
 . "$PSScriptRoot\Assert-JavaDevKitField.ps1"
 . "$PSScriptRoot\Assert-DotnetSdkField.ps1"
 . "$PSScriptRoot\Assert-DotnetToolsField.ps1"
@@ -64,11 +65,13 @@ function ConvertFrom-VmConfigJson {
     #
     # 'ipAddress' and 'gateway' are kind-specific and live in the per-
     # kind validators (Assert-WorkloadVmField requires them;
-    # Assert-RouterVmField requires them only when externalDhcp is
-    # false). The router VM's upstream NIC defaults to DHCP because the
-    # host's External vSwitch is often bridged to a Wi-Fi adapter whose
-    # subnet changes per location - pinning a static there is what kept
-    # breaking provisioning whenever the operator changed networks.
+    # Assert-RouterVmField requires them when externalDhcp is false,
+    # which is the default). The router VM's upstream NIC defaults to
+    # static because Internal+ICS - the only validated topology - keeps a
+    # fixed subnet across Wi-Fi roams while DHCP-via-ICS drifts. DHCP is
+    # an opt-in for a bridged-Wi-Fi External vSwitch (whose LAN subnet
+    # changes per location). See Assert-RouterVmField's externalDhcp note
+    # for the full rationale.
     #
     # 'subnetMask' stays in the base list. Workloads use it for their
     # only NIC; router VMs always use it for the priv0 (downstream) NIC

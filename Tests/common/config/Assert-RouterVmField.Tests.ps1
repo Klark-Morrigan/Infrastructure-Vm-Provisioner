@@ -1,14 +1,18 @@
 BeforeAll {
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\common\config\Test-RouterUsesExternalDhcp.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\common\config\Assert-RouterVmField.ps1"
 
-    # Builds a router VM definition with every router-specific field
-    # populated. Individual tests override or strip fields to exercise
-    # specific rules.
+    # Builds a valid STATIC router definition - static is the schema
+    # default (externalDhcp absent => $false), so the canonical fixture
+    # carries the ext0 ipAddress/gateway the default mode requires.
+    # Individual tests override or strip fields to exercise specific rules.
     function New-RouterVm {
         [PSCustomObject]@{
             vmName               = 'router-prod'
             externalSwitchName   = 'ExternalSwitch-Shared'
             externalAdapterName  = 'Ethernet'
+            ipAddress            = '192.168.137.10'
+            gateway              = '192.168.137.1'
             privateSwitchName    = 'PrivateSwitch-Production'
             privateIpAddress     = '10.10.0.1'
         }
@@ -77,59 +81,77 @@ Describe 'Assert-RouterVmField' {
     }
 
     # ------------------------------------------------------------------
-    Context 'externalDhcp (default true, opt-out for static)' {
+    Context 'externalDhcp (default false / static; DHCP rejected as unfinished)' {
     # ------------------------------------------------------------------
-        # externalDhcp defaults to true so a router VM works on whatever
-        # LAN the host's External vSwitch is currently bridged to. The
-        # default omits ipAddress / subnetMask / gateway from the schema.
-        # An operator who wants a pinned static can set externalDhcp:
-        # false; the three fields then become required.
+        # externalDhcp defaults to $false (static), matching the only
+        # validated host topology (Internal+ICS). The canonical fixture is
+        # therefore a complete static router accepted with no externalDhcp
+        # field. externalDhcp=true (DHCP) is unfinished/unsupported, so the
+        # validator rejects it outright.
 
-        It 'accepts a router VM with no ipAddress when externalDhcp is absent (default true)' {
+        It 'accepts a static router by default (externalDhcp absent)' {
             { Assert-RouterVmField -Vm (New-RouterVm) } | Should -Not -Throw
         }
 
-        It 'accepts a router VM with externalDhcp=true explicitly' {
+        It 'accepts a static router with externalDhcp=false explicit' {
+            $vm = New-RouterVm
+            $vm | Add-Member -MemberType NoteProperty -Name externalDhcp -Value $false
+            { Assert-RouterVmField -Vm $vm } | Should -Not -Throw
+        }
+
+        It 'rejects a DHCP router (externalDhcp=true) as unfinished/unsupported' {
+            # The gate fires regardless of whether static fields are present.
             $vm = New-RouterVm
             $vm | Add-Member -MemberType NoteProperty -Name externalDhcp -Value $true
-            { Assert-RouterVmField -Vm $vm } | Should -Not -Throw
+            { Assert-RouterVmField -Vm $vm } |
+                Should -Throw -ExpectedMessage "*DHCP mode is unfinished and unsupported*"
         }
 
-        It 'accepts a router VM with externalDhcp=false and all three static fields' {
+        It 'throws when static (the default) and ipAddress is missing' {
             $vm = New-RouterVm
-            $vm | Add-Member -MemberType NoteProperty -Name externalDhcp -Value $false
-            $vm | Add-Member -MemberType NoteProperty -Name ipAddress    -Value '192.168.1.10'
-            $vm | Add-Member -MemberType NoteProperty -Name subnetMask   -Value '24'
-            $vm | Add-Member -MemberType NoteProperty -Name gateway      -Value '192.168.1.1'
-            { Assert-RouterVmField -Vm $vm } | Should -Not -Throw
-        }
-
-        It 'throws when externalDhcp is false and ipAddress is missing' {
-            $vm = New-RouterVm
-            $vm | Add-Member -MemberType NoteProperty -Name externalDhcp -Value $false
-            $vm | Add-Member -MemberType NoteProperty -Name subnetMask   -Value '24'
-            $vm | Add-Member -MemberType NoteProperty -Name gateway      -Value '192.168.1.1'
+            $vm.PSObject.Properties.Remove('ipAddress')
             { Assert-RouterVmField -Vm $vm } |
                 Should -Throw -ExpectedMessage "*externalDhcp=false*ipAddress*"
         }
 
-        It 'throws when externalDhcp is false and gateway is missing' {
+        It 'throws when static (the default) and gateway is missing' {
             $vm = New-RouterVm
-            $vm | Add-Member -MemberType NoteProperty -Name externalDhcp -Value $false
-            $vm | Add-Member -MemberType NoteProperty -Name ipAddress    -Value '192.168.1.10'
-            $vm | Add-Member -MemberType NoteProperty -Name subnetMask   -Value '24'
+            $vm.PSObject.Properties.Remove('gateway')
             { Assert-RouterVmField -Vm $vm } |
                 Should -Throw -ExpectedMessage "*externalDhcp=false*gateway*"
         }
 
-        It 'throws when externalDhcp is false and a static field is empty' {
+        It 'throws when static and a static field is empty' {
             $vm = New-RouterVm
-            $vm | Add-Member -MemberType NoteProperty -Name externalDhcp -Value $false
-            $vm | Add-Member -MemberType NoteProperty -Name ipAddress    -Value ''
-            $vm | Add-Member -MemberType NoteProperty -Name subnetMask   -Value '24'
-            $vm | Add-Member -MemberType NoteProperty -Name gateway      -Value '192.168.1.1'
+            $vm.ipAddress = ''
             { Assert-RouterVmField -Vm $vm } |
                 Should -Throw -ExpectedMessage "*non-empty*"
+        }
+
+        # externalDhcp must be a real JSON boolean. A quoted string or a
+        # number would otherwise slip through the [bool] cast in
+        # Test-RouterUsesExternalDhcp ([bool] of any non-empty string is
+        # $true), silently flipping a static-mode intent to DHCP.
+
+        It 'throws when externalDhcp is a quoted string ("false")' {
+            $vm = New-RouterVm
+            $vm | Add-Member -MemberType NoteProperty -Name externalDhcp -Value 'false'
+            { Assert-RouterVmField -Vm $vm } |
+                Should -Throw -ExpectedMessage "*externalDhcp must be a JSON boolean*"
+        }
+
+        It 'throws when externalDhcp is a JSON number' {
+            $vm = New-RouterVm
+            $vm | Add-Member -MemberType NoteProperty -Name externalDhcp -Value 0
+            { Assert-RouterVmField -Vm $vm } |
+                Should -Throw -ExpectedMessage "*externalDhcp must be a JSON boolean*"
+        }
+
+        It 'throws when externalDhcp is null' {
+            $vm = New-RouterVm
+            $vm | Add-Member -MemberType NoteProperty -Name externalDhcp -Value $null
+            { Assert-RouterVmField -Vm $vm } |
+                Should -Throw -ExpectedMessage "*externalDhcp must be a JSON boolean*not null*"
         }
     }
 

@@ -169,6 +169,7 @@ function Assert-HostNetworkPreflight {
         } elseif ($vIp) {
             Add-Finding PASS "ICS host IP = 192.168.137.1" "Matches ICS default."
         }
+
         if ($vAdapter -and $wifi) {
             $matched = @($wifi | Where-Object { $_.MacAddress -eq $vAdapter.MacAddress })
             if ($matched.Count -gt 0) {

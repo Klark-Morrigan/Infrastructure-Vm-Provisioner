@@ -3,6 +3,7 @@ BeforeAll {
     # test environment - stub before dot-sourcing so the reference resolves.
     function New-SeedIso { param($OutputPath, $Files) }
 
+    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\common\config\Test-RouterUsesExternalDhcp.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\New-StaticNetplanYaml.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\Get-RouterNicStaticMac.ps1"
     . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\up\seed\Initialize-SeedConfigDirectory.ps1"
@@ -18,10 +19,10 @@ BeforeAll {
     # to these values; changing them here without updating the fixtures
     # will fail the string-equal checks.
     #
-    # The schema default is externalDhcp=$true, but the test fixture pins
-    # the static mode explicitly so the netplan-shape assertions below
-    # exercise the deterministic path. DHCP-mode coverage lives in its
-    # own Context with its own fixture.
+    # Static is the schema default; this fixture pins externalDhcp=$false
+    # explicitly so the netplan-shape assertions below exercise the
+    # deterministic path. DHCP-mode coverage lives in its own Context
+    # with its own fixture.
     function New-RouterTestVm {
         [PSCustomObject]@{
             vmName              = 'router-prod'
@@ -40,11 +41,12 @@ BeforeAll {
         }
     }
 
-    # DHCP-mode router VM (the schema default). The ext0 NIC gets its
-    # address from the LAN's DHCP server, so ipAddress and gateway are
-    # absent. subnetMask stays - it pins the priv0 CIDR even under
-    # ext0 DHCP. dns also stays - dnsmasq uses it as the upstream
-    # forwarder regardless of ext0's addressing.
+    # DHCP-mode router VM (an opt-in; static is the schema default). The
+    # ext0 NIC gets its address from the LAN's DHCP server, so ipAddress
+    # and gateway are absent and externalDhcp is set $true explicitly.
+    # subnetMask stays - it pins the priv0 CIDR even under ext0 DHCP. dns
+    # also stays - dnsmasq uses it as the upstream forwarder regardless of
+    # ext0's addressing.
     function New-DhcpRouterTestVm {
         [PSCustomObject]@{
             vmName              = 'router-prod'
@@ -55,6 +57,7 @@ BeforeAll {
             dns                 = '8.8.8.8'
             kind                = 'router'
             externalSwitchName  = 'ExternalSwitch-Shared'
+            externalDhcp        = $true
             privateSwitchName   = 'PrivateSwitch-Production'
             privateIpAddress    = '10.10.0.1'
         }

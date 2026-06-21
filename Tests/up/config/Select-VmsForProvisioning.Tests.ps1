@@ -37,12 +37,12 @@ BeforeAll {
     # privateIpAddress matches the workload's gateway so the env passes
     # the consistency preflight unless the test overrides it.
     #
-    # `externalDhcp` defaults to $false here so the fixture has a known
-    # static ext0 IP and the IP-conflict / offline-VM Contexts below
-    # actually exercise their respective branches. The schema default
-    # of $true (DHCP) skips Test-IpAddressInUse entirely; tests that
-    # care about the DHCP-router classification path set ExternalDhcp
-    # back to $true (or omit the field via the optional parameter).
+    # `externalDhcp` defaults to $false here (matching the schema default,
+    # static) so the fixture has a known ext0 IP and the IP-conflict /
+    # offline-VM Contexts below actually exercise their respective
+    # branches. Tests that care about the DHCP-router classification path
+    # set ExternalDhcp to $true explicitly - DHCP is now an opt-in that
+    # skips Test-IpAddressInUse entirely.
     function New-RouterVm {
         param(
             [string] $VmName            = 'router-prod',
@@ -178,13 +178,15 @@ Describe 'Select-VmsForProvisioning' {
     }
 
     # ------------------------------------------------------------------
-    Context 'DHCP-mode router (externalDhcp $true or absent)' {
+    Context 'router ext0 addressing classification (DHCP vs static)' {
     # ------------------------------------------------------------------
-        # The DHCP-default router has no known static IP at config-load
-        # time, so the static-IP probe Test-IpAddressInUse does not
-        # apply. Classification falls back to VM-presence-only:
-        # missing -> new, present -> existing. Conflict / offline
-        # warnings cannot fire because there is no IP to conflict over.
+        # An explicit-DHCP router (externalDhcp=$true) has no known static
+        # IP at config-load time, so the static-IP probe Test-IpAddressInUse
+        # does not apply. Classification falls back to VM-presence-only:
+        # missing -> new, present -> existing. Conflict / offline warnings
+        # cannot fire because there is no IP to conflict over. The absent-
+        # field case is the contrast: it now defaults to static, so the
+        # probe DOES run.
 
         It 'classifies a DHCP router with no Hyper-V VM as new (no IP probe)' {
             Initialize-Mocks
@@ -220,10 +222,11 @@ Describe 'Select-VmsForProvisioning' {
             $script:_pingCalled  | Should -Be $false
         }
 
-        It 'treats a router with no externalDhcp field as DHCP-mode (schema default)' {
-            # Operators who skip the field rely on the schema default
-            # of $true. Select-VmsForProvisioning must read the absence
-            # the same way the seed generator does.
+        It 'treats a router with no externalDhcp field as static (schema default)' {
+            # The schema default is now $false (static), so an operator who
+            # omits the field gets the static path - Select-VmsForProvisioning
+            # reads the absence the same way the seed generator does, and the
+            # IP-conflict probe DOES run against the known ext0 IP.
             Initialize-Mocks
             $script:_pingCalled = $false
             Mock Test-IpAddressInUse {
@@ -238,7 +241,7 @@ Describe 'Select-VmsForProvisioning' {
 
             $result.Count        | Should -Be 1
             $result[0]._state    | Should -Be 'new'
-            $script:_pingCalled  | Should -Be $false
+            $script:_pingCalled  | Should -Be $true
         }
     }
 

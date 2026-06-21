@@ -422,6 +422,20 @@ Describe 'ConvertFrom-VmConfigJson' {
             $result[0].privateIpAddress    | Should -Be '10.10.0.1'
         }
 
+        It 'rejects a router with externalDhcp:true (DHCP unfinished) end-to-end' {
+            # The gate that keeps a DHCP router out of the secret JSON -
+            # ConvertFrom-VmConfigJson is what setup-secrets.ps1 validates with.
+            $core = (New-ValidVmJson 'router-prod') -replace '\}\s*$', ''
+            $extras = ', "kind": "router"' +
+                      ', "externalSwitchName": "ExternalSwitch-Shared"' +
+                      ', "externalAdapterName": "Ethernet"' +
+                      ', "privateSwitchName": "PrivateSwitch-Production"' +
+                      ', "privateIpAddress": "10.10.0.1"' +
+                      ', "externalDhcp": true'
+            { ConvertFrom-VmConfigJson -Json "[$core$extras }]" } |
+                Should -Throw -ExpectedMessage "*DHCP mode is unfinished and unsupported*"
+        }
+
         It 'rejects an unknown kind' {
             $core = (New-ValidVmJson) -replace '\}\s*$', ''
             { ConvertFrom-VmConfigJson -Json "[$core, ""kind"": ""firewall"" }]" } |
