@@ -103,6 +103,30 @@ BeforeAll {
         $null
     }
 
+    # Assert-VmSshCredentialsAccepted is the router-only authenticated
+    # gate that runs AFTER the banner gate: it proves the configured
+    # account actually logs in (a cloud-init user-creation failure leaves
+    # sshd serving a banner with no usable login). Its own behaviour is
+    # covered in Tests\common\ssh\Assert-VmSshCredentialsAccepted.Tests.ps1;
+    # stub it here as a no-op success so router happy-path tests reach the
+    # post-wait cleanup. Tests that need the rejection branch override with
+    # `Mock Assert-VmSshCredentialsAccepted { throw ... }`.
+    function Assert-VmSshCredentialsAccepted {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+            'PSAvoidUsingPlainTextForPassword', 'Password')]
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+            'PSAvoidUsingUsernameAndPasswordParams', '')]
+        param(
+            [string]   $IpAddress,
+            [string]   $Username,
+            [string]   $Password,
+            [string]   $VmName,
+            [int]      $Port = 22,
+            [TimeSpan] $Timeout = [TimeSpan]::FromSeconds(30),
+            [string]   $ConsoleLogPath
+        )
+    }
+
     # KVP IP-discovery helper now lives in Infrastructure.HyperV >= 0.11.0
     # (extracted from create-vm.ps1's inline loop). The provisioner tests
     # do not exercise the helper's polling internals - those have their
@@ -303,6 +327,10 @@ BeforeAll {
         # without each having to know about this gate. Tests that
         # exercise the failure-mode wiring override with a throw.
         Mock Assert-WorkloadReachableViaRouter { }
+        # Router-only authenticated credential gate (runs after the banner
+        # gate). Default success so router happy-path tests reach cleanup;
+        # the wiring tests assert it fired for routers / not for workloads.
+        Mock Assert-VmSshCredentialsAccepted { }
 
         # Pester requires the function to be Mock'd (not just defined
         # at file scope) for Should -Invoke to work. Register default
@@ -818,6 +846,49 @@ Describe 'Invoke-VmCreation' {
                 Should -Throw
 
             Should -Invoke New-VmSshTunnel -Times 0 -Exactly
+        }
+
+        It 'runs the authenticated credential gate for a router once it is banner-reachable' {
+            # Banner-reachable proves only that sshd answers; a router is
+            # the jump host every workload authenticates through, so its
+            # configured login is verified (against its own IP) before it
+            # is declared ready. Stateful Get-VM: Off for the post-create
+            # guard, Running for the polling loop.
+            $script:_getVmCallCount = 0
+            Initialize-HyperVMocks
+            Mock Get-VM {
+                $script:_getVmCallCount++
+                $state = if ($script:_getVmCallCount -eq 1) { 'Off' } else { 'Running' }
+                [PSCustomObject]@{ State = $state }
+            }
+            Mock Test-VmSshPort { $true }
+
+            Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExternalSwitch-Shared'
+
+            Should -Invoke Assert-VmSshCredentialsAccepted -Times 1 -Exactly `
+                -ParameterFilter {
+                    $IpAddress -eq '192.168.1.10' -and
+                    $Username  -eq 'admin'        -and
+                    $VmName    -eq 'router-01'
+                }
+        }
+
+        It 'does NOT run the credential gate for a workload VM' {
+            # Workloads authenticate via their own post-provisioning
+            # session, which surfaces the same fault directly; the
+            # router-only gate must not fire for them.
+            $script:_getVmCallCount = 0
+            Initialize-HyperVMocks
+            Mock Get-VM {
+                $script:_getVmCallCount++
+                $state = if ($script:_getVmCallCount -eq 1) { 'Off' } else { 'Running' }
+                [PSCustomObject]@{ State = $state }
+            }
+            Mock Test-VmSshPort { $true }
+
+            Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'PrivateSwitch-Production'
+
+            Should -Invoke Assert-VmSshCredentialsAccepted -Times 0 -Exactly
         }
 
         It 'delegates to Assert-WorkloadReachableViaRouter with the tunnel''s JumpClient and the workload IP' {

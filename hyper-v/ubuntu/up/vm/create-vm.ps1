@@ -425,6 +425,29 @@ function Invoke-VmCreation {
             throw $sshTimeoutMessage
         }
 
+        # Banner-reachable proves sshd answers, NOT that a usable login
+        # exists. A router is probed directly (no tunnel) and is the jump
+        # host every workload authenticates through moments later, so a
+        # failed cloud-init user creation here (e.g. a base-image-missing
+        # supplementary group aborting useradd) must fail loudly NOW with a
+        # named cause, instead of resurfacing as an opaque "Permission
+        # denied (password)" on the first workload's tunnel. Workload VMs
+        # skip this gate: their own post-provisioning session authenticates
+        # and would surface the same fault directly against the workload.
+        $isRouterVm = $Vm.PSObject.Properties['kind'] -and $Vm.kind -eq 'router'
+        if ($isRouterVm) {
+            $routerDiagFolder = Get-VmDiagFolder `
+                                    -VmConfigPath $Vm.vmConfigPath `
+                                    -VmName       $Vm.vmName `
+                                    -Timestamp    $Vm._diagTimestamp
+            Assert-VmSshCredentialsAccepted `
+                -IpAddress      $Vm.ipAddress `
+                -Username       $Vm.username `
+                -Password       $Vm.password `
+                -VmName         $Vm.vmName `
+                -ConsoleLogPath (Join-Path $routerDiagFolder 'console.log')
+        }
+
         Write-Host "  [OK] SSH reachable on $($Vm.vmName)." -ForegroundColor Green
     }
     finally {
