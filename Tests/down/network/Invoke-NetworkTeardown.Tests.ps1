@@ -14,14 +14,24 @@ BeforeAll {
     # asserted in Remove-LegacySingletonNat.Tests.ps1.
     function Remove-LegacySingletonNat { param([string]$GatewayIp) }
 
+    # Boundary stubs for the Infrastructure.Network.Windows removers.
+    # Their own behaviour is covered in that module's Tests/Portproxy and
+    # Tests/Firewall; here we assert only the teardown wiring.
+    function Remove-RouterSshPortProxy {
+        param([string]$ConnectAddress, [int]$ConnectPort)
+    }
+    function Remove-RouterSshPortProxyFirewall { param([int]$ListenPort) }
+
     # Sets up all probes to "no VMs attached and no switch present" so
     # the full teardown path runs without error.
     function Initialize-CleanHostMocks {
-        Mock Get-VM                    { }
-        Mock Get-VMNetworkAdapter      { }
-        Mock Get-VMSwitch              { $null }
-        Mock Remove-VMSwitch           { }
-        Mock Remove-LegacySingletonNat { }
+        Mock Get-VM                          { }
+        Mock Get-VMNetworkAdapter            { }
+        Mock Get-VMSwitch                    { $null }
+        Mock Remove-VMSwitch                 { }
+        Mock Remove-LegacySingletonNat       { }
+        Mock Remove-RouterSshPortProxy       { }
+        Mock Remove-RouterSshPortProxyFirewall { }
     }
 }
 
@@ -38,6 +48,58 @@ Describe 'Invoke-NetworkTeardown' {
             Should -Invoke Remove-LegacySingletonNat -Times 1 -Exactly -ParameterFilter {
                 $GatewayIp -eq '10.10.0.1'
             }
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'host-side portproxy + firewall relay removal' {
+    # ------------------------------------------------------------------
+        # Symmetric teardown of provision's Set-RouterSshPortProxy /
+        # Set-RouterSshPortProxyFirewall. Keyed on the router's external
+        # IP; self-skips when none is known.
+
+        It 'removes the relay for the router external IP when supplied' {
+            Initialize-CleanHostMocks
+            Invoke-NetworkTeardown -PrivateSwitchName 'env-prod' `
+                                   -GatewayIp         '10.10.0.1' `
+                                   -RouterExternalIp  '192.168.137.11'
+
+            Should -Invoke Remove-RouterSshPortProxy -Times 1 -Exactly -ParameterFilter {
+                $ConnectAddress -eq '192.168.137.11'
+            }
+            Should -Invoke Remove-RouterSshPortProxyFirewall -Times 1 -Exactly
+        }
+
+        It 'threads a custom listen port to the firewall remover' {
+            Initialize-CleanHostMocks
+            Invoke-NetworkTeardown -PrivateSwitchName   'env-prod' `
+                                   -GatewayIp           '10.10.0.1' `
+                                   -RouterExternalIp    '192.168.137.11' `
+                                   -PortProxyListenPort 8222
+
+            Should -Invoke Remove-RouterSshPortProxyFirewall -Times 1 -Exactly -ParameterFilter {
+                $ListenPort -eq 8222
+            }
+        }
+
+        It 'skips relay removal when no router external IP is supplied' {
+            # Legacy / workload-only environments and DHCP routers have no
+            # config-time external IP; the relay step must self-skip.
+            Initialize-CleanHostMocks
+            Invoke-NetworkTeardown -PrivateSwitchName 'env-prod' `
+                                   -GatewayIp         '10.10.0.1'
+
+            Should -Invoke Remove-RouterSshPortProxy         -Times 0
+            Should -Invoke Remove-RouterSshPortProxyFirewall -Times 0
+        }
+
+        It 'skips relay removal when the router external IP is empty' {
+            Initialize-CleanHostMocks
+            Invoke-NetworkTeardown -PrivateSwitchName 'env-prod' `
+                                   -GatewayIp         '10.10.0.1' `
+                                   -RouterExternalIp  ''
+
+            Should -Invoke Remove-RouterSshPortProxy -Times 0
         }
     }
 

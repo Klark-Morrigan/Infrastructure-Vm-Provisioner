@@ -12,12 +12,19 @@
 #   environment owns: the per-environment Private switch and any leftover
 #   singleton-NAT state at the environment's gateway IP.
 #
-#   Composed of two pieces:
+#   Composed of three pieces:
 #     1. Legacy singleton-NAT cleanup (NetNat + host vNIC IP) via the shared
 #        Remove-LegacySingletonNat helper. Same code path the provision
 #        side runs, so a deprovision / re-provision cycle leaves no
 #        legacy state behind.
-#     2. Private switch removal, guarded by an attached-VMs check. VMs
+#     2. Host-side SSH portproxy relay + its firewall companion removal -
+#        the teardown counterpart to provision's Set-RouterSshPortProxy /
+#        Set-RouterSshPortProxyFirewall (Infrastructure.Network.Windows).
+#        netsh portproxy state persists across VM/switch teardown, so
+#        without this the relay accumulates per router IP across lifecycles
+#        and a stale entry can shadow the next router's WSL relay
+#        auto-discovery. Skipped when no router external IP is known.
+#     3. Private switch removal, guarded by an attached-VMs check. VMs
 #        outside the config that are still connected (e.g. provisioned by
 #        another lifecycle) keep their network; the teardown logs and
 #        leaves the switch in place.
@@ -35,7 +42,21 @@ function Invoke-NetworkTeardown {
         # IP. Either way, any NetNat covering it and any host vNIC carrying
         # it gets removed via the shared cleanup helper.
         [Parameter(Mandatory)]
-        [string] $GatewayIp
+        [string] $GatewayIp,
+
+        # The router VM's external (Internal-vSwitch) IP - the connect
+        # target of the host-side SSH portproxy relay provision set up for
+        # WSL-based Ansible. Optional: legacy / workload-only environments
+        # and DHCP routers (no config-time external IP) pass nothing, and
+        # the portproxy + firewall removal is skipped.
+        [Parameter()]
+        [string] $RouterExternalIp,
+
+        # Listen port of the portproxy relay and its firewall rule. Matches
+        # Set-RouterSshPortProxy's default; only consulted when
+        # $RouterExternalIp is supplied.
+        [Parameter()]
+        [int] $PortProxyListenPort = 2222
     )
 
     Write-Host ""
@@ -43,6 +64,19 @@ function Invoke-NetworkTeardown {
         -ForegroundColor Cyan
 
     Remove-LegacySingletonNat -GatewayIp $GatewayIp
+
+    # ------------------------------------------------------------------
+    # Host-side SSH portproxy relay + firewall companion (the teardown
+    # counterpart to provision's Set-RouterSshPortProxy /
+    # Set-RouterSshPortProxyFirewall). netsh portproxy state survives
+    # VM/switch teardown, so removing it here is what stops relays
+    # accumulating per router IP across lifecycles. Both removers are
+    # idempotent. Skipped when no router external IP is known.
+    # ------------------------------------------------------------------
+    if ($RouterExternalIp) {
+        Remove-RouterSshPortProxy -ConnectAddress $RouterExternalIp
+        Remove-RouterSshPortProxyFirewall -ListenPort $PortProxyListenPort
+    }
 
     # ------------------------------------------------------------------
     # Private switch removal (guarded by attached-VMs check)

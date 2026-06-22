@@ -54,6 +54,14 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\down\vm\remove-vm.ps1"
 . "$PSScriptRoot\down\network\teardown-network.ps1"
 
+# Install / import every required module via the centralised helper, the
+# same way provision.ps1 does. Teardown now consumes
+# Infrastructure.Network.Windows (Remove-RouterSshPortProxy /
+# Remove-RouterSshPortProxyFirewall) in addition to the SecretManagement
+# stack Read-VmProvisionerConfig needs, so the dependency set is ensured up
+# front rather than left to auto-load.
+. "$PSScriptRoot\Install-ModuleDependencies.ps1"
+
 # ---------------------------------------------------------------------------
 # 1. Load + parse + validate the VmProvisionerConfig secret in one call.
 #    Helper owns the SecretManagement bootstrap, vault read, and schema
@@ -94,8 +102,22 @@ foreach ($env in (Group-VmsByEnvironment -VmDefs $vmDefs)) {
     else {
         $env.WorkloadVms[0].gateway
     }
+
+    # Router external IP is the host-side SSH portproxy's connect target;
+    # known only for a static router (a DHCP router has no config-time
+    # external IP, and a legacy / workload-only environment has no router).
+    # Passed through so Invoke-NetworkTeardown removes the relay
+    # symmetrically with provision's Set-RouterSshPortProxy. Empty/absent
+    # leaves the portproxy step a no-op.
+    $routerExternalIp = if ($env.RouterVms.Count -gt 0 -and
+                            $env.RouterVms[0].PSObject.Properties['ipAddress']) {
+        $env.RouterVms[0].ipAddress
+    }
+    else { '' }
+
     Invoke-NetworkTeardown -PrivateSwitchName $env.Name `
-                           -GatewayIp         $gatewayIp
+                           -GatewayIp         $gatewayIp `
+                           -RouterExternalIp  $routerExternalIp
 }
 
 Write-Host ""
