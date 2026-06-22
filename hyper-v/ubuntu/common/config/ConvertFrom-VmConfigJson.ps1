@@ -10,6 +10,7 @@
 # by Infrastructure.HyperV (already imported by Install-ModuleDependencies)
 # so the shared shape checks are not duplicated across consumers.
 . "$PSScriptRoot\Test-RouterUsesExternalDhcp.ps1"
+. "$PSScriptRoot\Assert-VmUsernameField.ps1"
 . "$PSScriptRoot\Assert-JavaDevKitField.ps1"
 . "$PSScriptRoot\Assert-DotnetSdkField.ps1"
 . "$PSScriptRoot\Assert-DotnetToolsField.ps1"
@@ -110,6 +111,13 @@ function ConvertFrom-VmConfigJson {
             }
         }
         $kind = if ($vm.PSObject.Properties['kind']) { $vm.kind } else { 'workload' }
+
+        # Base-field semantic check (all kinds): reject a username that
+        # collides with a pre-existing Ubuntu system group, which would
+        # make cloud-init's useradd abort the account and leave the VM
+        # unreachable over SSH. Runs after the required-fields check so
+        # 'username' is guaranteed present.
+        Assert-VmUsernameField -Vm $vm
 
         # Optional-field validators. Each one is a no-op when its field is
         # absent and throws with a descriptive message when present-but-malformed.
