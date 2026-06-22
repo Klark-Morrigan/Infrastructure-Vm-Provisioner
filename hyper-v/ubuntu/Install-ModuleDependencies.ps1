@@ -110,10 +110,12 @@ if ($_loaded.Count -ne 1 -or $_loaded[0].Version -ne $_common.Version) {
 # cloud-init readiness poll) and New-VmSshClient / Invoke-SshClientCommand /
 # Invoke-WithVmFileServer / Add-VmFileServerFile (used by the out-of-band
 # post-provisioning file transfers and software installs).
-# >= 1.2.0 is required for New-VmSshClient's -KeepAliveInterval and
+# >= 1.3.0 is required for Test-VmSshCredential (the router credential gate
+# in create-vm.ps1 delegates its connect + auth-vs-transient classification
+# to it); 1.2.0 added New-VmSshClient's -KeepAliveInterval and
 # New-RetryingSshClientWrapper, which the post-provisioning session relies
 # on to survive a transient drop on the flaky NAT/ICS path.
-Invoke-ModuleInstall -ModuleName 'Infrastructure.HyperV' -MinimumVersion '1.2.0'
+Invoke-ModuleInstall -ModuleName 'Infrastructure.HyperV' -MinimumVersion '1.3.0'
 
 # Infrastructure.Network.Windows hosts the Windows-only host-network
 # helpers the preflight + step 4 setup rely on: Reset-IcsSharing,
