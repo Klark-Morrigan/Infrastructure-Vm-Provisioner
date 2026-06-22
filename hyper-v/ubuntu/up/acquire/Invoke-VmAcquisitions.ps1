@@ -60,7 +60,8 @@ function Invoke-VmAcquisitions {
         # same on-host cache as JDK tarballs (see the prefetch table in
         # README.md's provision.ps1 section). Invoke-DotnetSdkAcquisition
         # declares -CacheDir as Mandatory rather than defaulting it
-        # internally so unit tests can target a scratch directory.
+        # internally so the cache location is always an explicit caller
+        # decision (an alternate host cache, a scratch dir, etc.).
         Invoke-WithSubStepTimer `
             -Parent 'Host-side acquisitions' `
             -Name   'dotnet SDK' `

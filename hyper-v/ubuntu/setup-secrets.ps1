@@ -39,8 +39,8 @@ param(
     [switch] $RequireVaultPassword,
 
     # Required. The secret is written as `VmProvisionerConfig-<Suffix>`.
-    # Operator runs pass `Production`; ephemeral fixtures (test
-    # harnesses, parallel workflows) pass their own label so each
+    # Operator runs pass `Production`; ephemeral environments (parallel
+    # workflows, multi-tenant deployments) pass their own label so each
     # lifecycle has an isolated secret.
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]

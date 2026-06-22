@@ -110,7 +110,10 @@ if ($_loaded.Count -ne 1 -or $_loaded[0].Version -ne $_common.Version) {
 # cloud-init readiness poll) and New-VmSshClient / Invoke-SshClientCommand /
 # Invoke-WithVmFileServer / Add-VmFileServerFile (used by the out-of-band
 # post-provisioning file transfers and software installs).
-Invoke-ModuleInstall -ModuleName 'Infrastructure.HyperV' -MinimumVersion '0.11.0'
+# >= 1.2.0 is required for New-VmSshClient's -KeepAliveInterval and
+# New-RetryingSshClientWrapper, which the post-provisioning session relies
+# on to survive a transient drop on the flaky NAT/ICS path.
+Invoke-ModuleInstall -ModuleName 'Infrastructure.HyperV' -MinimumVersion '1.2.0'
 
 # Infrastructure.Network.Windows hosts the Windows-only host-network
 # helpers the preflight + step 4 setup rely on: Reset-IcsSharing,

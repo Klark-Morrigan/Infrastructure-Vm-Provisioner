@@ -32,9 +32,9 @@
 [CmdletBinding()]
 param(
     # Required. The vault read targets `VmProvisionerConfig-<Suffix>`.
-    # Operator invocations pass `Production`; ephemeral fixtures
-    # (parallel workflows, test harnesses, multi-tenant deployments)
-    # pass their own label. Mandatory so a caller cannot silently fall
+    # Operator invocations pass `Production`; ephemeral environments
+    # (parallel workflows, multi-tenant deployments) pass their own
+    # label. Mandatory so a caller cannot silently fall
     # through to a default name and collide with another lifecycle's
     # data.
     [Parameter(Mandatory)]

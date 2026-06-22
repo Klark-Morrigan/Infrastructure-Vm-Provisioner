@@ -114,6 +114,12 @@ function New-DiagnosticSshClientWrapper {
         return $result
     } -Force
 
+    # Forward Connect so a wrapper composed on top of this one (e.g. the
+    # retrying wrapper) can re-establish the underlying session after a
+    # transient drop without reaching past the diagnostic tee.
+    $wrapper | Add-Member -MemberType ScriptMethod -Name 'Connect' `
+        -Value { $this._real.Connect() } -Force
+
     # Forward Disconnect / Dispose so the orchestrator's finally block
     # tears down the real client correctly. The wrapper has no
     # connection state of its own to clean up.

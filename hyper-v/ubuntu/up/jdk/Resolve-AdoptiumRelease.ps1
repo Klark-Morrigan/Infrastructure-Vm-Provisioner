@@ -11,18 +11,19 @@
 #   querying the Adoptium v3 feature_releases endpoint.
 #
 #   Pure helper: no disk writes, no caching, no lockfile reads. Lives in
-#   its own file so it can be unit-tested in isolation.
+#   its own file so the resolution logic stays a self-contained unit.
 #
 #   The Adoptium HTTP call is delegated to Invoke-AdoptiumFeatureReleases
-#   below. Wrapping the call in a separate function gives tests a single
-#   seam to Mock instead of having to stub Invoke-RestMethod globally.
+#   below. Wrapping the call in a separate function isolates the single
+#   outbound HTTP call behind one named boundary, keeping this resolver
+#   pure parsing logic.
 # ---------------------------------------------------------------------------
 
 function Invoke-AdoptiumFeatureReleases {
     # Thin wrapper around Invoke-RestMethod for the GA feature_releases
-    # endpoint. Exists purely as a Mock seam for tests - the resolver does
-    # not call Invoke-RestMethod directly so tests do not need a global
-    # network stub.
+    # endpoint. Isolates the lone network call behind one named boundary
+    # so the resolver above stays pure parsing logic with no direct HTTP
+    # dependency.
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)] [int] $Major,

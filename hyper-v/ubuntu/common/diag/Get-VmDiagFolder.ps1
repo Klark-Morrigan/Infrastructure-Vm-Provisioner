@@ -18,8 +18,8 @@
 #
 #   Pure path constructor - callers create the directory themselves
 #   if they need write access. Keeping the side-effect out of the
-#   helper makes the function trivially testable (pure string in,
-#   pure string out) and lets callers compose differently (some
+#   helper keeps it a pure string-in / string-out transform and lets
+#   callers compose differently (some
 #   want New-Item -Force unconditionally; others want a Test-Path
 #   gate first).
 # ---------------------------------------------------------------------------

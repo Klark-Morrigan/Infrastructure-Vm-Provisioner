@@ -30,8 +30,8 @@
 #        they compare against IPv4 host vNIC values.
 #
 #   Pure function. No Hyper-V calls inside - caller supplies the
-#   adapter sequence so this helper is trivially testable with
-#   plain PSCustomObjects.
+#   adapter sequence, so the helper is a pure transform over plain
+#   PSCustomObjects.
 # ---------------------------------------------------------------------------
 
 # IPv4 dotted-quad regex anchored at both ends so substring matches

@@ -81,17 +81,17 @@ function Invoke-VmPostProvisioning {
     $vmName   = $Vm.vmName
     $vmRef    = $Vm
     # vmConfigPath is the diagnostic-output root. PSObject.Properties
-    # guard because the reconcile path on an existing VM (and unit
-    # tests that build a minimal VM object) may not populate it;
-    # StrictMode turns bare access into PropertyNotFound.
+    # guard because not every caller populates it - the reconcile path on
+    # an existing VM passes a minimal VM object - and StrictMode turns
+    # bare access to a missing property into PropertyNotFound.
     $vmConfigPath               = if ($Vm.PSObject.Properties['vmConfigPath']) {
         $Vm.vmConfigPath
     } else { $null }
     $invokeCloudInitDiagnostics  = ${function:Invoke-CloudInitDiagnostics}
     # Cloud-init poll-with-progress wait. Captured as a closure local
     # for the same scope reason as the other per-step functions; lives
-    # in its own file (Wait-CloudInitFinished.ps1) so the polling
-    # loop, parse, and budget logic is independently testable.
+    # in its own file (Wait-CloudInitFinished.ps1) so the polling loop,
+    # parse, and budget logic stay self-contained behind one entry point.
     $waitCloudInitFinished       = ${function:Wait-CloudInitFinished}
     # Router-only post-cloud-init readiness check. Captured by the
     # closure below for the same scope reason as the other per-step
@@ -111,10 +111,10 @@ function Invoke-VmPostProvisioning {
     # Files-dispatch helper. Captured as a closure local so the
     # orchestrator's closure can invoke it across the module
     # boundary; lives in its own file (Invoke-VmFilesDispatch.ps1)
-    # so the single-vs-bulk routing + optional-flag defaults are
-    # independently testable. Copy-VmFiles / Copy-VmFilesByPattern
-    # are now resolved by Invoke-VmFilesDispatch itself - the
-    # orchestrator no longer captures them.
+    # so the single-vs-bulk routing + optional-flag defaults stay
+    # self-contained. Copy-VmFiles / Copy-VmFilesByPattern are now
+    # resolved by Invoke-VmFilesDispatch itself - the orchestrator no
+    # longer captures them.
     $invokeVmFilesDispatch   = ${function:Invoke-VmFilesDispatch}
     # Reconciler entry points - same capture pattern as the per-step
     # functions above for the same reason (closure does not see
@@ -132,6 +132,11 @@ function Invoke-VmPostProvisioning {
     # Wraps the real SshClient with a tee-to-file logger covering the
     # whole post-provisioning phase. See New-DiagnosticSshClientWrapper.ps1.
     $newDiagSshWrapper       = ${function:New-DiagnosticSshClientWrapper}
+    # Wraps the diagnostic client with reconnect-and-retry so a transient
+    # transport drop on the host<->VM path is ridden out instead of
+    # failing the run. Same closure-capture reason as the helpers above.
+    # New-RetryingSshClientWrapper is exported by Infrastructure.HyperV.
+    $newRetryingSshWrapper   = ${function:New-RetryingSshClientWrapper}
     # Connect helper that decides between a direct SSH session and a
     # jump-through-router session based on $vmRef._RouterVm. Same
     # closure-capture reason as the per-step functions above; without
@@ -190,6 +195,14 @@ function Invoke-VmPostProvisioning {
                               -VmConfigPath  $vmConfigPath `
                               -VmName        $vmName `
                               -Timestamp     $vmRef._diagTimestamp
+
+            # Compose reconnect-and-retry OVER the diagnostic tee, so every
+            # downstream RunCommand (cloud-init wait, router checks, files,
+            # reconcile, env vars) rides out a transient transport drop and
+            # each retried attempt is still logged by the inner wrapper.
+            # Keepalive (New-VmSshClient) narrows the drop window; this is
+            # the belt to that brace for the flaky NAT/ICS host<->VM path.
+            $sshClient = & $newRetryingSshWrapper -InnerClient $sshClient
 
             # cloud-init may still be running its later modules (apt holding
             # the dpkg lock, runcmd not yet started). Wait once, here, so no
@@ -262,7 +275,7 @@ function Invoke-VmPostProvisioning {
             # regression surfaces at provision time with a clear
             # message, not later downstream. Workload VMs skip this -
             # they have no router-specific state. PSObject.Properties
-            # guard because tests may build a VM def without kind.
+            # guard because a minimal VM object may omit the kind field.
             $kind = if ($vmRef.PSObject.Properties['kind']) {
                 $vmRef.kind
             } else { '' }

@@ -323,6 +323,14 @@ BeforeAll {
         param($RealClient, $VmConfigPath, $VmName, $Timestamp)
         return $RealClient
     }
+    # Passthrough stub for Infrastructure.HyperV's New-RetryingSshClientWrapper
+    # (its retry/reconnect behaviour is covered in that module's own tests);
+    # here it must be a transparent no-op so the orchestrator's downstream
+    # RunCommand calls reach the fake client unchanged.
+    function global:New-RetryingSshClientWrapper {
+        param($InnerClient, $MaxAttempts, $BackoffStrategy)
+        return $InnerClient
+    }
 
     function global:Copy-VmFilesByPattern {
         param($SshClient, $Server, $Pattern, $TargetDir,
