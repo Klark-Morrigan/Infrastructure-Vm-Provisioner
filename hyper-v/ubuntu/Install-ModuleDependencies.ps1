@@ -131,7 +131,7 @@ Invoke-ModuleInstall -ModuleName 'Infrastructure.HyperV' -MinimumVersion '1.3.0'
 # network / restart+reboot) instead of the manual checklist the terminal
 # FAIL used to print. Subsumes the older 0.6.0 floor (which pinned
 # Set-RouterSshPortProxyFirewall's reboot-stable WSL-NAT-range scoping).
-Invoke-ModuleInstall -ModuleName 'Infrastructure.Network.Windows' -MinimumVersion '1.1.0'
+Invoke-ModuleInstall -ModuleName 'Infrastructure.Network.Windows' -MinimumVersion '1.2.0'
 
 # Infrastructure.Wsl provides Invoke-WslShell (used by
 # Test-WslRouterReachability) and Assert-Wsl2Ready / Assert-WslHasBash
