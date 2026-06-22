@@ -49,7 +49,7 @@ BeforeAll {
     "ramGB":             4,
     "diskGB":            40,
     "ubuntuVersion":     "24.04",
-    "username":          "admin",
+    "username":          "ciadmin",
     "password":          "s3cr3t",
     "ipAddress":         "10.0.0.10",
     "subnetMask":        "255.255.255.0",
@@ -180,6 +180,28 @@ Describe 'ConvertFrom-VmConfigJson' {
             Mock Assert-RequiredProperties { throw "missing required field 'ipAddress'" }
             { ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]" } |
                 Should -Throw -ExpectedMessage "*missing required field*"
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'Assert-VmUsernameField wiring' {
+    # ------------------------------------------------------------------
+
+        It 'invokes Assert-VmUsernameField once per VM' {
+            # Wiring-only check; the reserved-name rule itself is covered in
+            # Assert-VmUsernameField.Tests.ps1.
+            Mock Assert-VmUsernameField {}
+            $json = "[$(New-ValidVmJson 'node-01'), $(New-ValidVmJson 'node-02')]"
+            @(ConvertFrom-VmConfigJson -Json $json)
+            Should -Invoke Assert-VmUsernameField -Times 2 -Exactly
+        }
+
+        It 'rejects a reserved-group username (admin) end-to-end' {
+            # End-to-end through the orchestrator with the real validator:
+            # the canonical collision that left a router unreachable.
+            $json = (New-ValidVmJson) -replace '"ciadmin"', '"admin"'
+            { ConvertFrom-VmConfigJson -Json "[$json]" } |
+                Should -Throw -ExpectedMessage "*username 'admin' collides*"
         }
     }
 

@@ -186,7 +186,7 @@ Re-running safely updates the stored config.
     "ramGB":              1,
     "diskGB":             20,
     "ubuntuVersion":      "24.04",
-    "username":           "admin",
+    "username":           "routeradmin",
     "password":           "...",
     "subnetMask":         "24",
     "dns":                "8.8.8.8",
@@ -233,7 +233,7 @@ After first boot, connect via `ssh username@ipAddress`.
 | `ramGB`         | int    | RAM in GB (static allocation)                      |
 | `diskGB`        | int    | OS disk size in GB                                 |
 | `ubuntuVersion` | string | Ubuntu release, e.g. `"24.04"`                     |
-| `username`      | string | OS user created by cloud-init on first boot        |
+| `username`      | string | OS user created by cloud-init on first boot. Must NOT be a stock Ubuntu system-group name (e.g. `admin`, `users`, `staff`): `useradd` would collide with the existing group and leave the VM with no login. Validated at config-load. |
 | `password`      | string | Password for that user (plain text in vault only)  |
 | `ipAddress`     | string | Static IPv4 address inside the VM. **Required** for workload VMs, and for router VMs (static is the only supported router mode; `externalDhcp: true`, which would DHCP-discover the IP instead, is rejected by the validator - see `externalDhcp`). |
 | `subnetMask`    | string | CIDR prefix length, e.g. `"24"`. Required on every VM - workloads use it for their NIC; router VMs use it for the priv0 (downstream) NIC even under DHCP. |
@@ -640,7 +640,7 @@ host's NAT slot. Background: see
   "ramGB":              1,
   "diskGB":             20,
   "ubuntuVersion":      "24.04",
-  "username":           "admin",
+  "username":           "routeradmin",
   "password":           "...",
   "ipAddress":          "192.168.137.20",
   "subnetMask":         "24",
