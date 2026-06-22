@@ -229,6 +229,7 @@ BeforeAll {
             vmName              = 'router-01'
             vmConfigPath        = 'C:\a_VMs\Hyper-V\Config'
             username            = 'admin'
+            password            = 'router-secret'
             ipAddress           = '192.168.1.10'
             cpuCount            = 2
             ramGB               = 4
@@ -250,6 +251,7 @@ BeforeAll {
             vmName              = 'router-01'
             vmConfigPath        = 'C:\a_VMs\Hyper-V\Config'
             username            = 'admin'
+            password            = 'router-secret'
             cpuCount            = 2
             ramGB               = 4
             _vhdxPath           = 'C:\VMs\router-01\router-01.vhdx'
