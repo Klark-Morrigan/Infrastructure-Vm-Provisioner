@@ -331,7 +331,9 @@ Describe 'provision.ps1 - jump host wiring (feature 53 step 3 follow-up)' {
     It 'pins Infrastructure.HyperV to the version that exports the jump-aware SSH helpers' {
         # New-VmSshTunnel / New-VmSshClientWithJump / Test-SshBanner
         # moved into Infrastructure.HyperV >= 0.11.0; provision.ps1 no
-        # longer dot-sources them locally. Lock the MinimumVersion pin
+        # longer dot-sources them locally. The pin moved again to >= 1.1.0
+        # for New-VmSshClient's -KeepAliveInterval, which the
+        # post-provisioning session relies on. Lock the MinimumVersion pin
         # here so a future downgrade does not break the load graph
         # silently (the helpers would resolve to whatever earlier
         # version was already on PSGallery and we would only catch it
@@ -339,7 +341,7 @@ Describe 'provision.ps1 - jump host wiring (feature 53 step 3 follow-up)' {
         $depsPath = Join-Path (Split-Path $script:provisionPath -Parent) `
             'Install-ModuleDependencies.ps1'
         $depsText = Get-Content -Path $depsPath -Raw
-        $depsText | Should -Match "Infrastructure\.HyperV.*MinimumVersion\s+'0\.1[1-9]\.\d+'"
+        $depsText | Should -Match "Infrastructure\.HyperV.*MinimumVersion\s+'(1\.[1-9]\d*\.\d+|[2-9]\.\d+\.\d+)'"
     }
 
     It 'stamps _RouterVm onto every workload in the network-setup loop' {

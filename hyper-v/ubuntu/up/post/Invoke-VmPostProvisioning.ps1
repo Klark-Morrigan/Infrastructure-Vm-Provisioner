@@ -132,6 +132,11 @@ function Invoke-VmPostProvisioning {
     # Wraps the real SshClient with a tee-to-file logger covering the
     # whole post-provisioning phase. See New-DiagnosticSshClientWrapper.ps1.
     $newDiagSshWrapper       = ${function:New-DiagnosticSshClientWrapper}
+    # Wraps the diagnostic client with reconnect-and-retry so a transient
+    # transport drop on the host<->VM path is ridden out instead of
+    # failing the run. Same closure-capture reason as the helpers above.
+    # New-RetryingSshClientWrapper is exported by Infrastructure.HyperV.
+    $newRetryingSshWrapper   = ${function:New-RetryingSshClientWrapper}
     # Connect helper that decides between a direct SSH session and a
     # jump-through-router session based on $vmRef._RouterVm. Same
     # closure-capture reason as the per-step functions above; without
@@ -190,6 +195,14 @@ function Invoke-VmPostProvisioning {
                               -VmConfigPath  $vmConfigPath `
                               -VmName        $vmName `
                               -Timestamp     $vmRef._diagTimestamp
+
+            # Compose reconnect-and-retry OVER the diagnostic tee, so every
+            # downstream RunCommand (cloud-init wait, router checks, files,
+            # reconcile, env vars) rides out a transient transport drop and
+            # each retried attempt is still logged by the inner wrapper.
+            # Keepalive (New-VmSshClient) narrows the drop window; this is
+            # the belt to that brace for the flaky NAT/ICS host<->VM path.
+            $sshClient = & $newRetryingSshWrapper -InnerClient $sshClient
 
             # cloud-init may still be running its later modules (apt holding
             # the dpkg lock, runcmd not yet started). Wait once, here, so no
