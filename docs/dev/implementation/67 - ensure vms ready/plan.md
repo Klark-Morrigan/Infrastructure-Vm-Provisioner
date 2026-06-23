@@ -15,10 +15,12 @@ off-the-shelf survey, and rationale.
 
 ## Step 1 - Confirm Infrastructure.HyperV dependency floor
 
-**Reason:** Step 3 and Step 5 import-resolve `New-VmSshTunnel`,
-`Wait-VmSshBannerReachable`, and `Get-VmKvpIpAddress` at provision-time,
-so the `Infrastructure.HyperV` `-MinimumVersion` floor must already ship
-all three before those steps can run on a clean machine. Splitting the
+**Reason:** Step 3 and Step 5 import-resolve `New-VmSshTunnel` and
+`Get-VmKvpIpAddress` from `Infrastructure.HyperV` at provision-time, so
+its `-MinimumVersion` floor must already ship both before those steps
+can run on a clean machine. (`Wait-VmSshBannerReachable` is a repo-local
+helper under `common/ssh/`, not a HyperV cmdlet, so it imposes no floor.)
+Splitting the
 version pin from the behavioural changes keeps diffs focused, mirroring
 [38 - start vms Step 1](../38%20-%20start%20vms/plan.md#step-1---confirm-infrastructurehyperv-dependency-floor).
 
@@ -60,12 +62,10 @@ flowchart LR
     subgraph hv[Infrastructure-HyperV]
         Psd1[Infrastructure.HyperV.psd1]
         T1[New-VmSshTunnel]
-        T2[Wait-VmSshBannerReachable]
         T3[Get-VmKvpIpAddress]
     end
     IMD -- "-MinimumVersion >= floor" --> Psd1
     Psd1 --- T1
-    Psd1 --- T2
     Psd1 --- T3
 ```
 
