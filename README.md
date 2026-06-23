@@ -22,6 +22,7 @@
 - [Test-HostNetworkPreflight.ps1](#test-hostnetworkpreflightps1)
 - [Get-VmRuntimeDiag.ps1](#get-vmruntimediagps1)
 - [start-vms.ps1](#start-vmsps1)
+- [ensure-vms-ready.ps1](#ensure-vms-readyps1)
 - [deprovision.ps1](#deprovisionps1)
 - [CI](#ci)
 - [Repo structure](#repo-structure)
@@ -65,7 +66,10 @@ PSGallery automatically on first run.
 # 3. Bring VMs back up after a reboot (run as Administrator)
 .\hyper-v\ubuntu\start-vms.ps1
 
-# 4. Remove VMs when no longer needed (run as Administrator)
+# 4. Bring the fleet back to ready after a host reboot (run as Administrator)
+.\hyper-v\ubuntu\ensure-vms-ready.ps1 -SecretSuffix Production
+
+# 5. Remove VMs when no longer needed (run as Administrator)
 .\hyper-v\ubuntu\deprovision.ps1
 ```
 
@@ -1092,6 +1096,53 @@ or run any post-provisioning step. "Power on" is a distinct concern from
 with their own `Wait-VmSshReady` loop. Hyper-V's native per-VM
 `AutomaticStartAction` covers the auto-start-on-boot case and is
 deliberately not what this script does.
+
+---
+
+## ensure-vms-ready.ps1
+
+Run as Administrator to bring an already-provisioned fleet back to
+**SSH-ready** after a host reboot. This is the heavier sibling of
+`start-vms.ps1`: it powers every VM on (via the same power-on path) and
+then waits until each one is actually reachable over SSH.
+
+```powershell
+.\hyper-v\ubuntu\ensure-vms-ready.ps1 -SecretSuffix Production
+```
+
+**What "ready" means** — powered on, booted, and answering an `SSH-`
+banner on port 22. It is *reachability*, not a credentialed login: the
+script confirms the SSH daemon is up, not that a given account can log
+in. Reachability is delegated to the shared `Wait-VmSshAccessible`
+helper that `provision.ps1` uses, so this script and provisioning agree
+on the definition.
+
+**Router-first ordering** — VMs are grouped by environment (one Private
+switch per environment). Within each environment the **router is readied
+before its workloads**: a workload sits on a private switch the host has
+no route to, so it is only reachable by tunnelling through a live router
+acting as its SSH jump host. A router that fails power-on or never
+answers **short-circuits its workloads** — they are reported
+`Unreachable (router not ready)` without a wasted tunnel attempt.
+Standalone VMs (an environment with no router) are probed directly.
+Environments are independent: a dead router in one does not stop another
+from being readied.
+
+**Per-VM failure policy** — one bad VM never strands the rest. Power-on
+failures, router failures, and per-VM readiness timeouts are recorded and
+folded into a final aggregate line
+(`Ready: N, Unreachable: M, Power-on failed: K`). The script exits 1 if
+any VM is not `Ready` and 0 otherwise; it never throws past the
+orchestration loop. The readiness deadline is deliberately shorter than
+`provision.ps1`'s first-boot budget — an existing VM is only rebooting,
+not installing.
+
+**Idempotent** — re-running against a fleet that is already up reports
+every VM `Ready`, exit code 0, and changes no Hyper-V state.
+
+Contrast with `start-vms.ps1`: that script is power-on **only** — the
+lighter path for an operator about to RDP. Reach for `ensure-vms-ready.ps1`
+when you (or automation) need the fleet actually reachable over SSH.
 
 ---
 
