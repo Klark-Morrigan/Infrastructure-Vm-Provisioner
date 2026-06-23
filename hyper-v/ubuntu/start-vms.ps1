@@ -53,6 +53,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common\config\ConvertFrom-VmConfigJson.ps1"
 . "$PSScriptRoot\common\config\Get-SanitizedVmDisplay.ps1"
 . "$PSScriptRoot\common\config\Read-VmProvisionerConfig.ps1"
+. "$PSScriptRoot\common\power\Invoke-VmFleetPowerOn.ps1"
 
 # ---------------------------------------------------------------------------
 # 1. Install / import every required module via the centralised helper.
@@ -74,32 +75,23 @@ $vmDefs = Read-VmProvisionerConfig -SecretSuffix $SecretSuffix
 
 # ---------------------------------------------------------------------------
 # 3. Per-VM power-on
-#    One try/catch around each Start-VmIfStopped call so a single failure
-#    does not strand the rest of the list. Successful transitions land in
-#    $transitions; failures land in $failed with the original exception
-#    message. Both accumulators are initialised to @() outside the loop -
-#    using an `if` expression here would yield $null on an empty match
-#    under strict mode, so the explicit @() keeps them arrays.
+#    The per-VM Start-VmIfStopped loop (with its one-try/catch-per-VM
+#    failure isolation) lives in Invoke-VmFleetPowerOn so the power-on
+#    contract has a single home any caller can reuse. The helper returns
+#    { Transitions; Failed }; this script keeps the presentation and
+#    exit-code policy. The per-VM transition lines are printed here from
+#    $transitions in input order.
 # ---------------------------------------------------------------------------
 
-$transitions = @()
-$failed      = @()
+$result      = Invoke-VmFleetPowerOn -VmDefs $vmDefs
+$transitions = $result.Transitions
+$failed      = $result.Failed
 
 Write-Host ""
 
-foreach ($vm in $vmDefs) {
-    try {
-        $result = Start-VmIfStopped -VmName $vm.vmName
-        $transitions += $result
-        Write-Host ("{0}: {1} -> {2}" -f `
-                    $result.VmName, $result.EntryState, $result.Action)
-    }
-    catch {
-        $failed += [PSCustomObject]@{
-            VmName = $vm.vmName
-            Reason = $_.Exception.Message
-        }
-    }
+foreach ($t in $transitions) {
+    Write-Host ("{0}: {1} -> {2}" -f `
+                $t.VmName, $t.EntryState, $t.Action)
 }
 
 # ---------------------------------------------------------------------------
