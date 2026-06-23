@@ -291,34 +291,45 @@ and tests as the regression net.
 **Decisions locked**
 
 - Replace the inline tunnel creation + router-side gate + banner poll
-  ([create-vm.ps1:276-382](../../../../hyper-v/ubuntu/up/vm/create-vm.ps1))
-  with a single `Wait-VmSshAccessible` call. The KVP IP discovery block
-  (lines 237-266), the timeout-diag-and-throw block (lines 394-426), the
-  router credential gate (lines 437-449), and the `finally`
-  serial-console + seed-ISO cleanup (lines 453-467) all **stay** in
+  ([create-vm.ps1](../../../../hyper-v/ubuntu/up/vm/create-vm.ps1))
+  with a single `Wait-VmSshAccessible` call. The KVP IP discovery block,
+  the timeout-diag-and-throw block, the router credential gate, and the
+  `finally` serial-console + seed-ISO cleanup all **stay** in
   `create-vm.ps1`.
+- The helper is dot-sourced by `provision.ps1` (create-vm's loader),
+  alphabetised in the existing `common/ssh/` group, **not** by
+  `create-vm.ps1` itself: create-vm.ps1 dot-sources nothing and pulls
+  every helper through provision.ps1's chain, so that is the single
+  place its dependency floor is declared.
 - Mapping of today's behaviour onto the call:
   - `$hasRouter` -> pass `-RouterVm $Vm._RouterVm` (else `$null`).
   - The router-side gate (`Assert-WorkloadReachableViaRouter` + its
-    diag bundle, lines 298-353) moves **into** an `-OnTunnelOpened`
-    scriptblock so it runs against the helper-owned tunnel's
-    `JumpClient`. The scriptblock keeps closing over a plain string
-    `$vmName` (`.GetNewClosure()`), not the `PSCustomObject`, exactly as
-    today.
-  - The `$onPollVmState` "VM no longer Running" closure (lines 366-376)
-    passes through as `-OnPoll` unchanged.
+    diag bundle) moves **into** an `-OnTunnelOpened` scriptblock so it
+    runs against the helper-owned tunnel's `JumpClient` (read off the
+    `$tunnel` param the helper passes in). The scriptblock closes over
+    `$Vm` via `.GetNewClosure()` - it needs the def for the field reads
+    and the `Invoke-VmRuntimeDiag -Vm $Vm` capture - while the inner
+    per-poll guard it builds closes over a plain string `$vmName`, the
+    same shape as the banner-poll guard below.
+  - The `$onPollVmState` "VM no longer Running" closure (closing over a
+    plain string `$vmName`) passes through as `-OnPoll` unchanged.
   - `Wait-VmSshAccessible` returns `Reachable`; create-vm keeps the
     `if (-not $sshReady)` timeout diag + throw, now keyed on
     `$result.Reachable`.
 - Tunnel disposal moves into the helper's `finally`; create-vm's own
-  `finally` loses the `if ($null -ne $sshTunnel) { $sshTunnel.Dispose() }`
-  line (lines 457-458) but keeps `Stop-SerialConsoleCapture` and
-  `Remove-VmSeedIso`. The "tear the tunnel down before seed-ISO cleanup"
-  ordering is preserved because the helper disposes on return, before
-  create-vm's seed cleanup runs.
+  `finally` loses the `$sshTunnel.Dispose()` line but keeps
+  `Stop-SerialConsoleCapture` and `Remove-VmSeedIso`. The "tear the
+  tunnel down before seed-ISO cleanup" ordering is preserved because the
+  helper disposes on return, before create-vm's seed cleanup runs.
 - `Invoke-WithSubStepTimer`, `Format-ElapsedBudgetWithGradient`, and the
   10-minute `$deadline` stay in create-vm and wrap the helper call - the
   helper receives the already-computed `$deadline`.
+- The `Polling SSH on <vm> ...` label sits immediately before the
+  banner dots the helper paints. Since the helper owns the banner poll,
+  the label is printed as the last act of the `-OnTunnelOpened` gate for
+  workloads (after the gate's own output block) and directly before the
+  helper call for routers (no gate output to follow). This keeps the
+  operator output byte-identical for both kinds.
 - No behaviour change for either VM kind: workloads still get the
   router-side diag gate then the tunnelled banner poll; routers still
   get the direct banner poll then the credential gate.
@@ -326,20 +337,27 @@ and tests as the regression net.
 **Files**
 
 - [hyper-v/ubuntu/up/vm/create-vm.ps1](../../../../hyper-v/ubuntu/up/vm/create-vm.ps1) -
-  dot-source `Wait-VmSshAccessible.ps1`; collapse the tunnel/gate/poll
-  block into the call described above; drop the now-helper-owned tunnel
-  disposal from the `finally`.
-- `Tests/up/vm/create-vm.Tests.ps1` (existing, if present) - update any
-  assertion that spied on the inline `New-VmSshTunnel` /
-  `Wait-VmSshBannerReachable` calls to instead assert
-  `Wait-VmSshAccessible` is invoked with the right `-RouterVm` /
-  `-OnTunnelOpened` / `-OnPoll`; the router-side-gate and banner
-  behaviour are now covered by Step 3's suite. If no dot-sourceable
-  suite exists for create-vm (top-level side effects), add AST-based
-  structural assertions mirroring `deprovision.Tests.ps1`'s style:
-  the helper is dot-sourced and called; the diag/serial/seed cleanup
-  still surrounds it; the router credential gate still follows a
-  reachable router.
+  collapse the tunnel/gate/poll block into the `Wait-VmSshAccessible`
+  call described above; drop the now-helper-owned tunnel disposal from
+  the `finally`.
+- [hyper-v/ubuntu/provision.ps1](../../../../hyper-v/ubuntu/provision.ps1) -
+  dot-source `common/ssh/Wait-VmSshAccessible.ps1`, alphabetised in the
+  existing `common/ssh/` group (between `Assert-VmSshCredentialsAccepted`
+  and `Wait-VmSshBannerReachable`). provision.ps1 is create-vm's loader,
+  so the new dependency is declared here, not in create-vm.ps1.
+- [Tests/up/vm/Invoke-VmCreation.Tests.ps1](../../../../Tests/up/vm/Invoke-VmCreation.Tests.ps1) -
+  the existing dot-sourceable behavioural suite. Drop the now-internal
+  `New-VmSshTunnel` / `Wait-VmSshBannerReachable` stubs+spies; stub+mock
+  `Wait-VmSshAccessible` returning a `Reachable` result object and assert
+  the delegation contract (`-RouterVm`, `-OnTunnelOpened`, `-OnPoll`).
+  The router-side-gate body is exercised by capturing the
+  `-OnTunnelOpened` scriptblock from the mock and firing it against a
+  fake tunnel; because a `.GetNewClosure()` block binds to its own module
+  scope (resolving neither the per-It mocks nor the dot-sourced stubs),
+  the test rebinds it with `[scriptblock]::Create($gate.ToString())` to
+  the test session state and supplies the one closure variable it reads
+  (`$Vm`). Tunnel-lifecycle + banner-poll behaviour are covered by
+  Step 3's `Wait-VmSshAccessible.Tests.ps1`.
 
 **Tests (unit, mocked)**
 
@@ -349,7 +367,7 @@ and tests as the regression net.
 - Workload path: the `-OnTunnelOpened` scriptblock passed by create-vm,
   when invoked with a fake tunnel, calls `Assert-WorkloadReachableViaRouter`
   with the tunnel's `JumpClient`; on its failure the runtime-diag
-  capture still fires (behaviour preserved from lines 343-352).
+  capture still fires before the throw propagates.
 - A `Reachable = $false` result triggers the existing timeout headline +
   `Invoke-VmRuntimeDiag` + throw.
 - Router path: after a reachable result, `Assert-VmSshCredentialsAccepted`
