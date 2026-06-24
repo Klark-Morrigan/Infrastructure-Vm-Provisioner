@@ -66,7 +66,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common\config\Read-VmProvisionerConfig.ps1"
 . "$PSScriptRoot\common\network\Resolve-ExistingRouterIp.ps1"
 . "$PSScriptRoot\common\power\Invoke-VmFleetPowerOn.ps1"
-. "$PSScriptRoot\common\ssh\Wait-VmSshAccessible.ps1"
+. "$PSScriptRoot\common\ssh\Resolve-VmReadinessStatus.ps1"
 
 # Reboot-recovery budget per VM. Deliberately shorter than create-vm's
 # 10-minute first-boot window: an existing VM is only coming back from a
@@ -74,60 +74,6 @@ $ErrorActionPreference = 'Stop'
 # means the VM is not coming back, not that it is still working. Revisit
 # on the first real production run.
 $readinessTimeoutMinutes = 5
-
-# ---------------------------------------------------------------------------
-# Invoke-VmReadinessWait (script-local)
-#   Wraps a single Wait-VmSshAccessible call with the per-poll Hyper-V
-#   state guard and the reboot-recovery deadline, and converts any throw
-#   (the VM stopped mid-wait, a tunnel that could not open) into a plain
-#   "not reachable" so the fleet loop is never stranded by one VM. Shared
-#   by the router and workload branches so the wait contract has one home.
-# ---------------------------------------------------------------------------
-function Invoke-VmReadinessWait {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [object] $Vm,
-
-        # The environment router for a workload, or $null for a router /
-        # standalone VM (selects Wait-VmSshAccessible's direct-probe branch).
-        [Parameter()]
-        [AllowNull()]
-        [object] $RouterVm
-    )
-
-    # The Hyper-V "VM no longer Running" early-exit, forwarded as -OnPoll.
-    # Closes over a plain string ($vmName) rather than $Vm.vmName so the
-    # callback resolves the same way when invoked from another session
-    # state, matching create-vm.ps1's pattern.
-    $vmName = $Vm.vmName
-    $onPoll = {
-        $vmState = (Get-VM -Name $vmName).State
-        if ($vmState -ne 'Running') {
-            Write-Host ''
-            throw "VM '$vmName' is no longer Running (state: $vmState)."
-        }
-    }.GetNewClosure()
-
-    # Caller owns the budget; compute the deadline per VM so a slow router
-    # does not eat into a workload's window.
-    $deadline = (Get-Date).AddMinutes($readinessTimeoutMinutes)
-
-    try {
-        $result = Wait-VmSshAccessible `
-                      -Vm       $Vm `
-                      -RouterVm $RouterVm `
-                      -Deadline $deadline `
-                      -OnPoll   $onPoll
-        return [bool] $result.Reachable
-    }
-    catch {
-        # A guard throw (VM stopped) or a tunnel-open failure means this VM
-        # is not reachable. Record it as such and let the loop continue -
-        # the readiness wait never propagates past the orchestration loop.
-        return $false
-    }
-}
 
 # ---------------------------------------------------------------------------
 # 1. Install / import every required module via the centralised helper.
@@ -157,6 +103,19 @@ $vmDefs = Read-VmProvisionerConfig -SecretSuffix $SecretSuffix
 
 $powerOn       = Invoke-VmFleetPowerOn -VmDefs $vmDefs
 $failedPowerOn = @($powerOn.Failed | ForEach-Object { $_.VmName })
+
+# Show what power-on did before the wait. A VM reported AlreadyRunning vs
+# freshly Started vs failed is the first thing to check when a readiness
+# wait later times out - without this the operator cannot tell whether the
+# fleet was even powered on.
+Write-Host ""
+foreach ($t in $powerOn.Transitions) {
+    Write-Host ("  {0}: {1} -> {2}" -f $t.VmName, $t.EntryState, $t.Action)
+}
+foreach ($f in $powerOn.Failed) {
+    Write-Host ("  {0}: power-on FAILED - {1}" -f $f.VmName, $f.Reason) `
+        -ForegroundColor Red
+}
 
 # ---------------------------------------------------------------------------
 # 4. Readiness wait, router-first per environment.
@@ -198,20 +157,12 @@ foreach ($env in @(Group-VmsByEnvironment -VmDefs $vmDefs)) {
         }
         Resolve-ExistingRouterIp -RouterVm $router
 
-        Write-Host "  Waiting for router '$($router.vmName)' ..." -NoNewline
-        if (Invoke-VmReadinessWait -Vm $router -RouterVm $null) {
-            Write-Host ' ready' -ForegroundColor Green
-            $readiness += [PSCustomObject]@{
-                VmName = $router.vmName; Status = 'Ready'
-            }
-        }
-        else {
-            Write-Host ' unreachable' -ForegroundColor Red
-            $readiness += [PSCustomObject]@{
-                VmName = $router.vmName; Status = 'Unreachable'
-            }
-            $routersReady = $false
-        }
+        $status = Resolve-VmReadinessStatus -Vm $router -RouterVm $null `
+                      -Kind 'router' -TimeoutMinutes $readinessTimeoutMinutes
+        $readiness += [PSCustomObject]@{ VmName = $router.vmName; Status = $status }
+        # A router that is not ready cannot carry a workload's tunnel, so its
+        # workloads are short-circuited below.
+        if ($status -ne 'Ready') { $routersReady = $false }
     }
 
     # Workloads second - only attempted once their router is ready.
@@ -233,19 +184,9 @@ foreach ($env in @(Group-VmsByEnvironment -VmDefs $vmDefs)) {
             continue
         }
 
-        Write-Host "  Waiting for workload '$($workload.vmName)' ..." -NoNewline
-        if (Invoke-VmReadinessWait -Vm $workload -RouterVm $jumpRouter) {
-            Write-Host ' ready' -ForegroundColor Green
-            $readiness += [PSCustomObject]@{
-                VmName = $workload.vmName; Status = 'Ready'
-            }
-        }
-        else {
-            Write-Host ' unreachable' -ForegroundColor Red
-            $readiness += [PSCustomObject]@{
-                VmName = $workload.vmName; Status = 'Unreachable'
-            }
-        }
+        $status = Resolve-VmReadinessStatus -Vm $workload -RouterVm $jumpRouter `
+                      -Kind 'workload' -TimeoutMinutes $readinessTimeoutMinutes
+        $readiness += [PSCustomObject]@{ VmName = $workload.vmName; Status = $status }
     }
 }
 

@@ -66,6 +66,20 @@ BeforeAll {
             -Encoding UTF8
     }
 
+    # The readiness-status chain (Resolve-VmReadinessStatus ->
+    # Invoke-VmReadinessWait) is the orchestration this suite pins, so its
+    # REAL files are copied into the shim rather than emptied. They bottom out
+    # at Wait-VmSshAccessible, which stays an empty stub above so the call
+    # resolves to the mocked test-scope function instead of the real probe.
+    $ubuntuDir = Join-Path $PSScriptRoot '..\hyper-v\ubuntu'
+    foreach ($rel in @(
+        'common\ssh\Invoke-VmReadinessWait.ps1',
+        'common\ssh\Resolve-VmReadinessStatus.ps1'
+    )) {
+        Copy-Item -LiteralPath (Join-Path $ubuntuDir $rel) `
+            -Destination (Join-Path $script:shimDir $rel) -Force
+    }
+
     # Rewrite the terminal `exit (...)` into a pipeline-emitted expression so
     # the chosen exit code is captured from `& $shimPath` instead of killing
     # the test process. `$$` in the .NET regex replacement yields a literal
@@ -159,9 +173,9 @@ Describe 'ensure-vms-ready.ps1 - orchestration' {
             Mock Invoke-VmFleetPowerOn {
                 [PSCustomObject]@{
                     Transitions = @(
-                        [PSCustomObject]@{ VmName='router-prod'; Action='Started' },
-                        [PSCustomObject]@{ VmName='wl-a';        Action='Started' },
-                        [PSCustomObject]@{ VmName='wl-b';        Action='Started' }
+                        [PSCustomObject]@{ VmName='router-prod'; EntryState='Off'; Action='Started' },
+                        [PSCustomObject]@{ VmName='wl-a';        EntryState='Off'; Action='Started' },
+                        [PSCustomObject]@{ VmName='wl-b';        EntryState='Off'; Action='Started' }
                     )
                     Failed = @()
                 }
@@ -348,8 +362,8 @@ Describe 'ensure-vms-ready.ps1 - orchestration' {
             Mock Invoke-VmFleetPowerOn {
                 [PSCustomObject]@{
                     Transitions = @(
-                        [PSCustomObject]@{ VmName='router-prod'; Action='Started' },
-                        [PSCustomObject]@{ VmName='wl-b';        Action='Started' }
+                        [PSCustomObject]@{ VmName='router-prod'; EntryState='Off'; Action='Started' },
+                        [PSCustomObject]@{ VmName='wl-b';        EntryState='Off'; Action='Started' }
                     )
                     Failed = @([PSCustomObject]@{ VmName='wl-a'; Reason='boom' })
                 }
@@ -469,8 +483,8 @@ Describe 'ensure-vms-ready.ps1 - orchestration' {
             Mock Invoke-VmFleetPowerOn {
                 [PSCustomObject]@{
                     Transitions = @(
-                        [PSCustomObject]@{ VmName='router-prod'; Action='AlreadyRunning' },
-                        [PSCustomObject]@{ VmName='wl-a';        Action='AlreadyRunning' }
+                        [PSCustomObject]@{ VmName='router-prod'; EntryState='Running'; Action='AlreadyRunning' },
+                        [PSCustomObject]@{ VmName='wl-a';        EntryState='Running'; Action='AlreadyRunning' }
                     )
                     Failed = @()
                 }
