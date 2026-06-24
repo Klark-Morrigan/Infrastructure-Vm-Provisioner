@@ -296,9 +296,20 @@ RestartSec=5
     # /etc/resolv.conf (bypassing the stub) does NOT help - the breakage
     # is in the NAT path itself, not the resolver layer.
     #
-    # DNS-ready poll: belt-and-suspenders sanity check that at
-    # least one resolver answers before firing apt. `timeout 120`
-    # bounds the wait so a genuinely broken DNS path fails
+    # DNS-ready sync + poll: after `netplan apply` flips ext0 from its
+    # first-boot DHCP lease to the static config, systemd-resolved adopts
+    # the new per-link nameserver (Vm.dns) asynchronously, so a query fired
+    # immediately can race that adoption. Two layers, each covering a
+    # distinct failure:
+    #   - `systemctl restart systemd-resolved` once, before the gate: forces
+    #     resolved to re-read the link config now instead of racing networkd
+    #     (defends against STALE LINK DNS - the DHCP-era nameserver still in
+    #     effect).
+    #   - `resolvectl flush-caches` inside the poll, each iteration: drops a
+    #     stale/negative entry cached while the upstream was still settling
+    #     (defends against a STALE CACHE - otherwise getent can report
+    #     success on a cache hit while the real query still fails under apt).
+    # `timeout 120` bounds the wait so a genuinely broken DNS path fails
     # predictably instead of hanging.
     # ------------------------------------------------------------------
     $userBlock        = New-CloudInitUserBlock -Username $Vm.username -Password $Vm.password
@@ -357,7 +368,8 @@ runcmd:
   - netplan apply
   - sh -c "echo '--- [diag] networkctl post-apply ---'; networkctl --no-pager 2>&1 || true; echo '--- [diag] ip -4 addr ---'; ip -4 -o addr; echo '--- [diag] ip -4 route ---'; ip -4 route"
   - sysctl --system
-  - timeout 120 sh -c 'until getent hosts archive.ubuntu.com >/dev/null 2>&1; do echo "  [wait-dns] DNS not ready yet, retrying ..."; sleep 2; done'
+  - systemctl restart systemd-resolved
+  - timeout 120 sh -c 'until getent hosts archive.ubuntu.com >/dev/null 2>&1; do echo "  [wait-dns] DNS not ready yet, retrying ..."; resolvectl flush-caches 2>/dev/null || true; sleep 2; done'
   - apt-get update
   - DEBIAN_FRONTEND=noninteractive apt-get install -y nftables dnsmasq
   - systemctl enable --now nftables.service

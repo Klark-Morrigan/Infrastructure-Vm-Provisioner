@@ -193,15 +193,17 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
         }
 
         It 'polls DNS readiness with a bounded timeout before apt-get update' {
-            # Belt-and-suspenders: even with /etc/resolv.conf written
-            # we still wait until at least one resolver answers
-            # before firing apt. timeout 120 bounds the wait.
+            # After restarting systemd-resolved to adopt netplan's link DNS,
+            # still gate on a resolver actually answering before firing apt
+            # (the restart fixes stale link config; this loop, flushing the
+            # cache each iteration, fixes a stale/negative cache). timeout
+            # 120 bounds the wait.
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
             Should -Invoke New-SeedIso -ParameterFilter {
                 $Files['user-data'] -match `
-                    "timeout 120 sh -c 'until getent hosts archive\.ubuntu\.com"
+                    "(?s)timeout 120 sh -c 'until getent hosts archive\.ubuntu\.com.+?resolvectl flush-caches"
             }
         }
 
@@ -499,7 +501,7 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
         # above) before `enable --now dnsmasq.service` starts the
         # unit for the first time.
 
-        It 'orders runcmd: diag -> netplan -> diag -> sysctl -> wait-dns -> apt -> nftables -> reload -> dnsmasq' {
+        It 'orders runcmd: diag -> netplan -> diag -> sysctl -> resolved-restart -> wait-dns -> apt -> nftables -> reload -> dnsmasq' {
             Mock Test-Path { $true }
             Mock New-SeedIso {}
             Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
@@ -510,6 +512,7 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
                     '\s*-\s*netplan apply\s*\r?\n' +
                     '\s*-\s*sh -c "echo ''--- \[diag\] networkctl.+?"\s*\r?\n' +
                     '\s*-\s*sysctl --system\s*\r?\n' +
+                    '\s*-\s*systemctl restart systemd-resolved\s*\r?\n' +
                     '\s*-\s*timeout 120 sh -c ''until getent hosts archive\.ubuntu\.com.+?''\s*\r?\n' +
                     '\s*-\s*apt-get update\s*\r?\n' +
                     '\s*-\s*DEBIAN_FRONTEND=noninteractive apt-get install -y nftables dnsmasq\s*\r?\n' +

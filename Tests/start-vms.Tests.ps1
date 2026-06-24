@@ -3,18 +3,25 @@
     Behavioural unit tests for start-vms.ps1.
 
 .DESCRIPTION
-    start-vms.ps1 is a thin orchestrator: read config, iterate, aggregate
-    failures, surface an exit code. Its dependencies (Read-VmProvisionerConfig
-    and Start-VmIfStopped) have their own suites and are mocked here so this
-    file pins only the orchestration logic that lives in start-vms.ps1 itself:
+    start-vms.ps1 is a thin orchestrator: read config, power the fleet on
+    via Invoke-VmFleetPowerOn, then format the result and surface an exit
+    code. Its dependencies (Read-VmProvisionerConfig and the extracted
+    Invoke-VmFleetPowerOn power-on loop) have their own suites and are
+    mocked here so this file pins only the orchestration logic that lives
+    in start-vms.ps1 itself:
 
-      - one Start-VmIfStopped call per VM, in input order;
-      - per-VM transition lines printed in order;
-      - failures recorded and surfaced in the aggregate line + exit code,
-        without aborting the run;
+      - Invoke-VmFleetPowerOn called exactly once with the parsed VM defs;
+      - one per-VM transition line printed per returned transition;
+      - failures surfaced on their own red line + folded into the
+        aggregate line and exit code;
       - empty Failed bucket -> exit 0; non-empty -> exit 1;
+      - the aggregate bucket math survives single-match scalar unrolling;
       - no SSH / file-server cmdlets invoked (the script must not touch
         the post-provisioning surface).
+
+    The per-VM Start-VmIfStopped loop belongs to Invoke-VmFleetPowerOn;
+    its coverage lives in
+    Tests/common/power/Invoke-VmFleetPowerOn.Tests.ps1.
 
     The script cannot be dot-sourced directly because its top-level body
     runs the orchestration as a side effect. The pragmatic harness writes
@@ -22,9 +29,9 @@
 
       - Install-ModuleDependencies.ps1 is empty (so the test host does
         not pay the bootstrap cost),
-      - common/config/*.ps1 helpers are empty (the helper functions used
-        by the script are stubbed in the test scope so Pester's Mock can
-        attach to them),
+      - common/config/*.ps1 and common/power/*.ps1 helpers are empty (the
+        helper functions used by the script are stubbed in the test scope
+        so Pester's Mock can attach to them),
       - the `exit (...)` line is rewritten to assign $script:exitCode and
         return, so the test process is not terminated by the script.
 
@@ -44,11 +51,14 @@ BeforeAll {
         ("start-vms-test-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path (Join-Path $script:shimDir 'common\config') `
         -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $script:shimDir 'common\power') `
+        -Force | Out-Null
 
     foreach ($rel in @(
         'common\config\ConvertFrom-VmConfigJson.ps1',
         'common\config\Get-SanitizedVmDisplay.ps1',
         'common\config\Read-VmProvisionerConfig.ps1',
+        'common\power\Invoke-VmFleetPowerOn.ps1',
         'Install-ModuleDependencies.ps1'
     )) {
         Set-Content -LiteralPath (Join-Path $script:shimDir $rel) -Value '' `
@@ -73,11 +83,11 @@ BeforeAll {
     # Stub functions that the script calls. Pester's Mock attaches to
     # these by name; the real implementations are covered by:
     #   - Tests/common/config/Read-VmProvisionerConfig.Tests.ps1
-    #   - Infrastructure-HyperV/Tests/Start-VmIfStopped.Tests.ps1
-    # SecretSuffix declared on the stub so Pester's ParameterFilter
-    # can bind it when asserting the forwarded value.
+    #   - Tests/common/power/Invoke-VmFleetPowerOn.Tests.ps1
+    # SecretSuffix / VmDefs declared on the stubs so Pester's
+    # ParameterFilter can bind them when asserting forwarded values.
     function Read-VmProvisionerConfig { param([string] $SecretSuffix) }
-    function Start-VmIfStopped { param([string] $VmName) }
+    function Invoke-VmFleetPowerOn    { param([object[]] $VmDefs) }
 
     # SSH / file-server cmdlets the no-side-effect contract forbids the
     # script from touching. Stubbed so the test can assert -Not -Invoke
@@ -92,6 +102,20 @@ BeforeAll {
     # which is mocked here, so the literal value does not matter to the
     # behavioural assertions - it just needs to satisfy the param block.
     $script:TestSuffix = 'Test'
+
+    # Builds an Invoke-VmFleetPowerOn-shaped result object so each Context
+    # can drive the formatting + exit-code contract from a fixture instead
+    # of the real power-on loop.
+    function New-PowerOnResult {
+        param(
+            [object[]] $Transitions = @(),
+            [object[]] $Failed      = @()
+        )
+        [PSCustomObject]@{
+            Transitions = @($Transitions)
+            Failed      = @($Failed)
+        }
+    }
 
     function Invoke-StartVms {
         # The shimmed script emits the chosen exit code to the pipeline
@@ -114,11 +138,11 @@ Describe 'start-vms.ps1 - orchestration' {
     BeforeEach {
         # Default mocks; each Context overrides what it cares about.
         Mock Read-VmProvisionerConfig { }
-        Mock Start-VmIfStopped { }
+        Mock Invoke-VmFleetPowerOn { New-PowerOnResult }
         Mock Write-Host { }
     }
 
-    Context 'happy path - three VMs, one of each transition' {
+    Context 'happy path - three transitions, one of each kind' {
 
         BeforeEach {
             Mock Read-VmProvisionerConfig {
@@ -128,28 +152,34 @@ Describe 'start-vms.ps1 - orchestration' {
                     [PSCustomObject]@{ vmName = 'vm-c' }
                 )
             }
-            Mock Start-VmIfStopped {
-                param([string] $VmName)
-                switch ($VmName) {
-                    'vm-a' { [PSCustomObject]@{ VmName='vm-a'; EntryState='Off';      Action='Started'        } }
-                    'vm-b' { [PSCustomObject]@{ VmName='vm-b'; EntryState='Saved';    Action='Resumed'        } }
-                    'vm-c' { [PSCustomObject]@{ VmName='vm-c'; EntryState='Running';  Action='AlreadyRunning' } }
-                }
+            Mock Invoke-VmFleetPowerOn {
+                New-PowerOnResult -Transitions @(
+                    [PSCustomObject]@{ VmName='vm-a'; EntryState='Off';     Action='Started'        },
+                    [PSCustomObject]@{ VmName='vm-b'; EntryState='Saved';   Action='Resumed'        },
+                    [PSCustomObject]@{ VmName='vm-c'; EntryState='Running'; Action='AlreadyRunning' }
+                )
             }
             Invoke-StartVms
         }
 
-        It 'calls Start-VmIfStopped exactly once per VM' {
-            Should -Invoke Start-VmIfStopped -Times 3 -Exactly
+        It 'calls Invoke-VmFleetPowerOn exactly once with the parsed VM defs' {
+            Should -Invoke Invoke-VmFleetPowerOn -Times 1 -Exactly -ParameterFilter {
+                @($VmDefs).Count -eq 3 -and
+                $VmDefs[0].vmName -eq 'vm-a' -and
+                $VmDefs[2].vmName -eq 'vm-c'
+            }
         }
 
-        It 'calls Start-VmIfStopped with each VmName in input order' {
-            Should -Invoke Start-VmIfStopped -Times 1 -Exactly `
-                -ParameterFilter { $VmName -eq 'vm-a' }
-            Should -Invoke Start-VmIfStopped -Times 1 -Exactly `
-                -ParameterFilter { $VmName -eq 'vm-b' }
-            Should -Invoke Start-VmIfStopped -Times 1 -Exactly `
-                -ParameterFilter { $VmName -eq 'vm-c' }
+        It 'prints one transition line per returned transition' {
+            Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter {
+                $Object -eq 'vm-a: Off -> Started'
+            }
+            Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter {
+                $Object -eq 'vm-b: Saved -> Resumed'
+            }
+            Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter {
+                $Object -eq 'vm-c: Running -> AlreadyRunning'
+            }
         }
 
         It 'emits the aggregate line with the correct bucket counts' {
@@ -177,18 +207,21 @@ Describe 'start-vms.ps1 - orchestration' {
                     [PSCustomObject]@{ vmName = 'vm-d' }
                 )
             }
-            Mock Start-VmIfStopped {
-                param([string] $VmName)
-                if ($VmName -eq 'vm-b') {
-                    throw "VM 'vm-b' is in transient/unsupported state 'Paused'; refusing to call Start-VM."
-                }
-                [PSCustomObject]@{ VmName=$VmName; EntryState='Off'; Action='Started' }
+            Mock Invoke-VmFleetPowerOn {
+                New-PowerOnResult `
+                    -Transitions @(
+                        [PSCustomObject]@{ VmName='vm-a'; EntryState='Off'; Action='Started' },
+                        [PSCustomObject]@{ VmName='vm-c'; EntryState='Off'; Action='Started' },
+                        [PSCustomObject]@{ VmName='vm-d'; EntryState='Off'; Action='Started' }
+                    ) `
+                    -Failed @(
+                        [PSCustomObject]@{
+                            VmName = 'vm-b'
+                            Reason = "VM 'vm-b' is in transient/unsupported state 'Paused'; refusing to call Start-VM."
+                        }
+                    )
             }
             Invoke-StartVms
-        }
-
-        It 'still attempts Start-VmIfStopped for every VM after the failure' {
-            Should -Invoke Start-VmIfStopped -Times 4 -Exactly
         }
 
         It 'surfaces the failed VM on its own line with the upstream reason' {
@@ -213,19 +246,15 @@ Describe 'start-vms.ps1 - orchestration' {
     Context 'multiple failures - all surface, exit 1' {
 
         BeforeEach {
-            Mock Read-VmProvisionerConfig {
-                ,@(
-                    [PSCustomObject]@{ vmName = 'vm-a' },
-                    [PSCustomObject]@{ vmName = 'vm-b' },
-                    [PSCustomObject]@{ vmName = 'vm-c' }
-                )
-            }
-            Mock Start-VmIfStopped {
-                param([string] $VmName)
-                if ($VmName -in 'vm-a','vm-c') {
-                    throw "boom-$VmName"
-                }
-                [PSCustomObject]@{ VmName=$VmName; EntryState='Off'; Action='Started' }
+            Mock Invoke-VmFleetPowerOn {
+                New-PowerOnResult `
+                    -Transitions @(
+                        [PSCustomObject]@{ VmName='vm-b'; EntryState='Off'; Action='Started' }
+                    ) `
+                    -Failed @(
+                        [PSCustomObject]@{ VmName='vm-a'; Reason='boom-vm-a' },
+                        [PSCustomObject]@{ VmName='vm-c'; Reason='boom-vm-c' }
+                    )
             }
             Invoke-StartVms
         }
@@ -253,15 +282,11 @@ Describe 'start-vms.ps1 - orchestration' {
     Context 'every VM fails' {
 
         BeforeEach {
-            Mock Read-VmProvisionerConfig {
-                ,@(
-                    [PSCustomObject]@{ vmName = 'vm-a' },
-                    [PSCustomObject]@{ vmName = 'vm-b' }
+            Mock Invoke-VmFleetPowerOn {
+                New-PowerOnResult -Failed @(
+                    [PSCustomObject]@{ VmName='vm-a'; Reason='boom-vm-a' },
+                    [PSCustomObject]@{ VmName='vm-b'; Reason='boom-vm-b' }
                 )
-            }
-            Mock Start-VmIfStopped {
-                param([string] $VmName)
-                throw "boom-$VmName"
             }
             Invoke-StartVms
         }
@@ -280,20 +305,17 @@ Describe 'start-vms.ps1 - orchestration' {
         }
     }
 
-    Context 'single-VM config - aggregate-line bucket math survives unrolling' {
+    Context 'single-transition result - aggregate-line bucket math survives unrolling' {
 
-        # If a `@(...)` wrapper is dropped from a Where-Object pipeline,
-        # the bucket count for a single match silently becomes the field
-        # value of the unwrapped object - the regex on the literal output
-        # pins the *string*, not an indexed result.
+        # If a `@(...)` wrapper is dropped from a Where-Object pipeline in
+        # start-vms.ps1, the bucket count for a single match silently
+        # becomes the field value of the unwrapped object - the regex on
+        # the literal output pins the *string*, not an indexed result.
         BeforeEach {
-            Mock Read-VmProvisionerConfig {
-                ,@(
-                    [PSCustomObject]@{ vmName = 'vm-only' }
+            Mock Invoke-VmFleetPowerOn {
+                New-PowerOnResult -Transitions @(
+                    [PSCustomObject]@{ VmName='vm-only'; EntryState='Off'; Action='Started' }
                 )
-            }
-            Mock Start-VmIfStopped {
-                [PSCustomObject]@{ VmName='vm-only'; EntryState='Off'; Action='Started' }
             }
             Invoke-StartVms
         }
@@ -336,10 +358,10 @@ Describe 'start-vms.ps1 - orchestration' {
             }
         }
 
-        It 'propagates the helper exception without entering the loop' {
+        It 'propagates the helper exception without powering anything on' {
             { Invoke-StartVms } | Should -Throw `
                 "Vault 'VmProvisioner' not found. Run setup-secrets.ps1 first."
-            Should -Invoke Start-VmIfStopped -Times 0 -Exactly
+            Should -Invoke Invoke-VmFleetPowerOn -Times 0 -Exactly
         }
     }
 
@@ -353,8 +375,10 @@ Describe 'start-vms.ps1 - orchestration' {
             Mock Read-VmProvisionerConfig {
                 ,@([PSCustomObject]@{ vmName = 'vm-a' })
             }
-            Mock Start-VmIfStopped {
-                [PSCustomObject]@{ VmName='vm-a'; EntryState='Off'; Action='Started' }
+            Mock Invoke-VmFleetPowerOn {
+                New-PowerOnResult -Transitions @(
+                    [PSCustomObject]@{ VmName='vm-a'; EntryState='Off'; Action='Started' }
+                )
             }
             Mock Invoke-WithVmFileServer { }
             Mock New-VmSshClient        { }

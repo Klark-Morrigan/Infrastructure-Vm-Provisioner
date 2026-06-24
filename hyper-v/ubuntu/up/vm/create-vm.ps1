@@ -267,39 +267,50 @@ function Invoke-VmCreation {
 
     # Workload VMs after feature 53 sit on a per-environment private
     # switch the host has no route to. provision.ps1 step 7 stamps
-    # _RouterVm onto every workload def; we open a port forward
-    # through that router so the TCP probe below can target a
-    # localhost endpoint that emerges at the workload on the far
-    # side of the jump. Router VMs (and any pre-feature-53 caller)
-    # take the no-tunnel branch and probe the configured IP
-    # directly.
-    $sshTunnel = $null
+    # _RouterVm onto every workload def; Wait-VmSshAccessible opens a
+    # port forward through that router and probes the loopback endpoint
+    # that emerges at the workload on the far side of the jump. Router
+    # VMs (and any pre-feature-53 caller) take the no-router branch and
+    # the helper probes the configured IP directly. Presence of a router
+    # def is what selects the tunnelled path; Wait-VmSshAccessible owns
+    # the tunnel lifecycle (open and dispose).
     $hasRouter = $Vm.PSObject.Properties['_RouterVm'] -and $Vm._RouterVm
-    if ($hasRouter) {
-        $sshTunnel = New-VmSshTunnel `
-                         -TargetIp     $Vm.ipAddress `
-                         -JumpHostIp   $Vm._RouterVm.ipAddress `
-                         -JumpUsername $Vm._RouterVm.username `
-                         -JumpPassword $Vm._RouterVm.password
-        $probeIp   = $sshTunnel.LocalHost
-        $probePort = $sshTunnel.LocalPort
-    } else {
-        $probeIp   = $Vm.ipAddress
-        $probePort = 22
-    }
+    $routerVm  = if ($hasRouter) { $Vm._RouterVm } else { $null }
 
-    try {
-        # Router-side reachability gate. Owns the polling probe plus
-        # the diag bundle capture on failure - see
-        # common\network\Assert-WorkloadReachableViaRouter.ps1 for
-        # the full contract. Lives inside the try block so a gate
-        # throw still disposes the tunnel + serial console capture
-        # via the finally below.
-        if ($hasRouter) {
+    # Router-side reachability gate, handed to Wait-VmSshAccessible as its
+    # -OnTunnelOpened seam so it runs against the helper-owned tunnel's
+    # JumpClient after the forward opens and before the banner poll.
+    # Workloads only; on the router branch $onTunnelOpened is $null and the
+    # helper goes straight to the direct banner poll. The gate owns the
+    # router-side probe plus its diag bundle on failure (see
+    # common\network\Assert-WorkloadReachableViaRouter.ps1). A throw here
+    # propagates out of the helper, whose finally disposes the forward,
+    # and then hits create-vm's own finally below (serial-console +
+    # seed-ISO cleanup).
+    #
+    # The gate is a PLAIN scriptblock, NOT .GetNewClosure(). Wait-VmSshAccessible
+    # invokes it from its own scope; a GetNewClosure block binds to a generated
+    # module whose command lookup falls back only to GLOBAL, so it cannot
+    # resolve the repo-local helpers (Get-VmDiagFolder,
+    # Assert-WorkloadReachableViaRouter, Invoke-VmRuntimeDiag), which live in
+    # provision.ps1's script scope - and that scope is not global when the
+    # provisioner runs dot-sourced under another script. A plain scriptblock
+    # stays bound to provision's session state, where those helpers resolve.
+    # It cannot close over $Vm, so $Vm is passed via $script:onTunnelGateVm set
+    # below (one VM per Invoke-VmCreation call, run to completion before the
+    # next, so the slot is never overwritten between set and fire). Module
+    # cmdlets like Get-VM resolve either way.
+    $onTunnelOpened = $null
+    if ($hasRouter) {
+        $script:onTunnelGateVm = $Vm
+        $onTunnelOpened = {
+            param($tunnel)
+            $Vm = $script:onTunnelGateVm
+
             $diagFolder = Get-VmDiagFolder -VmConfigPath $Vm.vmConfigPath `
                                            -VmName       $Vm.vmName `
                                            -Timestamp    $Vm._diagTimestamp
-            # Hyper-V VM-state check is the caller's concern; the
+            # Hyper-V VM-state check is the caller's concern; the gate
             # helper stays generic. A non-Running state means the
             # workload crashed / shut itself off before its sshd could
             # come up - no point waiting out the gate's full budget.
@@ -318,7 +329,7 @@ function Invoke-VmCreation {
             }.GetNewClosure()
             try {
                 Assert-WorkloadReachableViaRouter `
-                    -JumpClient      $sshTunnel.JumpClient `
+                    -JumpClient      $tunnel.JumpClient `
                     -WorkloadIp      $Vm.ipAddress `
                     -WorkloadVmName  $Vm.vmName `
                     -RouterVmName    $Vm._RouterVm.vmName `
@@ -351,35 +362,61 @@ function Invoke-VmCreation {
                 }
                 throw
             }
+
+            # Print the banner-poll label as the gate's last act so it
+            # lands on a fresh line right after the gate's own output
+            # block and immediately before the helper starts the banner
+            # dots. The router branch prints the identical label before
+            # the helper call (no preceding gate output to clear) - see
+            # the matching Write-Host below.
+            Write-Host "  Polling SSH on $($Vm.vmName) ..." -NoNewline
+        }
+    }
+
+    # The Hyper-V "VM no longer Running" early-exit, forwarded to the
+    # helper as -OnPoll and on to Wait-VmSshBannerReachable. The callback
+    # closes over a plain string ($vmName) instead of $Vm.vmName so we are
+    # not dependent on .GetNewClosure() capturing a PSCustomObject -
+    # callbacks invoked from a different module/session state see the
+    # script-block-local string the same way regardless.
+    $vmName = $Vm.vmName
+    $onPollVmState = {
+        $vmState = (Get-VM -Name $vmName).State
+        if ($vmState -ne 'Running') {
+            Write-Host ''
+            throw (
+                "VM '$vmName' stopped unexpectedly " +
+                "(state: $vmState). Check the Hyper-V console."
+            )
+        }
+    }.GetNewClosure()
+
+    try {
+        # Router / standalone branch has no -OnTunnelOpened gate, so the
+        # banner-poll label is printed here, right before the helper
+        # starts the banner dots. The workload branch prints the same
+        # label at the tail of -OnTunnelOpened instead, so the gate's
+        # output block lands first.
+        if (-not $hasRouter) {
+            Write-Host "  Polling SSH on $($Vm.vmName) ..." -NoNewline
         }
 
-        Write-Host "  Polling SSH on $($Vm.vmName) ..." -NoNewline
-
-        # Wait-VmSshBannerReachable owns the TCP+banner gate and the
-        # progress-dot cadence; the OnPoll callback below carries the
-        # Hyper-V "VM no longer Running" early-exit check that does not
-        # belong in a generic SSH waiter. The callback closes over a
-        # plain string ($vmName) instead of $Vm.vmName so we are not
-        # dependent on .GetNewClosure() capturing a PSCustomObject -
-        # callbacks invoked from a different module/session state see
-        # the script-block-local string the same way regardless.
-        $vmName = $Vm.vmName
-        $onPollVmState = {
-            $vmState = (Get-VM -Name $vmName).State
-            if ($vmState -ne 'Running') {
-                Write-Host ''
-                throw (
-                    "VM '$vmName' stopped unexpectedly " +
-                    "(state: $vmState). Check the Hyper-V console."
-                )
-            }
-        }.GetNewClosure()
-        $sshReady = Wait-VmSshBannerReachable `
-                        -IpAddress           $probeIp `
-                        -Port                $probePort `
-                        -Deadline            $deadline `
-                        -PollIntervalSeconds $pollIntervalSeconds `
-                        -OnPoll              $onPollVmState
+        # Wait-VmSshAccessible is the single source of truth for
+        # "SSH-accessible": it picks the probe endpoint for the VM kind
+        # (tunnel loopback for a workload, the VM IP on :22 for a router),
+        # drives Wait-VmSshBannerReachable against it until $deadline,
+        # fires the router-side gate via -OnTunnelOpened, and disposes any
+        # tunnel it opened in its own finally. It returns a result object
+        # rather than throwing on timeout, so the create-vm-specific
+        # timeout diag + throw below is keyed on $result.Reachable.
+        $result = Wait-VmSshAccessible `
+                      -Vm                  $Vm `
+                      -RouterVm            $routerVm `
+                      -Deadline            $deadline `
+                      -PollIntervalSeconds $pollIntervalSeconds `
+                      -OnPoll              $onPollVmState `
+                      -OnTunnelOpened      $onTunnelOpened
+        $sshReady = $result.Reachable
 
         # Elapsed-time tail on the same line as the dots. Outcome-
         # encoded gradient lives in Format-ElapsedBudgetWithGradient.
@@ -451,12 +488,11 @@ function Invoke-VmCreation {
         Write-Host "  [OK] SSH reachable on $($Vm.vmName)." -ForegroundColor Green
     }
     finally {
-        # Tear the tunnel down before the seed-ISO cleanup so the
-        # forward stops listening before the wider 'wait for SSH'
-        # sub-step ends. Tunnel disposal is idempotent and safe to
-        # call when the tunnel was never opened (router branch).
-        if ($null -ne $sshTunnel) { $sshTunnel.Dispose() }
-
+        # Wait-VmSshAccessible owns any SSH tunnel and disposes it before
+        # returning, so by here there is no forward left to tear down -
+        # this block only stops the serial-console reader and removes the
+        # seed ISO.
+        #
         # Stop the serial-console reader. Safe to call with $null (Start
         # may have thrown). The reader normally exits on its own when the
         # VM stops; this is belt-and-braces for the orchestrator-tears-

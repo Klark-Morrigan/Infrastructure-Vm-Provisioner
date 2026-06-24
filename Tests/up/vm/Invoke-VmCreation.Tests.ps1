@@ -20,10 +20,6 @@ BeforeAll {
     function Start-VM                 { param($VMName) }
     function Get-VM                   { param($Name) }
     function Get-VMNetworkAdapter     { param($VMName) }
-    function Get-VMDvdDrive           { param($VMName) }
-    function Remove-VMDvdDrive        { param($VMName, $ControllerNumber, $ControllerLocation) }
-    function Remove-Item              { param($Path, [switch]$Force) }
-    function Test-Path                { param($Path) }
 
     # Stub the sub-step timer so creation tests stay focused on the
     # Hyper-V cmdlets. The stub invokes the action directly so mocks
@@ -57,54 +53,48 @@ BeforeAll {
         param($Capture)
     }
 
-    # SSH polling stubs - the real cmdlets need Hyper-V networking
-    # (Test-VmSshPort, Test-SshBanner) and Posh-SSH's Renci.SshNet
-    # types (New-VmSshTunnel). Define them as no-ops here so Pester's
-    # Mock layer can replace them in Initialize-HyperVMocks.
-    function Test-VmSshPort {
-        param([string] $IpAddress, [int] $Port = 22)
-        $false
+    # Wait-VmSshAccessible is the topology-aware reachability helper
+    # create-vm.ps1 delegates the whole tunnel/gate/poll block to. Its
+    # internals - tunnel open/dispose, the banner poll, the probe-endpoint
+    # choice - have their own coverage in
+    # Tests\common\ssh\Wait-VmSshAccessible.Tests.ps1. Stub it here so
+    # Pester's Mock can attach by name; the default returns a reachable
+    # result object so the happy-path tests run to completion. Tests that
+    # exercise the timeout branch override with a $false Reachable result,
+    # and the gate-wiring tests capture the -OnTunnelOpened / -OnPoll
+    # scriptblocks create-vm hands in and fire them directly.
+    function Wait-VmSshAccessible {
+        param(
+            [object]      $Vm,
+            [object]      $RouterVm,
+            [datetime]    $Deadline,
+            [int]         $PollIntervalSeconds = 10,
+            [scriptblock] $OnPoll,
+            [scriptblock] $OnTunnelOpened
+        )
+        [PSCustomObject]@{
+            Reachable      = $true
+            ProbeIp        = '127.0.0.1'
+            ProbePort      = 22
+            ElapsedSeconds = 0
+        }
     }
-    # Banner-read gate the wait-for-SSH loop runs AFTER a successful
-    # Test-VmSshPort. Default to $true here so the canonical happy-path
-    # tests (which mock Test-VmSshPort to $true) reach $sshReady=$true
-    # without each test having to know about the new gate; tests that
-    # care about the false-positive-through-tunnel path override locally.
-    function Test-SshBanner {
-        param([string] $IpAddress, [int] $Port = 22,
-              [int] $TimeoutMilliseconds = 3000)
-        $true
-    }
+
     # Assert-WorkloadReachableViaRouter is the router-side reachability
-    # gate that runs the nc-banner-read probe + diag bundle capture.
-    # Stub it here so Invoke-VmCreation tests do not have to know
-    # about its internals (the helper has its own focused test file).
-    # Default is a no-op success; tests that need the failure branch
-    # override with `Mock ... { throw ... }`.
+    # gate create-vm.ps1 wraps in the -OnTunnelOpened scriptblock it
+    # passes to Wait-VmSshAccessible. The helper fires that scriptblock
+    # against the live tunnel; here the helper is mocked, so the gate
+    # tests capture the scriptblock and fire it directly. Stub as a no-op
+    # success; the failure-mode tests override with a throw.
     function Assert-WorkloadReachableViaRouter {
         param(
             $JumpClient, $WorkloadIp, $WorkloadVmName, $RouterVmName,
             $DiagFolder, $TimeoutSeconds, $PollIntervalSeconds, $OnPoll
         )
     }
-    function New-VmSshTunnel {
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
-            'PSAvoidUsingPlainTextForPassword', 'JumpPassword')]
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
-            'PSAvoidUsingUsernameAndPasswordParams', '')]
-        param(
-            [string] $TargetIp,
-            [string] $JumpHostIp,
-            [string] $JumpUsername,
-            [string] $JumpPassword,
-            [uint32] $TargetPort = 22,
-            [TimeSpan] $JumpConnectTimeout = [TimeSpan]::FromSeconds(30)
-        )
-        $null
-    }
 
     # Assert-VmSshCredentialsAccepted is the router-only authenticated
-    # gate that runs AFTER the banner gate: it proves the configured
+    # gate that runs AFTER a reachable result: it proves the configured
     # account actually logs in (a cloud-init user-creation failure leaves
     # sshd serving a banner with no usable login). Its own behaviour is
     # covered in Tests\common\ssh\Assert-VmSshCredentialsAccepted.Tests.ps1;
@@ -145,37 +135,6 @@ BeforeAll {
         '192.168.1.42'
     }
 
-    # Wait-VmSshBannerReachable extracted from create-vm.ps1's inline
-    # polling loop. Its internals (TCP probe + banner gate + OnPoll
-    # ordering + dot painting) have their own coverage in
-    # Tests\common\ssh\Wait-VmSshBannerReachable.Tests.ps1; the stub
-    # here defaults to "ready immediately" so happy-path tests reach
-    # the post-wait cleanup. Tests that exercise the timeout branch
-    # override with `Mock Wait-VmSshBannerReachable { $false }`.
-    function Wait-VmSshBannerReachable {
-        param(
-            [string]      $IpAddress,
-            [int]         $Port,
-            [datetime]    $Deadline,
-            [int]         $PollIntervalSeconds = 10,
-            [scriptblock] $OnPoll
-        )
-        # Honour Set-ExpiredDeadline (and any other test that mocks
-        # Get-Date to return a far-future timestamp) by reporting
-        # timeout when the deadline is already in the past. Order
-        # matters: the real Wait-VmSshBannerReachable's `while ((Get-
-        # Date) -lt $Deadline)` checks the deadline BEFORE the body,
-        # so OnPoll never fires on an already-past deadline. Real-time
-        # tests have $Deadline well in the future, so the default
-        # path falls through to the OnPoll fire + success return.
-        if ((Get-Date) -ge $Deadline) { return $false }
-        # Forward the OnPoll fire so callers' VM-state guards still
-        # trigger - the "VM stopped unexpectedly" tests rely on that
-        # pathway throwing through the stub.
-        if ($null -ne $OnPoll) { & $OnPoll }
-        $true
-    }
-
     # Format-ElapsedBudgetWithGradient owns the ANSI elapsed-time tail.
     # Its internals (colour math + clamp) live in Tests\common\ui\
     # Format-ElapsedBudgetWithGradient.Tests.ps1. The stub here
@@ -195,12 +154,19 @@ BeforeAll {
         param([string] $VmName, [string] $SeedIsoPath)
     }
 
-    # Pure path helper - dot-source the real implementation so the
-    # diag-folder shape under test matches production exactly.
-    . "$PSScriptRoot\..\..\..\hyper-v\ubuntu\common\diag\Get-VmDiagFolder.ps1"
-    # Invoke-VmRuntimeDiag fires from create-vm.ps1's timeout-path
-    # catches; stub at file scope so the diag-fire is a no-op in
-    # tests that exercise those paths.
+    # Diag-folder path helper. Its shape is covered by
+    # Tests\common\diag\Get-VmDiagFolder.Tests.ps1; here it is stubbed so
+    # Pester's Mock can attach. The Mock matters for the gate-wiring
+    # tests: they capture the -OnTunnelOpened closure create-vm builds and
+    # fire it at It scope, where only Mock'd commands - not plain
+    # dot-sourced functions - resolve from the closure's session state.
+    function Get-VmDiagFolder {
+        param($VmConfigPath, $VmName, $Timestamp)
+        Join-Path (Join-Path (Join-Path $VmConfigPath 'diagnostics') $VmName) $Timestamp
+    }
+    # Invoke-VmRuntimeDiag fires from create-vm.ps1's timeout-path catch
+    # and the -OnTunnelOpened gate's failure catch; stub at file scope so
+    # the diag-fire is a no-op in tests that exercise those paths.
     function Invoke-VmRuntimeDiag {
         param($Vm, $VmConfigPath, $Timestamp, $SshOpenTimeout)
     }
@@ -219,6 +185,21 @@ BeforeAll {
             _vhdxPath    = 'C:\VMs\node-01\node-01.vhdx'
             _seedIsoPath = 'C:\VMs\node-01\node-01-seed.iso'
         }
+    }
+
+    # Workload VM with the _RouterVm jump-host stamp provision.ps1 adds at
+    # step 7 - the tunnelled-reachability branch (router present).
+    function New-WorkloadWithRouter {
+        $workload = New-TestVm
+        Add-Member -InputObject $workload `
+                   -MemberType NoteProperty -Name '_RouterVm' `
+                   -Value ([PSCustomObject]@{
+                       vmName    = 'router-prod'
+                       ipAddress = '192.168.1.20'
+                       username  = 'routeradmin'
+                       password  = 'router-secret'
+                   })
+        $workload
     }
 
     # Router VM object - extra fields exercised by the dual-NIC branch.
@@ -264,17 +245,34 @@ BeforeAll {
         }
     }
 
-    # Standard DVD drive object returned by Get-VMDvdDrive.
-    function New-TestDvdDrive {
+    # Fake tunnel handed to a captured -OnTunnelOpened scriptblock so the
+    # gate-wiring tests can assert the JumpClient flows into
+    # Assert-WorkloadReachableViaRouter, mirroring the live tunnel object
+    # Wait-VmSshAccessible would pass in production.
+    function New-FakeTunnel {
         [PSCustomObject]@{
-            Path               = 'C:\VMs\node-01\node-01-seed.iso'
-            ControllerNumber   = 1
-            ControllerLocation = 0
+            LocalHost  = '127.0.0.1'
+            LocalPort  = 12345
+            JumpClient = [PSCustomObject]@{ _stub = 'jump-client' }
         }
     }
 
-    # Sets up the Hyper-V creation stubs in their neutral no-op form.
-    # Also sets up the finally-block stubs so cleanup always runs cleanly.
+    # Fires create-vm's captured -OnTunnelOpened gate against a fake tunnel.
+    # The gate is a plain scriptblock (NOT .GetNewClosure() - see create-vm.ps1
+    # for why) that calls its helpers by bare name and reads its VM def from
+    # $script:onTunnelGateVm. Built during Invoke-VmCreation in this test
+    # session state, it stays bound here, so firing it as-is resolves the bare
+    # calls straight to the per-It mocks - no source rebind needed. $Vm was
+    # stamped into $script:onTunnelGateVm when the gate was built, so the
+    # block already sees the right def.
+    function Invoke-CapturedGate {
+        param([scriptblock] $Gate, [object] $Tunnel)
+        & $Gate $Tunnel
+    }
+
+    # Sets up the Hyper-V creation stubs in their neutral no-op form, the
+    # reachability helper in its reachable-result form, and the finally-
+    # block stubs so cleanup always runs cleanly.
     function Initialize-HyperVMocks {
         Mock New-VM              { }
         Mock Set-VMProcessor     { }
@@ -286,100 +284,45 @@ BeforeAll {
         Mock Add-VMNetworkAdapter     { }
         Mock Start-VM            { }
         # Return Off state by default so the post-creation guard passes.
+        # The wait-for-SSH loop's Get-VM calls live inside the mocked
+        # Wait-VmSshAccessible, so the guard is the only caller here.
         Mock Get-VM              { [PSCustomObject]@{ State = 'Off' } }
-        Mock Get-VMDvdDrive      { New-TestDvdDrive }
-        Mock Remove-VMDvdDrive   { }
-        Mock Test-Path           { $false }
-        # IP discovery (KVP) defaults to "no adapters found" - router-
-        # DHCP path either supplies its own override or hits the
-        # discovery timeout cleanly. Workload + router-static tests
-        # never trigger the discovery branch because their fixtures
-        # carry ipAddress.
+        # IP discovery (KVP) defaults to "no adapters found"; workload +
+        # router-static fixtures carry ipAddress and never hit it.
         Mock Get-VMNetworkAdapter { @() }
-        # SSH polling: the real cmdlets reach Hyper-V networking and
-        # Renci.SshNet; stub both. Test-VmSshPort returns $false so
-        # the polling loop always falls through to the timeout path
-        # (the deadline mock is what controls when the loop exits).
-        # New-VmSshTunnel returns a tunnel-shaped object whose Dispose
-        # method is a no-op, so the finally branch can call it without
-        # touching the network.
-        Mock Test-VmSshPort      { $false }
-        # Banner-read gate is reached only when Test-VmSshPort is $true
-        # (per-test override below). Default mock returns $true so the
-        # canonical happy path is gated only by the TCP probe; tests
-        # exercising the false-positive-through-tunnel branch override.
-        Mock Test-SshBanner      { $true }
-        $script:_tunnelDisposed  = 0
-        Mock New-VmSshTunnel     {
-            $obj = [PSCustomObject]@{
-                LocalHost  = '127.0.0.1'
-                LocalPort  = 12345
-                # Sentinel JumpClient - real tests assert via Should-Invoke
-                # on Invoke-SshClientCommand rather than inspecting this.
-                JumpClient = [PSCustomObject]@{ _stub = 'jump-client' }
+
+        # Reachability helper: reachable by default so happy-path tests
+        # reach the post-wait credential gate + cleanup. Returns the
+        # result-object shape create-vm reads $result.Reachable off.
+        Mock Wait-VmSshAccessible {
+            [PSCustomObject]@{
+                Reachable      = $true
+                ProbeIp        = '127.0.0.1'
+                ProbePort      = 22
+                ElapsedSeconds = 1
             }
-            Add-Member -InputObject $obj -MemberType ScriptMethod `
-                       -Name Dispose -Value {
-                $script:_tunnelDisposed++
-            }
-            $obj
         }
-        # Router-side reachability gate. Default is a silent success
-        # so the canonical happy-path tests reach the host-side poll
-        # without each having to know about this gate. Tests that
-        # exercise the failure-mode wiring override with a throw.
+        # Router-side reachability gate, fired by create-vm's
+        # -OnTunnelOpened scriptblock. Default silent success; the
+        # failure-wiring test overrides with a throw.
         Mock Assert-WorkloadReachableViaRouter { }
-        # Router-only authenticated credential gate (runs after the banner
-        # gate). Default success so router happy-path tests reach cleanup;
-        # the wiring tests assert it fired for routers / not for workloads.
+        # Router-only authenticated credential gate (runs after a
+        # reachable result). Default success so router happy-path tests
+        # reach cleanup; the wiring tests assert it fired for routers /
+        # not for workloads.
         Mock Assert-VmSshCredentialsAccepted { }
-
-        # Pester requires the function to be Mock'd (not just defined
-        # at file scope) for Should -Invoke to work. Register default
-        # mocks for each extracted helper.
-        #
-        # Wait-VmSshBannerReachable's default Mock does NOT fire
-        # OnPoll: closures executed from inside a Pester Mock body
-        # resolve commands via the original file-scope stub rather
-        # than the test's per-It Mocks (Get-VM in particular), which
-        # makes stateful Get-VM counter tests silently see empty
-        # state. Tests that specifically exercise OnPoll behaviour
-        # override this Mock locally to fire the callback.
+        # Diag-folder path helper. Mock'd (not just stubbed) so the
+        # captured -OnTunnelOpened closure resolves it when a gate-wiring
+        # test fires it at It scope - see the function's BeforeAll note.
+        Mock Get-VmDiagFolder { 'C:\a_VMs\Hyper-V\Config\diagnostics\node-01\ts' }
+        # Diag fired from the timeout path and the gate-failure catch.
+        Mock Invoke-VmRuntimeDiag { }
+        # Finally-block cleanup. Mock'd (not just stubbed) so the
+        # finally-dispatch tests can assert both fired regardless of the
+        # reachable/timeout outcome.
+        Mock Stop-SerialConsoleCapture { }
         Mock Remove-VmSeedIso { }
-        Mock Wait-VmSshBannerReachable {
-            param([string] $IpAddress, [int] $Port, [datetime] $Deadline,
-                  [int] $PollIntervalSeconds, [scriptblock] $OnPoll)
-            if ((Get-Date) -ge $Deadline) { return $false }
-            $true
-        }
         Mock Format-ElapsedBudgetWithGradient { 'stub-elapsed-output' }
-    }
-
-    # Makes the SSH polling loop body never execute by returning a
-    # deadline in the past relative to what Get-Date returns on the
-    # loop-condition check.
-    #
-    # The source's Get-Date sequence is:
-    #   call 1 : Get-Date -Format ...   (per-run _diagTimestamp)
-    #   call 2 : Get-Date               ($startTime, used for both the
-    #                                    deadline calc and the elapsed
-    #                                    print at the end)
-    #   call 3+: while ((Get-Date) -lt $deadline)   (loop condition,
-    #                                                 then once more for
-    #                                                 the elapsed print)
-    #
-    # If the deadline call and the loop-condition call both see the same
-    # instant T, the condition T < T+10min is true and the loop runs. To
-    # prevent that, the first two calls return T (timestamp is irrelevant
-    # to the test; deadline becomes T+10min) and every subsequent call
-    # returns T+1hr (past the deadline, so the loop exits immediately).
-    function Set-ExpiredDeadline {
-        $script:_deadlineCallCount = 0
-        Mock Get-Date {
-            $script:_deadlineCallCount++
-            if ($script:_deadlineCallCount -le 2) { [datetime]'2020-01-01' }
-            else                                  { [datetime]'2020-01-01 01:00:00' }
-        }
     }
 }
 
@@ -391,10 +334,8 @@ Describe 'Invoke-VmCreation' {
 
         It 'creates a Gen 2 VM with the correct name, RAM, VHDX, and config path' {
             Initialize-HyperVMocks
-            Set-ExpiredDeadline
 
-            { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
-                Should -Throw    # timeout throw - expected here
+            Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN'
 
             Should -Invoke New-VM -Times 1 -Exactly -ParameterFilter {
                 $Name               -eq 'node-01'                    -and
@@ -407,10 +348,8 @@ Describe 'Invoke-VmCreation' {
 
         It 'sets the CPU count via Set-VMProcessor' {
             Initialize-HyperVMocks
-            Set-ExpiredDeadline
 
-            { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
-                Should -Throw
+            Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN'
 
             Should -Invoke Set-VMProcessor -Times 1 -Exactly -ParameterFilter {
                 $VMName -eq 'node-01' -and $Count -eq 2
@@ -427,10 +366,8 @@ Describe 'Invoke-VmCreation' {
 
         It 'enables Secure Boot with the MicrosoftUEFICertificateAuthority template' {
             Initialize-HyperVMocks
-            Set-ExpiredDeadline
 
-            { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
-                Should -Throw
+            Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN'
 
             Should -Invoke Set-VMFirmware -Times 1 -Exactly -ParameterFilter {
                 $VMName             -eq 'node-01'                          -and
@@ -446,10 +383,8 @@ Describe 'Invoke-VmCreation' {
 
         It 'attaches the seed ISO as a DVD drive' {
             Initialize-HyperVMocks
-            Set-ExpiredDeadline
 
-            { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
-                Should -Throw
+            Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN'
 
             Should -Invoke Add-VMDvdDrive -Times 1 -Exactly -ParameterFilter {
                 $VMName -eq 'node-01' -and
@@ -469,10 +404,8 @@ Describe 'Invoke-VmCreation' {
             # this test pins that the value handed in is what reaches
             # Connect-VMNetworkAdapter.
             Initialize-HyperVMocks
-            Set-ExpiredDeadline
 
-            { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'PrivateSwitch-Production' } |
-                Should -Throw
+            Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'PrivateSwitch-Production'
 
             Should -Invoke Connect-VMNetworkAdapter -Times 1 -Exactly -ParameterFilter {
                 $VMName     -eq 'node-01' -and
@@ -484,10 +417,8 @@ Describe 'Invoke-VmCreation' {
             # Workload VMs let Hyper-V auto-assign MACs; the static-MAC
             # path is router-specific.
             Initialize-HyperVMocks
-            Set-ExpiredDeadline
 
-            { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'PrivateSwitch-Production' } |
-                Should -Throw
+            Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'PrivateSwitch-Production'
 
             Should -Invoke Set-VMNetworkAdapter -Times 0
             Should -Invoke Add-VMNetworkAdapter -Times 0
@@ -507,10 +438,8 @@ Describe 'Invoke-VmCreation' {
 
         It 'connects the default NIC to the external switch (passed via -SwitchName)' {
             Initialize-HyperVMocks
-            Set-ExpiredDeadline
 
-            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExternalSwitch-Shared' } |
-                Should -Throw
+            Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExternalSwitch-Shared'
 
             Should -Invoke Connect-VMNetworkAdapter -Times 1 -Exactly -ParameterFilter {
                 $VMName     -eq 'router-01' -and
@@ -520,10 +449,8 @@ Describe 'Invoke-VmCreation' {
 
         It 'pins the external NIC MAC via Set-VMNetworkAdapter' {
             Initialize-HyperVMocks
-            Set-ExpiredDeadline
 
-            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExternalSwitch-Shared' } |
-                Should -Throw
+            Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExternalSwitch-Shared'
 
             Should -Invoke Set-VMNetworkAdapter -Times 1 -Exactly -ParameterFilter {
                 $VMName           -eq 'router-01' -and
@@ -534,10 +461,8 @@ Describe 'Invoke-VmCreation' {
 
         It 'adds a second NIC named Private on privateSwitchName with the private MAC' {
             Initialize-HyperVMocks
-            Set-ExpiredDeadline
 
-            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExternalSwitch-Shared' } |
-                Should -Throw
+            Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExternalSwitch-Shared'
 
             Should -Invoke Add-VMNetworkAdapter -Times 1 -Exactly -ParameterFilter {
                 $VMName           -eq 'router-01' -and
@@ -554,10 +479,8 @@ Describe 'Invoke-VmCreation' {
 
         It 'starts the VM after configuration' {
             Initialize-HyperVMocks
-            Set-ExpiredDeadline
 
-            { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
-                Should -Throw
+            Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN'
 
             Should -Invoke Start-VM -Times 1 -Exactly -ParameterFilter {
                 $VMName -eq 'node-01'
@@ -595,53 +518,150 @@ Describe 'Invoke-VmCreation' {
     }
 
     # ------------------------------------------------------------------
-    Context 'SSH polling - VM stops unexpectedly' {
+    Context 'reachability delegation (Wait-VmSshAccessible)' {
     # ------------------------------------------------------------------
-        # The loop checks VM state each iteration. If the VM is no longer
-        # Running it throws immediately rather than waiting out the timeout,
-        # avoiding a 10-minute wait when the VM has already crashed.
+        # Feature 67 step 4: create-vm.ps1 collapsed its inline tunnel +
+        # router-side gate + banner poll into a single Wait-VmSshAccessible
+        # call. These tests pin the wiring create-vm still owns: which VM
+        # kind gets a router def + tunnel-time gate, the per-poll guard,
+        # and the deadline/interval forwarding. The helper's own behaviour
+        # (probe-endpoint choice, tunnel lifecycle, banner poll) is covered
+        # by Tests\common\ssh\Wait-VmSshAccessible.Tests.ps1.
 
-        It 'passes a non-null OnPoll callback to Wait-VmSshBannerReachable' {
-            # The polling loop's per-iteration "VM still Running?"
-            # check is Hyper-V-specific and lives in the OnPoll
-            # callback create-vm.ps1 hands to the helper. Verify the
-            # callback is non-null via Pester's parameter filter -
-            # DO NOT actually fire it from inside a Pester Mock body.
-            # The OnPoll closure resolves Get-VM via the calling
-            # session state, NOT the test's per-It Mock layer, so a
-            # fired closure inside a Mock body silently calls the
-            # real Hyper-V Get-VM cmdlet - which emits "permission
-            # denied" to stderr on any non-admin runner (CI, dev
-            # boxes without Hyper-V Administrators membership) even
-            # though the test itself passes.
-            #
-            # The callback's BEHAVIOUR (firing Get-VM and throwing on
-            # non-Running state) is covered by
-            # Tests\common\ssh\Wait-VmSshBannerReachable.Tests.ps1's
-            # "propagates an OnPoll throw" test running against the
-            # real helper, not a Pester Mock - the closure-vs-Mock
-            # interaction does not bite there.
+        It 'invokes the helper once with the router def and an -OnTunnelOpened gate for a workload' {
+            Initialize-HyperVMocks
+
+            Invoke-VmCreation -Vm (New-WorkloadWithRouter) -SwitchName 'PrivateSwitch-E2E'
+
+            Should -Invoke Wait-VmSshAccessible -Times 1 -Exactly -ParameterFilter {
+                $null -ne $RouterVm                  -and
+                $RouterVm.vmName -eq 'router-prod'   -and
+                $null -ne $OnTunnelOpened            -and
+                $null -ne $OnPoll
+            }
+        }
+
+        It 'invokes the helper with a null router and no -OnTunnelOpened for a router VM' {
+            # A router is reachable directly on the host's upstream LAN -
+            # no jump host, so no tunnel-time gate. The per-poll VM-state
+            # guard still flows through.
+            Initialize-HyperVMocks
+
+            Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExternalSwitch-Shared'
+
+            Should -Invoke Wait-VmSshAccessible -Times 1 -Exactly -ParameterFilter {
+                $null -eq $RouterVm       -and
+                $null -eq $OnTunnelOpened -and
+                $null -ne $OnPoll
+            }
+        }
+
+        It 'forwards the 10s poll interval and a datetime deadline to the helper' {
             Initialize-HyperVMocks
 
             Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN'
 
-            Should -Invoke Wait-VmSshBannerReachable -Times 1 -Exactly `
-                -ParameterFilter {
-                    $null -ne $OnPoll -and $OnPoll -is [scriptblock]
-                }
+            Should -Invoke Wait-VmSshAccessible -Times 1 -Exactly -ParameterFilter {
+                $PollIntervalSeconds -eq 10 -and $Deadline -is [datetime]
+            }
         }
     }
 
     # ------------------------------------------------------------------
-    Context 'SSH polling - timeout' {
+    Context 'router-side gate wiring (-OnTunnelOpened)' {
+    # ------------------------------------------------------------------
+        # The router-side reachability gate lives in the -OnTunnelOpened
+        # scriptblock create-vm hands to the helper. In production the
+        # helper fires it against the live tunnel; here the helper is
+        # mocked, so these tests capture the scriptblock and fire it
+        # directly with a fake tunnel to prove the wiring is intact.
+
+        It 'builds an -OnTunnelOpened gate that probes via the tunnel JumpClient' {
+            Initialize-HyperVMocks
+            $script:capturedGate = $null
+            Mock Wait-VmSshAccessible {
+                $script:capturedGate = $OnTunnelOpened
+                [PSCustomObject]@{ Reachable = $true; ProbeIp = '127.0.0.1'; ProbePort = 12345; ElapsedSeconds = 1 }
+            }
+
+            $workload = New-WorkloadWithRouter
+            Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E'
+
+            $script:capturedGate | Should -Not -BeNullOrEmpty
+            Invoke-CapturedGate -Gate $script:capturedGate -Tunnel (New-FakeTunnel)
+
+            Should -Invoke Assert-WorkloadReachableViaRouter -Times 1 -Exactly -ParameterFilter {
+                $JumpClient._stub -eq 'jump-client' -and
+                $WorkloadIp       -eq '192.168.1.10' -and
+                $WorkloadVmName   -eq 'node-01' -and
+                $RouterVmName     -eq 'router-prod'
+            }
+        }
+
+        It 'fires the runtime diag and rethrows when the router-side probe rejects reachability' {
+            # Behaviour preserved from the old inline gate's catch: end the
+            # dot line, surface the error, capture host+guest runtime diag,
+            # then rethrow so create-vm's finally still cleans up.
+            Initialize-HyperVMocks
+            $script:capturedGate = $null
+            Mock Wait-VmSshAccessible {
+                $script:capturedGate = $OnTunnelOpened
+                [PSCustomObject]@{ Reachable = $true; ProbeIp = '127.0.0.1'; ProbePort = 12345; ElapsedSeconds = 1 }
+            }
+            Mock Assert-WorkloadReachableViaRouter {
+                throw "Router 'router-prod' cannot reach workload 'node-01' at 192.168.1.10:22."
+            }
+
+            $workload = New-WorkloadWithRouter
+            Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E'
+
+            { Invoke-CapturedGate -Gate $script:capturedGate -Tunnel (New-FakeTunnel) } |
+                Should -Throw -ExpectedMessage "*Router 'router-prod' cannot reach workload*"
+            Should -Invoke Invoke-VmRuntimeDiag -Times 1 -Exactly
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'reachability outcome handling' {
     # ------------------------------------------------------------------
 
-        It 'throws when the deadline passes without SSH becoming reachable' {
+        It 'throws the timeout headline and fires runtime diag when the helper reports unreachable' {
             Initialize-HyperVMocks
-            Set-ExpiredDeadline
+            Mock Wait-VmSshAccessible {
+                [PSCustomObject]@{ Reachable = $false; ProbeIp = '192.168.1.10'; ProbePort = 22; ElapsedSeconds = 600 }
+            }
 
             { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
                 Should -Throw -ExpectedMessage '*did not become reachable*'
+
+            Should -Invoke Invoke-VmRuntimeDiag -Times 1 -Exactly
+        }
+
+        It 'runs the authenticated credential gate for a router once it is reachable' {
+            # Banner-reachable proves only that sshd answers; a router is
+            # the jump host every workload authenticates through, so its
+            # configured login is verified (against its own IP) before it
+            # is declared ready.
+            Initialize-HyperVMocks
+
+            Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExternalSwitch-Shared'
+
+            Should -Invoke Assert-VmSshCredentialsAccepted -Times 1 -Exactly -ParameterFilter {
+                $IpAddress -eq '192.168.1.10' -and
+                $Username  -eq 'admin'        -and
+                $VmName    -eq 'router-01'
+            }
+        }
+
+        It 'does NOT run the credential gate for a workload VM' {
+            # Workloads authenticate via their own post-provisioning
+            # session, which surfaces the same fault directly; the
+            # router-only gate must not fire for them.
+            Initialize-HyperVMocks
+
+            Invoke-VmCreation -Vm (New-WorkloadWithRouter) -SwitchName 'PrivateSwitch-E2E'
+
+            Should -Invoke Assert-VmSshCredentialsAccepted -Times 0 -Exactly
         }
     }
 
@@ -651,43 +671,21 @@ Describe 'Invoke-VmCreation' {
         # DHCP-mode router VMs have no ipAddress in their config; the
         # wait-for-SSH sub-step discovers the actual ext0 IP via Hyper-V
         # KVP integration services before probing SSH and writes the
-        # discovered value back onto the VM def so the workload tunnel
-        # later (provision.ps1 step 7 references _RouterVm.ipAddress)
-        # finds it via the same object.
+        # discovered value back onto the VM def so the helper (and the
+        # workload tunnel later, via _RouterVm.ipAddress) finds it via
+        # the same object. This block lives in create-vm.ps1, not the
+        # reachability helper, because it is a first-boot provisioning
+        # concern.
 
         It 'delegates to Get-VmKvpIpAddress with the external switch name' {
-            # KVP polling logic lives in Infrastructure.HyperV's
-            # Get-VmKvpIpAddress (its own test suite covers the
-            # state guard, IPv4 filter, deadline behaviour). What
-            # the provisioner must still own is the call - pass the
-            # router's vmName and externalSwitchName so the helper
-            # picks the right NIC on multi-adapter VMs.
             Initialize-HyperVMocks
-            # Stateful Get-VM: Off for the post-creation guard, then
-            # Running for the SSH probe loop. Mirrors the pattern in
-            # the jump-host dispatch tests.
-            $script:_getVmCallCount = 0
-            Mock Get-VM {
-                $script:_getVmCallCount++
-                $state = if ($script:_getVmCallCount -eq 1) {
-                    'Off'
-                } else {
-                    'Running'
-                }
-                [PSCustomObject]@{ State = $state }
-            }
             Mock Get-VmKvpIpAddress { '192.168.1.42' }
-            # Capture the IP Wait-VmSshBannerReachable is asked to
-            # probe so we can verify the discovered KVP address flows
-            # through. The original test inspected Test-VmSshPort
-            # directly; with Wait-VmSshBannerReachable extracted, that
-            # is now a parameter on the helper.
-            $script:_probedIpAfterDiscovery = $null
-            Mock Wait-VmSshBannerReachable {
-                param([string] $IpAddress, [int] $Port, [datetime] $Deadline,
-                      [int] $PollIntervalSeconds, [scriptblock] $OnPoll)
-                $script:_probedIpAfterDiscovery = $IpAddress
-                $true
+            # Capture the VM def the helper is asked to reach so we can
+            # confirm the discovered KVP address was stamped onto it.
+            $script:reachedVm = $null
+            Mock Wait-VmSshAccessible {
+                $script:reachedVm = $Vm
+                [PSCustomObject]@{ Reachable = $true; ProbeIp = '192.168.1.42'; ProbePort = 22; ElapsedSeconds = 1 }
             }
 
             Invoke-VmCreation -Vm (New-DhcpRouterTestVm) -SwitchName 'External'
@@ -696,32 +694,21 @@ Describe 'Invoke-VmCreation' {
                 $VmName -eq 'router-01' -and
                 $SwitchName -eq 'ExternalSwitch-Shared'
             }
-            $script:_probedIpAfterDiscovery | Should -Be '192.168.1.42'
+            $script:reachedVm.ipAddress | Should -Be '192.168.1.42'
         }
 
         It 'writes the discovered IP back onto the VM def as ipAddress' {
             Initialize-HyperVMocks
-            $script:_getVmCallCount = 0
-            Mock Get-VM {
-                $script:_getVmCallCount++
-                $state = if ($script:_getVmCallCount -eq 1) {
-                    'Off'
-                } else {
-                    'Running'
-                }
-                [PSCustomObject]@{ State = $state }
-            }
             Mock Get-VmKvpIpAddress { '192.168.42.99' }
-            Mock Test-VmSshPort     { $true }
 
             $vm = New-DhcpRouterTestVm
             Invoke-VmCreation -Vm $vm -SwitchName 'External'
 
-            # Workload code path reads $vm._RouterVm.ipAddress, which
-            # is the same object. Adding the field via Add-Member is
-            # what makes the discovery observable to downstream code.
-            $vm.PSObject.Properties['ipAddress']        | Should -Not -BeNullOrEmpty
-            $vm.ipAddress                                | Should -Be '192.168.42.99'
+            # Workload code path reads $vm._RouterVm.ipAddress, which is
+            # the same object. Adding the field via Add-Member is what
+            # makes the discovery observable to downstream code.
+            $vm.PSObject.Properties['ipAddress'] | Should -Not -BeNullOrEmpty
+            $vm.ipAddress                        | Should -Be '192.168.42.99'
         }
 
         It 'propagates the Get-VmKvpIpAddress throw on discovery timeout' {
@@ -739,303 +726,54 @@ Describe 'Invoke-VmCreation' {
         }
 
         It 'skips the discovery branch when the router VM has a static ipAddress' {
-            # New-RouterTestVm carries ipAddress = '192.168.1.10', so
-            # the discovery branch is bypassed. The SSH probe targets
-            # the static IP directly. Set-ExpiredDeadline keeps the
-            # loop from running. Mock Get-VmKvpIpAddress registers the
-            # function with Pester (required for Should -Invoke even
-            # at -Times 0) so a regression that re-introduces a call
-            # is caught here.
+            # New-RouterTestVm carries ipAddress = '192.168.1.10', so the
+            # discovery branch is bypassed. Mock Get-VmKvpIpAddress
+            # registers the function with Pester (required for Should
+            # -Invoke even at -Times 0) so a regression that re-introduces
+            # a call is caught here.
             Initialize-HyperVMocks
-            Set-ExpiredDeadline
             Mock Get-VmKvpIpAddress { '192.168.0.0' }
 
-            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'External' } |
-                Should -Throw -ExpectedMessage "*did not become reachable*"
+            Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'External'
 
             Should -Invoke Get-VmKvpIpAddress -Times 0 -Exactly
         }
     }
 
     # ------------------------------------------------------------------
-    Context 'SSH polling - jump-host dispatch' {
-    # ------------------------------------------------------------------
-        # Feature 53 step 3 follow-up: workloads sit on a private switch
-        # the host has no route to. Invoke-VmCreation must open an SSH
-        # tunnel through the router (stamped onto each workload as
-        # _RouterVm by provision.ps1 step 7) and probe localhost on the
-        # tunnel's forwarded port instead of the workload IP directly.
-
-        It 'opens New-VmSshTunnel against the router for a workload with _RouterVm' {
-            # The polling loop body is skipped by Set-ExpiredDeadline
-            # (the deadline is already past on the first iteration),
-            # so Test-VmSshPort itself is unobservable here. The
-            # localhost-vs-workload-IP probe target is covered by the
-            # next test, which inspects the live $probeIp variable
-            # via a stop-the-loop assertion.
-            Initialize-HyperVMocks
-            Set-ExpiredDeadline
-
-            $workload = New-TestVm
-            Add-Member -InputObject $workload `
-                       -MemberType NoteProperty -Name '_RouterVm' `
-                       -Value ([PSCustomObject]@{
-                           vmName    = 'router-prod'
-                           ipAddress = '192.168.1.20'
-                           username  = 'routeradmin'
-                           password  = 'router-secret'
-                       })
-
-            { Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E' } |
-                Should -Throw    # timeout throw - expected
-
-            Should -Invoke New-VmSshTunnel -Times 1 -Exactly -ParameterFilter {
-                $TargetIp     -eq $workload.ipAddress -and
-                $JumpHostIp   -eq '192.168.1.20'      -and
-                $JumpUsername -eq 'routeradmin'       -and
-                $JumpPassword -eq 'router-secret'
-            }
-        }
-
-        It 'asks Wait-VmSshBannerReachable to probe the tunnel''s localhost endpoint (not the workload IP)' {
-            # The wait-for-SSH polling loop body now lives in Wait-
-            # VmSshBannerReachable; its own tests cover the TCP-then-
-            # banner gating. What Invoke-VmCreation still owns is the
-            # endpoint choice: the tunnel's loopback host + port, not
-            # the workload's private-switch IP.
-            Initialize-HyperVMocks
-            # Stateful Get-VM: the post-creation guard requires Off
-            # (first call) and the polling loop requires Running
-            # (subsequent calls). Returning the same state on every
-            # call would fail one branch or the other.
-            $script:_getVmCallCount = 0
-            Mock Get-VM {
-                $script:_getVmCallCount++
-                $state = if ($script:_getVmCallCount -eq 1) {
-                    'Off'
-                } else {
-                    'Running'
-                }
-                [PSCustomObject]@{ State = $state }
-            }
-
-            $workload = New-TestVm
-            Add-Member -InputObject $workload `
-                       -MemberType NoteProperty -Name '_RouterVm' `
-                       -Value ([PSCustomObject]@{
-                           vmName    = 'router-prod'
-                           ipAddress = '192.168.1.20'
-                           username  = 'routeradmin'
-                           password  = 'router-secret'
-                       })
-
-            Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E'
-
-            Should -Invoke Wait-VmSshBannerReachable -Times 1 -Exactly `
-                -ParameterFilter {
-                    $IpAddress -eq '127.0.0.1' -and $Port -eq 12345
-                }
-        }
-
-        It 'does not open a tunnel for a router VM (no _RouterVm)' {
-            # Router VMs are reachable directly on the host's External
-            # vSwitch upstream LAN. A tunnel-open here would be a
-            # chicken-and-egg.
-            Initialize-HyperVMocks
-            Set-ExpiredDeadline
-
-            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'External' } |
-                Should -Throw
-
-            Should -Invoke New-VmSshTunnel -Times 0 -Exactly
-        }
-
-        It 'runs the authenticated credential gate for a router once it is banner-reachable' {
-            # Banner-reachable proves only that sshd answers; a router is
-            # the jump host every workload authenticates through, so its
-            # configured login is verified (against its own IP) before it
-            # is declared ready. Stateful Get-VM: Off for the post-create
-            # guard, Running for the polling loop.
-            $script:_getVmCallCount = 0
-            Initialize-HyperVMocks
-            Mock Get-VM {
-                $script:_getVmCallCount++
-                $state = if ($script:_getVmCallCount -eq 1) { 'Off' } else { 'Running' }
-                [PSCustomObject]@{ State = $state }
-            }
-            Mock Test-VmSshPort { $true }
-
-            Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'ExternalSwitch-Shared'
-
-            Should -Invoke Assert-VmSshCredentialsAccepted -Times 1 -Exactly `
-                -ParameterFilter {
-                    $IpAddress -eq '192.168.1.10' -and
-                    $Username  -eq 'admin'        -and
-                    $VmName    -eq 'router-01'
-                }
-        }
-
-        It 'does NOT run the credential gate for a workload VM' {
-            # Workloads authenticate via their own post-provisioning
-            # session, which surfaces the same fault directly; the
-            # router-only gate must not fire for them.
-            $script:_getVmCallCount = 0
-            Initialize-HyperVMocks
-            Mock Get-VM {
-                $script:_getVmCallCount++
-                $state = if ($script:_getVmCallCount -eq 1) { 'Off' } else { 'Running' }
-                [PSCustomObject]@{ State = $state }
-            }
-            Mock Test-VmSshPort { $true }
-
-            Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'PrivateSwitch-Production'
-
-            Should -Invoke Assert-VmSshCredentialsAccepted -Times 0 -Exactly
-        }
-
-        It 'delegates to Assert-WorkloadReachableViaRouter with the tunnel''s JumpClient and the workload IP' {
-            # The gate's internals (probe shape, diag capture, hints)
-            # have their own tests in Tests\common\network\Assert-
-            # WorkloadReachableViaRouter.Tests.ps1. Here we assert the
-            # wiring from Invoke-VmCreation: the workload IP, vmName,
-            # router vmName, and the JumpClient we got back from
-            # New-VmSshTunnel all flow into the helper.
-            $script:_getVmCallCount = 0
-            Initialize-HyperVMocks
-            Mock Get-VM {
-                $script:_getVmCallCount++
-                $state = if ($script:_getVmCallCount -eq 1) { 'Off' } else { 'Running' }
-                [PSCustomObject]@{ State = $state }
-            }
-            Mock Test-VmSshPort { $true }
-
-            $workload = New-TestVm
-            Add-Member -InputObject $workload `
-                       -MemberType NoteProperty -Name '_RouterVm' `
-                       -Value ([PSCustomObject]@{
-                           vmName    = 'router-prod'
-                           ipAddress = '192.168.1.20'
-                           username  = 'routeradmin'
-                           password  = 'router-secret'
-                       })
-
-            Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E'
-
-            Should -Invoke Assert-WorkloadReachableViaRouter -Times 1 -Exactly `
-                -ParameterFilter {
-                    $WorkloadIp     -eq '192.168.1.10' -and
-                    $WorkloadVmName -eq 'node-01'     -and
-                    $RouterVmName   -eq 'router-prod' -and
-                    $JumpClient._stub -eq 'jump-client'
-                }
-        }
-
-        It 'fails fast with the helper''s throw when it rejects reachability' {
-            # The gate's own tests cover the message-shaping and diag-
-            # capture branches. Here we just confirm the orchestrator
-            # surfaces a helper throw to the caller as-is, instead of
-            # swallowing it and falling through to the host-side poll.
-            $script:_getVmCallCount = 0
-            Initialize-HyperVMocks
-            Mock Get-VM {
-                $script:_getVmCallCount++
-                $state = if ($script:_getVmCallCount -eq 1) { 'Off' } else { 'Running' }
-                [PSCustomObject]@{ State = $state }
-            }
-            Mock Assert-WorkloadReachableViaRouter {
-                throw "Router 'router-prod' cannot reach workload 'node-01' at 192.168.1.10:22 within 300 seconds."
-            }
-
-            $workload = New-TestVm
-            Add-Member -InputObject $workload `
-                       -MemberType NoteProperty -Name '_RouterVm' `
-                       -Value ([PSCustomObject]@{
-                           vmName    = 'router-prod'
-                           ipAddress = '192.168.1.20'
-                           username  = 'routeradmin'
-                           password  = 'router-secret'
-                       })
-
-            { Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E' } |
-                Should -Throw -ExpectedMessage "*Router 'router-prod' cannot reach workload*"
-        }
-
-        It 'does NOT run the router-side gate for direct (no _RouterVm) targets' {
-            # Router VMs and any pre-feature-53 caller take the no-tunnel
-            # branch above; the gate is tunnel-specific and must not fire
-            # for them.
-            Initialize-HyperVMocks
-            Set-ExpiredDeadline
-
-            { Invoke-VmCreation -Vm (New-RouterTestVm) -SwitchName 'External' } |
-                Should -Throw
-
-            Should -Invoke Assert-WorkloadReachableViaRouter -Times 0 -Exactly
-        }
-
-        It 'disposes the tunnel in the finally block when the poll times out' {
-            # Per-test isolation: the dispose counter lives on a script
-            # scope that persists across calls; reset it before this
-            # specific It so a prior It does not bleed into the count.
-            $script:_tunnelDisposed = 0
-            Initialize-HyperVMocks
-            Set-ExpiredDeadline
-
-            $workload = New-TestVm
-            Add-Member -InputObject $workload `
-                       -MemberType NoteProperty -Name '_RouterVm' `
-                       -Value ([PSCustomObject]@{
-                           vmName    = 'router-prod'
-                           ipAddress = '192.168.1.20'
-                           username  = 'routeradmin'
-                           password  = 'router-secret'
-                       })
-
-            { Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E' } |
-                Should -Throw
-
-            $script:_tunnelDisposed | Should -Be 1
-        }
-    }
-
-    # ------------------------------------------------------------------
-    Context 'finally block - seed ISO cleanup' {
+    Context 'finally block - cleanup' {
     # ------------------------------------------------------------------
         # The seed ISO contains the plaintext password and must never
-        # persist on the host disk after provisioning. Removal lives in
-        # Remove-VmSeedIso (its own test file covers the detach + delete
-        # ordering and the idempotent skip branches); here we just
-        # verify the cleanup is dispatched from create-vm.ps1's finally
-        # regardless of whether wait-for-SSH succeeded or timed out.
+        # persist on the host disk after provisioning; the serial-console
+        # reader must always be stopped. Wait-VmSshAccessible owns tunnel
+        # disposal, so create-vm's finally covers only the serial-console
+        # + seed-ISO teardown, which must run whether wait-for-SSH
+        # succeeded or timed out.
 
-        It 'invokes Remove-VmSeedIso in the finally block on timeout' {
+        It 'stops the serial console and removes the seed ISO on timeout' {
             Initialize-HyperVMocks
-            Set-ExpiredDeadline
+            Mock Wait-VmSshAccessible {
+                [PSCustomObject]@{ Reachable = $false; ProbeIp = '192.168.1.10'; ProbePort = 22; ElapsedSeconds = 600 }
+            }
 
             { Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN' } |
                 Should -Throw
 
+            Should -Invoke Stop-SerialConsoleCapture -Times 1 -Exactly
             Should -Invoke Remove-VmSeedIso -Times 1 -Exactly -ParameterFilter {
                 $VmName      -eq 'node-01' -and
                 $SeedIsoPath -eq 'C:\VMs\node-01\node-01-seed.iso'
             }
         }
 
-        It 'invokes Remove-VmSeedIso in the finally block on success' {
+        It 'stops the serial console and removes the seed ISO on success' {
             # Mirror test for the happy path - the cleanup must NOT be
-            # conditional on the SSH probe outcome.
+            # conditional on the reachability outcome.
             Initialize-HyperVMocks
-            # Stateful Get-VM: Off (post-creation guard) then Running
-            # (so the wait-for-SSH stub's OnPoll forward does not throw).
-            $script:_getVmCallCount = 0
-            Mock Get-VM {
-                $script:_getVmCallCount++
-                $state = if ($script:_getVmCallCount -eq 1) { 'Off' } else { 'Running' }
-                [PSCustomObject]@{ State = $state }
-            }
 
             Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN'
 
+            Should -Invoke Stop-SerialConsoleCapture -Times 1 -Exactly
             Should -Invoke Remove-VmSeedIso -Times 1 -Exactly -ParameterFilter {
                 $VmName      -eq 'node-01' -and
                 $SeedIsoPath -eq 'C:\VMs\node-01\node-01-seed.iso'
