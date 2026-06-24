@@ -65,8 +65,9 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common\network\Remove-LegacySingletonNat.ps1"
 . "$PSScriptRoot\common\network\Resolve-ExistingRouterIp.ps1"
 . "$PSScriptRoot\common\ssh\Assert-VmSshCredentialsAccepted.ps1"
+# Wait-VmSshAccessible self-loads Wait-VmSshBannerReachable, so no separate
+# dot-source for the banner helper here.
 . "$PSScriptRoot\common\ssh\Wait-VmSshAccessible.ps1"
-. "$PSScriptRoot\common\ssh\Wait-VmSshBannerReachable.ps1"
 . "$PSScriptRoot\common\ui\Format-ElapsedBudgetWithGradient.ps1"
 # SSH jump-host helpers (New-VmSshTunnel, New-VmSshClientWithJump,
 # Test-SshBanner) and the upstream-host-IP discovery (Get-VmSwitchHostIp)

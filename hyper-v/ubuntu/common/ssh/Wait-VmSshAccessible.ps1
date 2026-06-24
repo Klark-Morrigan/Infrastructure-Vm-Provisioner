@@ -4,6 +4,14 @@
     ensure-vms-ready.ps1.
 #>
 
+# Wait-VmSshBannerReachable is the banner-poll primitive this helper drives;
+# dot-sourced here so a consumer imports this one file and gets the probe
+# wired, rather than having to remember to load the banner helper alongside
+# it. Its other dependencies (New-VmSshTunnel, and the banner helper's
+# Test-VmSshPort / Test-SshBanner) ship in Infrastructure.HyperV, imported by
+# the entry-point's Install-ModuleDependencies, so they need no dot-source.
+. "$PSScriptRoot\Wait-VmSshBannerReachable.ps1"
+
 # ---------------------------------------------------------------------------
 # Wait-VmSshAccessible
 #   Single source of truth for "is this VM SSH-accessible right now,
