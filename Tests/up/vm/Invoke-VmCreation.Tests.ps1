@@ -10,6 +10,7 @@ param()
 BeforeAll {
     # Stub all Hyper-V cmdlets unavailable outside a Hyper-V host.
     function New-VM                   { param($Name, $Generation, $MemoryStartupBytes, $VHDPath, $Path) }
+    function Set-VM                    { param($Name, $AutomaticStopAction) }
     function Set-VMProcessor          { param($VMName, $Count) }
     function Get-VMHardDiskDrive      { param($VMName) }
     function Set-VMFirmware           { param($VMName, $EnableSecureBoot, $SecureBootTemplate, $FirstBootDevice) }
@@ -275,6 +276,7 @@ BeforeAll {
     # block stubs so cleanup always runs cleanly.
     function Initialize-HyperVMocks {
         Mock New-VM              { }
+        Mock Set-VM              { }
         Mock Set-VMProcessor     { }
         Mock Get-VMHardDiskDrive { [PSCustomObject]@{ Path = 'disk.vhdx' } }
         Mock Set-VMFirmware      { }
@@ -353,6 +355,20 @@ Describe 'Invoke-VmCreation' {
 
             Should -Invoke Set-VMProcessor -Times 1 -Exactly -ParameterFilter {
                 $VMName -eq 'node-01' -and $Count -eq 2
+            }
+        }
+
+        It 'sets AutomaticStopAction to ShutDown so host stop is a clean cold boot' {
+            # Overrides the Hyper-V default (Save), which would resume the
+            # runner systemd unit mid-flight against a dead GitHub
+            # connection. A cold boot re-runs the enabled unit so the
+            # runner reconnects on its own after a host reboot.
+            Initialize-HyperVMocks
+
+            Invoke-VmCreation -Vm (New-TestVm) -SwitchName 'VmLAN'
+
+            Should -Invoke Set-VM -Times 1 -Exactly -ParameterFilter {
+                $Name -eq 'node-01' -and $AutomaticStopAction -eq 'ShutDown'
             }
         }
     }
