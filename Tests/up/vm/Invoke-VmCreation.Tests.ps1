@@ -257,19 +257,17 @@ BeforeAll {
         }
     }
 
-    # Fires create-vm's captured -OnTunnelOpened gate against a fake
-    # tunnel. The gate is a .GetNewClosure() scriptblock, which PowerShell
-    # binds to its own dynamic module scope - fired as-is it resolves
-    # neither the per-It mocks nor the dot-sourced stubs (the same
-    # closure-vs-mock trap the SSH-polling OnPoll comment documents).
-    # [scriptblock]::Create on its source text yields an equivalent block
-    # bound to this (test) session state where the mocks are live; $Vm is
-    # the one closure variable the gate body reads, supplied here so the
-    # rebound block sees it.
+    # Fires create-vm's captured -OnTunnelOpened gate against a fake tunnel.
+    # The gate is a plain scriptblock (NOT .GetNewClosure() - see create-vm.ps1
+    # for why) that calls its helpers by bare name and reads its VM def from
+    # $script:onTunnelGateVm. Built during Invoke-VmCreation in this test
+    # session state, it stays bound here, so firing it as-is resolves the bare
+    # calls straight to the per-It mocks - no source rebind needed. $Vm was
+    # stamped into $script:onTunnelGateVm when the gate was built, so the
+    # block already sees the right def.
     function Invoke-CapturedGate {
-        param([scriptblock] $Gate, [object] $Vm, [object] $Tunnel)
-        $rebound = [scriptblock]::Create($Gate.ToString())
-        & $rebound $Tunnel
+        param([scriptblock] $Gate, [object] $Tunnel)
+        & $Gate $Tunnel
     }
 
     # Sets up the Hyper-V creation stubs in their neutral no-op form, the
@@ -590,7 +588,7 @@ Describe 'Invoke-VmCreation' {
             Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E'
 
             $script:capturedGate | Should -Not -BeNullOrEmpty
-            Invoke-CapturedGate -Gate $script:capturedGate -Vm $workload -Tunnel (New-FakeTunnel)
+            Invoke-CapturedGate -Gate $script:capturedGate -Tunnel (New-FakeTunnel)
 
             Should -Invoke Assert-WorkloadReachableViaRouter -Times 1 -Exactly -ParameterFilter {
                 $JumpClient._stub -eq 'jump-client' -and
@@ -617,7 +615,7 @@ Describe 'Invoke-VmCreation' {
             $workload = New-WorkloadWithRouter
             Invoke-VmCreation -Vm $workload -SwitchName 'PrivateSwitch-E2E'
 
-            { Invoke-CapturedGate -Gate $script:capturedGate -Vm $workload -Tunnel (New-FakeTunnel) } |
+            { Invoke-CapturedGate -Gate $script:capturedGate -Tunnel (New-FakeTunnel) } |
                 Should -Throw -ExpectedMessage "*Router 'router-prod' cannot reach workload*"
             Should -Invoke Invoke-VmRuntimeDiag -Times 1 -Exactly
         }

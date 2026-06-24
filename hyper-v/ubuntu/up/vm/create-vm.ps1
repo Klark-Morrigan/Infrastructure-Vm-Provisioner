@@ -286,13 +286,26 @@ function Invoke-VmCreation {
     # common\network\Assert-WorkloadReachableViaRouter.ps1). A throw here
     # propagates out of the helper, whose finally disposes the forward,
     # and then hits create-vm's own finally below (serial-console +
-    # seed-ISO cleanup). Closes over $Vm via .GetNewClosure() so the gate
-    # body resolves the VM def regardless of the session state the helper
-    # invokes it from.
+    # seed-ISO cleanup).
+    #
+    # The gate is a PLAIN scriptblock, NOT .GetNewClosure(). Wait-VmSshAccessible
+    # invokes it from its own scope; a GetNewClosure block binds to a generated
+    # module whose command lookup falls back only to GLOBAL, so it cannot
+    # resolve the repo-local helpers (Get-VmDiagFolder,
+    # Assert-WorkloadReachableViaRouter, Invoke-VmRuntimeDiag), which live in
+    # provision.ps1's script scope - and that scope is not global when the
+    # provisioner runs dot-sourced under another script. A plain scriptblock
+    # stays bound to provision's session state, where those helpers resolve.
+    # It cannot close over $Vm, so $Vm is passed via $script:onTunnelGateVm set
+    # below (one VM per Invoke-VmCreation call, run to completion before the
+    # next, so the slot is never overwritten between set and fire). Module
+    # cmdlets like Get-VM resolve either way.
     $onTunnelOpened = $null
     if ($hasRouter) {
+        $script:onTunnelGateVm = $Vm
         $onTunnelOpened = {
             param($tunnel)
+            $Vm = $script:onTunnelGateVm
 
             $diagFolder = Get-VmDiagFolder -VmConfigPath $Vm.vmConfigPath `
                                            -VmName       $Vm.vmName `
@@ -357,7 +370,7 @@ function Invoke-VmCreation {
             # the helper call (no preceding gate output to clear) - see
             # the matching Write-Host below.
             Write-Host "  Polling SSH on $($Vm.vmName) ..." -NoNewline
-        }.GetNewClosure()
+        }
     }
 
     # The Hyper-V "VM no longer Running" early-exit, forwarded to the
