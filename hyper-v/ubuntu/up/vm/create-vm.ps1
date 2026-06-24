@@ -94,6 +94,18 @@ function Invoke-VmCreation {
     Set-VMProcessor -VMName $Vm.vmName -Count $Vm.cpuCount
 
     # ------------------------------------------------------------------
+    # Automatic stop action
+    # Force a clean guest shutdown when the host stops, NOT the Hyper-V
+    # default of saving state. Runner VMs that resume from a saved state
+    # bring their systemd runner unit back mid-flight against a long-dead
+    # GitHub connection, so the runner shows offline and systemd never
+    # restarts it. A cold boot instead re-runs the enabled unit and the
+    # runner reconnects on its own - making start-vms.ps1 (power-on only)
+    # a sufficient host-reboot recovery path with no service reconcile.
+    # ------------------------------------------------------------------
+    Set-VM -Name $Vm.vmName -AutomaticStopAction ShutDown
+
+    # ------------------------------------------------------------------
     # Secure Boot
     # The default template 'MicrosoftWindows' rejects Ubuntu's shim
     # bootloader. 'MicrosoftUEFICertificateAuthority' trusts third-party

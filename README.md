@@ -858,7 +858,12 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
       and step 9's post-provisioning can find the jump host.
 8. **(new VMs only)** Creates each VM (Gen 2, static RAM, VHDX from
    step 5), sets Secure Boot to `MicrosoftUEFICertificateAuthority`
-   (required for Ubuntu), attaches the seed ISO, connects to its
+   (required for Ubuntu), sets `AutomaticStopAction` to `ShutDown`
+   (so a host stop cold-boots the guest rather than the Hyper-V
+   default of saving state - a cold boot re-runs the runner's
+   enabled systemd unit so it reconnects after a host reboot,
+   whereas a resumed save-state leaves the runner offline),
+   attaches the seed ISO, connects to its
    `privateSwitchName` (workload VMs) or `externalSwitchName`
    (router VMs), and starts the VM. Router VMs additionally get a
    second NIC on `privateSwitchName`, and both NICs are pinned to
