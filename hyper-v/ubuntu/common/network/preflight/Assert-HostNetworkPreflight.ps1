@@ -159,8 +159,11 @@ function Assert-HostNetworkPreflight {
     }
 
     # 3. Switch-type-specific MAC expectations.
-    $wifi = Get-NetAdapter -Physical -ErrorAction SilentlyContinue |
-            Where-Object { $_.InterfaceDescription -match 'Wi-?Fi|Wireless' }
+    #    Get-WirelessNetAdapter (Infrastructure.Network.Windows) is the
+    #    shared "which NICs are Wi-Fi" predicate, so the matcher cannot
+    #    drift between here and the manual preflight wrapper's WAN
+    #    auto-detect.
+    $wifi = Get-WirelessNetAdapter
 
     if ($sw.SwitchType -eq 'Internal') {
         if ($vIp -and $vIp.IPAddress -ne '192.168.137.1') {

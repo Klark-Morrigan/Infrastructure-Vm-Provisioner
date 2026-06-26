@@ -17,13 +17,14 @@
 #        Remove-LegacySingletonNat helper. Same code path the provision
 #        side runs, so a deprovision / re-provision cycle leaves no
 #        legacy state behind.
-#     2. Host-side SSH portproxy relay + its firewall companion removal -
-#        the teardown counterpart to provision's Set-RouterSshPortProxy /
-#        Set-RouterSshPortProxyFirewall (Infrastructure.Network.Windows).
-#        netsh portproxy state persists across VM/switch teardown, so
-#        without this the relay accumulates per router IP across lifecycles
-#        and a stale entry can shadow the next router's WSL relay
-#        auto-discovery. Skipped when no router external IP is known.
+#     2. Host-side SSH relay removal via Remove-RouterSshRelay
+#        (Infrastructure.Network.Windows) - the teardown counterpart to
+#        provision's Set-RouterSshRelay, sweeping the netsh portproxy and
+#        its firewall companion as one pair. netsh portproxy state
+#        persists across VM/switch teardown, so without this the relay
+#        accumulates per router IP across lifecycles and a stale entry can
+#        shadow the next router's WSL relay auto-discovery. Skipped when
+#        no router external IP is known.
 #     3. Private switch removal, guarded by an attached-VMs check. VMs
 #        outside the config that are still connected (e.g. provisioned by
 #        another lifecycle) keep their network; the teardown logs and
@@ -66,16 +67,16 @@ function Invoke-NetworkTeardown {
     Remove-LegacySingletonNat -GatewayIp $GatewayIp
 
     # ------------------------------------------------------------------
-    # Host-side SSH portproxy relay + firewall companion (the teardown
-    # counterpart to provision's Set-RouterSshPortProxy /
-    # Set-RouterSshPortProxyFirewall). netsh portproxy state survives
-    # VM/switch teardown, so removing it here is what stops relays
-    # accumulating per router IP across lifecycles. Both removers are
-    # idempotent. Skipped when no router external IP is known.
+    # Host-side SSH relay removal (the teardown counterpart to
+    # provision's Set-RouterSshRelay). Remove-RouterSshRelay sweeps both
+    # the netsh portproxy and its firewall companion as one pair. netsh
+    # portproxy state survives VM/switch teardown, so removing it here is
+    # what stops relays accumulating per router IP across lifecycles. The
+    # remover is idempotent. Skipped when no router external IP is known.
     # ------------------------------------------------------------------
     if ($RouterExternalIp) {
-        Remove-RouterSshPortProxy -ConnectAddress $RouterExternalIp
-        Remove-RouterSshPortProxyFirewall -ListenPort $PortProxyListenPort
+        Remove-RouterSshRelay -ConnectAddress $RouterExternalIp `
+                              -ListenPort     $PortProxyListenPort
     }
 
     # ------------------------------------------------------------------

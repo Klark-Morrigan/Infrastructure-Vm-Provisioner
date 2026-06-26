@@ -56,10 +56,9 @@ $ErrorActionPreference = 'Stop'
 
 # Install / import every required module via the centralised helper, the
 # same way provision.ps1 does. Teardown now consumes
-# Infrastructure.Network.Windows (Remove-RouterSshPortProxy /
-# Remove-RouterSshPortProxyFirewall) in addition to the SecretManagement
-# stack Read-VmProvisionerConfig needs, so the dependency set is ensured up
-# front rather than left to auto-load.
+# Infrastructure.Network.Windows (Remove-RouterSshRelay) in addition to
+# the SecretManagement stack Read-VmProvisionerConfig needs, so the
+# dependency set is ensured up front rather than left to auto-load.
 . "$PSScriptRoot\Install-ModuleDependencies.ps1"
 
 # ---------------------------------------------------------------------------
