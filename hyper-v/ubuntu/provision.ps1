@@ -52,12 +52,13 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common\diag\Get-VmDiagFolder.ps1"
 . "$PSScriptRoot\common\diag\Invoke-VmRuntimeDiag.ps1"
 . "$PSScriptRoot\common\network\Get-VmAdapterIPv4.ps1"
-# Eight host-network helpers (ICS toggle, netsh portproxy x2,
-# firewall, profile, DNS x2, WSL reachability probe) now ship
-# in the Infrastructure.Network.Windows module. Install-ModuleDependencies
-# imports it at agent startup; this file only consumes the
-# exported functions. Test-WslRouterReachability transitively
-# depends on Infrastructure.Wsl (auto-imported via RequiredModules).
+# The host-network helpers (ICS toggle, netsh portproxy + firewall,
+# the SSH relay that pairs them, wireless-adapter detection, profile,
+# DNS, WSL reachability probe) now ship in the
+# Infrastructure.Network.Windows module. Install-ModuleDependencies
+# imports it at agent startup; this file only consumes the exported
+# functions. Test-WslRouterReachability transitively depends on
+# Infrastructure.Wsl (auto-imported via RequiredModules).
 . "$PSScriptRoot\common\network\preflight\checks\Test-IsCurrentSessionElevated.ps1"
 . "$PSScriptRoot\common\network\preflight\Assert-PreflightFindings.ps1"
 . "$PSScriptRoot\common\network\preflight\Assert-HostNetworkPreflight.ps1"
@@ -298,16 +299,19 @@ try {
 
             Resolve-ExistingRouterIp -RouterVm $routerVm
 
+            # Lay the SSH relay. The firewall companion goes down now
+            # regardless (it is independent of the router IP); the
+            # portproxy needs a connect target, so it is laid only once
+            # the IP is known. A DHCP router has no IP yet here - step
+            # 8's post-creation pass adds its portproxy once KVP
+            # discovery populates ipAddress, joining the firewall this
+            # pass pre-laid.
             if ($routerVm.PSObject.Properties['ipAddress'] -and
                 $routerVm.ipAddress) {
-                Set-RouterSshPortProxy -ConnectAddress $routerVm.ipAddress
+                Set-RouterSshRelay -ConnectAddress $routerVm.ipAddress
+            } else {
+                Set-RouterSshRelay -FirewallOnly
             }
-            # Firewall companion: without an inbound allow rule on
-            # the WSL vEthernet, the portproxy listens but Windows
-            # silently drops WSL's packets, surfacing later as the
-            # "Connection timed out during banner exchange" Ansible
-            # UNREACHABLE error.
-            Set-RouterSshPortProxyFirewall
 
             foreach ($workload in $env.WorkloadVms) {
                 Add-Member -InputObject $workload `
@@ -412,17 +416,16 @@ try {
             }
             Invoke-VmCreation -Vm $vm -SwitchName $primarySwitch
         }
-        # Follow-up portproxy pass for routers whose IP was unknown
+        # Follow-up relay pass for routers whose IP was unknown
         # at step 4 (DHCP) and got populated by create-vm.ps1's KVP
         # discovery just above. Static routers already had their
-        # portproxy set in step 4; the call is idempotent so a static
-        # router whose IP did not change is a no-op. New IP at the
-        # same listen target triggers a delete+re-add inside
-        # Set-RouterSshPortProxy.
+        # relay set in step 4; Set-RouterSshRelay is idempotent so a
+        # static router whose IP did not change is a no-op. A new IP at
+        # the same listen target triggers a delete+re-add inside the
+        # portproxy half.
         foreach ($vm in $newVms | Where-Object { $_.kind -eq 'router' }) {
             if ($vm.PSObject.Properties['ipAddress'] -and $vm.ipAddress) {
-                Set-RouterSshPortProxy -ConnectAddress $vm.ipAddress
-                Set-RouterSshPortProxyFirewall
+                Set-RouterSshRelay -ConnectAddress $vm.ipAddress
             }
         }
     }

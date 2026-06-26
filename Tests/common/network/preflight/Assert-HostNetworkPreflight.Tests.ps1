@@ -7,6 +7,11 @@ BeforeAll {
     function Get-NetIPAddress          { param([string]$InterfaceAlias, $AddressFamily, $ErrorAction) }
     function Get-NetRoute              { param([string]$DestinationPrefix, $ErrorAction) }
     function Get-VMNetworkAdapter      { param([switch]$All, $ErrorAction) }
+    # Get-WirelessNetAdapter is the shared "which NICs are Wi-Fi" helper
+    # the orchestrator now calls instead of an inline Get-NetAdapter
+    # -Physical filter. Stub it here so the MAC checks can be driven
+    # per-test independently of the vEthernet Get-NetAdapter lookup.
+    function Get-WirelessNetAdapter    { }
     # Stubs for the two check functions that moved to
     # Infrastructure.Network.Windows. Their own behavior has dedicated
     # tests in that module; here we only care about the orchestrator's
@@ -55,9 +60,10 @@ BeforeAll {
         # answering. Anything more interesting flips one mock.
         Mock Test-IsCurrentSessionElevated { $true }
         Mock Get-VMSwitch         { [PSCustomObject]@{ Name = 'ExternalSwitch-Shared'; SwitchType = 'Internal' } }
-        Mock Get-NetAdapter       {
-            if ($Name) { New-IcsVNic } else { @(New-WifiAdapter) }
-        }
+        # Get-NetAdapter now only serves the vEthernet ($Name) lookup;
+        # the physical-Wi-Fi lookup moved behind Get-WirelessNetAdapter.
+        Mock Get-NetAdapter         { New-IcsVNic }
+        Mock Get-WirelessNetAdapter { @(New-WifiAdapter) }
         Mock Get-NetIPAddress     { New-IcsIp }
         Mock Get-NetRoute         {
             [PSCustomObject]@{
@@ -166,11 +172,10 @@ Describe 'Assert-HostNetworkPreflight' {
 
         It 'throws when the vEthernet adapter is missing' {
             Initialize-HappyMocks
-            Mock Get-NetAdapter {
-                # vEthernet lookup returns nothing; the Physical
-                # lookup for WiFi still returns normally.
-                if ($Name) { $null } else { @(New-WifiAdapter) }
-            }
+            # vEthernet lookup returns nothing; the Wi-Fi lookup
+            # (Get-WirelessNetAdapter) still returns normally via the
+            # happy mock.
+            Mock Get-NetAdapter { $null }
 
             { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } |
                 Should -Throw -ExpectedMessage "*Host vNIC*"
@@ -179,13 +184,11 @@ Describe 'Assert-HostNetworkPreflight' {
         It 'throws when the vEthernet adapter is Disabled' {
             Initialize-HappyMocks
             Mock Get-NetAdapter {
-                if ($Name) {
-                    [PSCustomObject]@{
-                        Name = 'vEthernet (ExternalSwitch-Shared)'
-                        Status = 'Disabled'
-                        MacAddress = '00-15-5D-00-BB-FB'
-                    }
-                } else { @(New-WifiAdapter) }
+                [PSCustomObject]@{
+                    Name = 'vEthernet (ExternalSwitch-Shared)'
+                    Status = 'Disabled'
+                    MacAddress = '00-15-5D-00-BB-FB'
+                }
             }
 
             { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } |
@@ -210,10 +213,8 @@ Describe 'Assert-HostNetworkPreflight' {
             $sharedMac = '44-A3-BB-BC-51-06'
 
             Initialize-HappyMocks
-            Mock Get-NetAdapter {
-                if ($Name) { New-IcsVNic -Mac $sharedMac }
-                else       { @(New-WifiAdapter -Mac $sharedMac) }
-            }
+            Mock Get-NetAdapter         { New-IcsVNic -Mac $sharedMac }
+            Mock Get-WirelessNetAdapter { @(New-WifiAdapter -Mac $sharedMac) }
 
             { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } |
                 Should -Throw -ExpectedMessage "*vEthernet MAC distinct*"
@@ -232,10 +233,8 @@ Describe 'Assert-HostNetworkPreflight' {
 
             Initialize-HappyMocks
             Mock Get-VMSwitch   { [PSCustomObject]@{ Name = 'ExternalSwitch-Shared'; SwitchType = 'External' } }
-            Mock Get-NetAdapter {
-                if ($Name) { New-IcsVNic -Mac $sharedMac }
-                else       { @(New-WifiAdapter -Mac $sharedMac) }
-            }
+            Mock Get-NetAdapter         { New-IcsVNic -Mac $sharedMac }
+            Mock Get-WirelessNetAdapter { @(New-WifiAdapter -Mac $sharedMac) }
             Mock Get-NetIPAddress {
                 [PSCustomObject]@{
                     IPAddress    = '192.168.5.8'
@@ -261,10 +260,8 @@ Describe 'Assert-HostNetworkPreflight' {
             # Ethernet bridge case and is the design-correct path.
             Initialize-HappyMocks
             Mock Get-VMSwitch   { [PSCustomObject]@{ Name = 'ExternalSwitch-Shared'; SwitchType = 'External' } }
-            Mock Get-NetAdapter {
-                if ($Name) { New-IcsVNic -Mac '00-11-22-33-44-55' }   # bridged Ethernet MAC
-                else       { @(New-WifiAdapter -Mac '44-A3-BB-BC-51-06') }
-            }
+            Mock Get-NetAdapter         { New-IcsVNic -Mac '00-11-22-33-44-55' }   # bridged Ethernet MAC
+            Mock Get-WirelessNetAdapter { @(New-WifiAdapter -Mac '44-A3-BB-BC-51-06') }
             Mock Get-NetIPAddress {
                 [PSCustomObject]@{
                     IPAddress    = '192.168.1.10'
@@ -396,9 +393,7 @@ Describe 'Assert-HostNetworkPreflight' {
             # message should list every FAIL with its Detail so the
             # operator does not have to re-run after each fix.
             Initialize-HappyMocks
-            Mock Get-NetAdapter   {
-                if ($Name) { $null } else { @(New-WifiAdapter) }
-            }
+            Mock Get-NetAdapter   { $null }
             Mock Get-NetIPAddress { }
             Mock Get-NetRoute     { }
 
