@@ -104,7 +104,7 @@ specifically for it (`Add-VmFileServerFile`, `Expand-VmTarball`,
     ([`Invoke-VmPostProvisioning.ps1`](../../../../hyper-v/ubuntu/up/post/Invoke-VmPostProvisioning.ps1)).
 
 - **Cross-repo**
-  - [`Infrastructure-VM-Ansible`](../../../../../Infrastructure-VM-Ansible)'s
+  - [`Common-Ansible`](../../../../../Common-Ansible)'s
     `runner_binary` role pulls the GitHub Actions runner binary
     from the same host file server.
 
