@@ -24,6 +24,10 @@
 - [start-vms.ps1](#start-vmsps1)
 - [ensure-vms-ready.ps1](#ensure-vms-readyps1)
 - [deprovision.ps1](#deprovisionps1)
+- [Toolchain provisioning via Ansible (Common-Ansible)](#toolchain-provisioning-via-ansible-common-ansible)
+  - [Consuming Common-Ansible](#consuming-common-ansible)
+  - [Acquire, verify, stage (the integrity gate)](#acquire-verify-stage-the-integrity-gate)
+  - [Running the flow](#running-the-flow)
 - [CI](#ci)
 - [Repo structure](#repo-structure)
 
@@ -1199,6 +1203,98 @@ After all VMs are processed:
 **The base Ubuntu image is not deleted.** It is shared across all VMs of the
 same Ubuntu version and is not specific to any single config entry. Delete it
 manually from `vhdPath` if it is no longer needed.
+
+---
+
+## Toolchain provisioning via Ansible (Common-Ansible)
+
+An Ansible-driven flow that installs the section-1 toolchains (JDK, .NET SDK,
+.NET global tools) onto already-provisioned VMs, using the reusable roles that
+live in the [Common-Ansible](https://github.com/Klark-Morrigan/Common-Ansible)
+substrate. It is the eventual replacement for this repo's PowerShell toolchain
+reconciler (the `javaDevKit` / `dotnetSdk` / `dotnetTools` config fields
+documented above); until the cutover criterion is met the reconciler stays the
+live path and this flow runs alongside it. The reusable roles are substrate and
+stay in Common-Ansible - only the "who gets what, on which box" wiring (the
+playbook, the acquire/verify/stage step, and the operator wrappers) lives here,
+in the consumer that owns the estate's egress.
+
+The flow lives under `hyper-v/ubuntu/Ansible/`:
+
+- `playbooks/provision-toolchains.yml` - composes the substrate `jdk`,
+  `dotnet_sdk`, and `dotnet_tools` roles against every host in the fleet
+  inventory.
+- `ops/provision-toolchains.sh` - the operator entry point.
+- `ops/_stage-toolchain-artifacts.sh` + `ops/Stage-ToolchainArtifacts.ps1` -
+  the acquire/verify/stage step (below).
+- `ops/_build-extra-vars-Toolchains.sh` - the per-domain extra-vars fragment the
+  substrate bridge dispatches to; it threads the host file server URL to the
+  roles.
+
+### Consuming Common-Ansible
+
+The roles are not standalone - they read the dispatch bridge's extra-vars and
+inventory contract - so roles and bridge are one substrate, consumed together
+from a single **sibling checkout** of Common-Ansible under the same parent
+directory (`c:\a_Code\Common-Ansible`; override with `COMMON_ANSIBLE_ROOT`).
+The wrapper declares this repo's needs to the consumer-agnostic bridge through
+its `CA_*` contract: the `VmProvisioner` inventory vault, the `Toolchains` vault
+on top of it, the host file server, and `CA_CONSUMER_ROOT` (this repo's
+`hyper-v/ubuntu/Ansible/` slice) so the bridge resolves the playbook and the
+extra-vars fragment from here while the reusable roles resolve from the sibling.
+
+### Acquire, verify, stage (the integrity gate)
+
+The roles pull their tarballs / packages from the host file server by archive
+name and deliberately do **not** verify a checksum at install (they trust the
+file server). Integrity therefore lives in this consumer, in
+`Stage-ToolchainArtifacts.ps1`, which runs before the file server starts and,
+for each desired toolchain:
+
+1. resolves the operator's loose pin (e.g. `21`) against upstream (Adoptium for
+   the JDK, the .NET release feed for the SDK, NuGet for tools) into a concrete
+   build - reusing this repo's own reconciler resolvers so resolution stays one
+   source of truth;
+2. downloads the artifact from upstream and **verifies its checksum**, failing
+   the whole run (nothing reaches any VM) on a mismatch;
+3. stages the verified artifact under the exact archive name the role re-derives
+   and pulls by; and
+4. writes a per-artifact lockfile pin and a resolved-config document of the
+   **concrete** versions.
+
+The concrete versions are the pin: the roles re-resolve on the target, so they
+are handed the exact resolved build (`21.0.5+11`, not `21`) as an
+`--extra-vars` override, which stops the target picking a newer upstream build
+than the one that was verified and staged.
+
+The desired toolchains are read from an interim `Toolchains` vault
+(`ToolchainsConfig-<suffix>`) whose shape is the role variables directly:
+
+```json
+{
+  "jdk_versions": ["21"],
+  "dotnet_sdk_versions": [{ "channel": "10.0", "version": "10.0" }],
+  "dotnet_tools_tools": [{ "id": "dotnet-reportgenerator-globaltool",
+                           "version": "5.4.4" }]
+}
+```
+
+A later change folds this block into the per-VM `VmProvisionerConfig` secret
+(one per-VM source of truth) with a richer three-section taxonomy; the flow
+itself is unchanged by that move.
+
+### Running the flow
+
+Requires a WSL controller bootstrapped by Common-Ansible's
+`ops/bootstrap-controller`, the local `Toolchains` and `VmProvisioner` vaults
+populated, and the Common-Ansible sibling checkout present.
+
+```bash
+# From hyper-v/ubuntu/Ansible/ops/, with SECRET_SUFFIX naming the lifecycle:
+SECRET_SUFFIX=Production ./provision-toolchains.sh
+# Forwarded args reach ansible-playbook unchanged, e.g.:
+SECRET_SUFFIX=Production ./provision-toolchains.sh --limit ubuntu-02-ci --check
+```
 
 ---
 

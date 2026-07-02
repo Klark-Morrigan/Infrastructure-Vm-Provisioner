@@ -1,0 +1,20 @@
+---
+# Galaxy collections the toolchain playbook and the substrate roles it
+# consumes depend on.
+#
+# Pinned to specific versions so a fresh controller bootstrap is
+# reproducible. Bump deliberately, not opportunistically. Kept in lockstep
+# with the substrate consumers (Infrastructure-Vm-Users /
+# Infrastructure-GitHubRunners) so every repo the Common-Ansible bridge
+# serves resolves the same collection baseline.
+collections:
+  # ansible.posix: POSIX modules (sysctl, mount, ...) the substrate roles
+  # may reach for. Pinned to the shared consumer baseline.
+  - name: ansible.posix
+    version: 1.6.2
+
+  # community.general: broad utility collection the toolchain roles' unarchive
+  # / file-management tasks rely on transitively. Pinned to the shared
+  # consumer baseline.
+  - name: community.general
+    version: 10.1.0
