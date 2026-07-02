@@ -8,7 +8,7 @@
 
 .DESCRIPTION
     Wrapper around Assert-HostNetworkPreflight in
-    hyper-v\ubuntu\common\network\. The function PASS/WARN/FAILs each
+    hyper-v\ubuntu\PowerShell\common\network\. The function PASS/WARN/FAILs each
     check inline; on any FAIL it throws. This wrapper catches the
     throw and turns it into exit 1 so the script is composable with
     shell pipelines / CI.
@@ -83,7 +83,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$net       = Join-Path $repoRoot 'hyper-v\ubuntu\common\network'
+$net       = Join-Path $repoRoot 'hyper-v\ubuntu\PowerShell\common\network'
 $preflight = Join-Path $net      'preflight'
 $checks    = Join-Path $preflight 'checks'
 # Reset-IcsSharing, the Ics/Profile/DNS check functions, and

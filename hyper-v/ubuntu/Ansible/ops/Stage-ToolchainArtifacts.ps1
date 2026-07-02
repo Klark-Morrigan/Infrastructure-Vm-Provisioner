@@ -87,9 +87,9 @@ $ErrorActionPreference = 'Stop'
 # reader knows the coupling is intentional. Invoke-DotnetToolAcquisition.ps1
 # is dot-sourced only for ConvertFrom-NugetHashBase64; its Invoke-* function
 # is not called here.
-. "$PSScriptRoot\..\..\up\jdk\Resolve-AdoptiumRelease.ps1"
-. "$PSScriptRoot\..\..\up\dotnet\Resolve-DotnetSdkRelease.ps1"
-. "$PSScriptRoot\..\..\up\dotnet\Invoke-DotnetToolAcquisition.ps1"
+. "$PSScriptRoot\..\..\PowerShell\up\jdk\Resolve-AdoptiumRelease.ps1"
+. "$PSScriptRoot\..\..\PowerShell\up\dotnet\Resolve-DotnetSdkRelease.ps1"
+. "$PSScriptRoot\..\..\PowerShell\up\dotnet\Invoke-DotnetToolAcquisition.ps1"
 
 # ---------------------------------------------------------------------------
 # Get-ToolchainArrayField

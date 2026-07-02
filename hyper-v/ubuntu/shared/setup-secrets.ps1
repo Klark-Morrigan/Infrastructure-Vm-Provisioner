@@ -1,0 +1,86 @@
+<#
+.SYNOPSIS
+    One-time setup: stores the VM provisioner JSON config in the local vault.
+
+.DESCRIPTION
+    Run once per machine before running provision.ps1.
+    Re-running safely updates the stored config.
+
+    Installs the Infrastructure.Secrets module from PSGallery automatically if not
+    already present on this machine.
+
+.PARAMETER ConfigJson
+    The VM config as a raw JSON string. Mutually exclusive with -ConfigFile.
+
+.PARAMETER ConfigFile
+    Path to a JSON file containing the VM config. Mutually exclusive with
+    -ConfigJson. The file is read at runtime; it is not modified.
+
+.PARAMETER RequireVaultPassword
+    When specified, the SecretStore vault requires a password each session.
+    Recommended on shared or less-trusted machines.
+
+.EXAMPLE
+    .\setup-secrets.ps1 -ConfigFile C:\private\vm-config.json
+
+.EXAMPLE
+    .\setup-secrets.ps1 -ConfigFile C:\private\vm-config.json -RequireVaultPassword
+#>
+
+[CmdletBinding(DefaultParameterSetName = 'File')]
+param(
+    [Parameter(Mandatory, ParameterSetName = 'Json')]
+    [string] $ConfigJson,
+
+    [Parameter(Mandatory, ParameterSetName = 'File')]
+    [string] $ConfigFile,
+
+    [Parameter()]
+    [switch] $RequireVaultPassword,
+
+    # Required. The secret is written as `VmProvisionerConfig-<Suffix>`.
+    # Operator runs pass `Production`; ephemeral environments (parallel
+    # workflows, multi-tenant deployments) pass their own label so each
+    # lifecycle has an isolated secret.
+    [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
+    [string] $SecretSuffix
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+# Install / import every required PowerShell module via the centralised
+# helper. Owns NuGet provider, Common.PowerShell, Infrastructure.Secrets,
+# and the rest of this repo's deps in one place. This writer lives in the
+# `shared/` slice (both impls read the vault it seeds); the reconciler it
+# reuses lives in the sibling `PowerShell/` slice, hence the ..\PowerShell hop.
+. "$PSScriptRoot\..\PowerShell\Install-ModuleDependencies.ps1"
+
+# ConvertFrom-VmConfigJson.ps1 is dot-sourced after the modules are loaded.
+# It only calls Assert-RequiredProperties inside function bodies, not at
+# load time, so this ordering is safe.
+. "$PSScriptRoot\..\PowerShell\common\config\ConvertFrom-VmConfigJson.ps1"
+
+# Forward the secret-store cmdlet only the params it knows about; Suffix
+# is consumed locally to build SecretName and must not be splatted.
+$initParams = @{}
+foreach ($k in 'ConfigJson','ConfigFile','RequireVaultPassword') {
+    if ($PSBoundParameters.ContainsKey($k)) {
+        $initParams[$k] = $PSBoundParameters[$k]
+    }
+}
+
+Initialize-MicrosoftPowerShellSecretStoreVault `
+    -VaultName           'VmProvisioner' `
+    -SecretName          "VmProvisionerConfig-$SecretSuffix" `
+    @initParams `
+    -Validate {
+        param($json)
+        $defs = ConvertTo-Array (ConvertFrom-VmConfigJson -Json $json)
+        Write-Host "[OK] JSON validated - $($defs.Count) VM definition(s) found." `
+            -ForegroundColor Green
+    }
+
+Write-Host ""
+Write-Host "Setup complete. Run provision.ps1 to create VMs." -ForegroundColor Cyan
