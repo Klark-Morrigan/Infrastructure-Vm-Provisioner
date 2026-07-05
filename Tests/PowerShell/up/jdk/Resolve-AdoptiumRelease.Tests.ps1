@@ -37,7 +37,11 @@ BeforeAll {
                 minor           = $Minor
                 security        = $Security
                 build           = $Build
-                openjdk_version = "$Major.$Minor.$Security+$Build"
+                # LTS feature releases carry a '-LTS' vendor tag on
+                # openjdk_version in the real API; the fixture mirrors that
+                # so the resolver's reconstruction is genuinely exercised
+                # (ResolvedVersion must come out as the clean semver).
+                openjdk_version = "$Major.$Minor.$Security+$Build-LTS"
             }
             binaries     = @(
                 [pscustomobject]@{
@@ -156,6 +160,24 @@ Describe 'Resolve-AdoptiumRelease' {
             $result.ResolvedVersion | Should -Be '21.0.5+11'
             $result.Sha256          | Should -Be 'sha-21.0.5+11'
             $result.DownloadUrl     | Should -Be 'https://example.invalid/21.0.5+11.tar.gz'
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'version string canonicalisation' {
+    # ------------------------------------------------------------------
+
+        It 'strips the Adoptium -LTS vendor tag from ResolvedVersion' {
+            # The Ansible jdk role re-validates the resolved pin against a
+            # 'major.minor.security+build' granularity regex and rejects a
+            # '-LTS'-adorned string, so the resolver must emit the clean
+            # canonical version, not the raw openjdk_version.
+            Mock Invoke-AdoptiumFeatureReleases { return ,(Get-Fixture21)[0] }
+
+            $result = Resolve-AdoptiumRelease -Vendor 'temurin' -Version '21'
+
+            $result.ResolvedVersion | Should -Be '21.0.6+7'
+            $result.ResolvedVersion | Should -Not -Match '-LTS'
         }
     }
 

@@ -12,14 +12,16 @@
 #       [PSCustomObject]@{ Provider='javaDevKit'; Vendor; Version;
 #                          RequestedVersion }
 #
-#   Spec.Version is the *resolved* version (e.g. '21.0.11+10-LTS') so
+#   Spec.Version is the *resolved* version (e.g. '21.0.11+10') so
 #   the reconciler's diff (which matches desired vs installed by
 #   Version) compares the same shape on both sides - Get-InstalledVersions
 #   reads the resolved version from the on-VM manifest, and the
 #   manifest was written with the resolved version too. Without this
 #   alignment, every no-op run would falsely schedule a reinstall
 #   because the operator-literal '21' never equals the resolver's
-#   '21.0.11+10-LTS'.
+#   '21.0.11+10'. (Resolve-AdoptiumRelease canonicalises to this
+#   'major.minor.security+build' shape - it strips Adoptium's '-LTS'
+#   vendor tag - so both the manifest and this diff stay tag-free.)
 #
 #   RequestedVersion preserves the operator's literal pin for log
 #   output and downstream tooling that wants to show what the operator
@@ -127,7 +129,7 @@ function Get-JdkDesiredVersions {
     # stamps it in the host-side acquisitions phase). Absence here means
     # the pipeline ran out of order or the acquisition silently skipped -
     # either way, proceeding would compare a literal '21' against a
-    # manifest's '21.0.11+10-LTS' and force a reinstall every run.
+    # manifest's '21.0.11+10' and force a reinstall every run.
     if (-not $VmConfig.PSObject.Properties['_jdkResolvedVersion'] -or
         [string]::IsNullOrWhiteSpace($VmConfig._jdkResolvedVersion)) {
         throw (

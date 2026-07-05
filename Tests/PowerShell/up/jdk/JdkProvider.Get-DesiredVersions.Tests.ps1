@@ -12,7 +12,7 @@ BeforeAll {
             # Most tests need _jdkResolvedVersion stamped by
             # Invoke-JdkAcquisition. Pass $null to omit it (used by
             # the "throws when acquisition did not run" case).
-            [string] $ResolvedVersion = '21.0.11+10-LTS'
+            [string] $ResolvedVersion = '21.0.11+10'
         )
         $vm = $Json | ConvertFrom-Json
         if ($null -ne $ResolvedVersion) {
@@ -83,7 +83,7 @@ Describe 'Get-JdkDesiredVersions' {
     # ----------------------------------------------------------------------
 
         It 'wraps a scalar object into a one-element Spec array with the resolved version' {
-            $vm = New-VmConfigFromJson -ResolvedVersion '21.0.5+11-LTS' -Json @'
+            $vm = New-VmConfigFromJson -ResolvedVersion '21.0.5+11' -Json @'
 { "javaDevKit": { "vendor": "temurin", "version": "21.0.5" } }
 '@
             $result = Get-JdkDesiredVersions -VmConfig $vm
@@ -93,7 +93,7 @@ Describe 'Get-JdkDesiredVersions' {
             $result[0].Vendor           | Should -Be 'temurin'
             # Version is the RESOLVED form so the reconciler diff
             # matches the manifest's stored version on no-op reruns.
-            $result[0].Version          | Should -Be '21.0.5+11-LTS'
+            $result[0].Version          | Should -Be '21.0.5+11'
             # RequestedVersion preserves the operator's literal pin
             # for diagnostic / display purposes; not used by the diff.
             $result[0].RequestedVersion | Should -Be '21.0.5'
@@ -105,7 +105,7 @@ Describe 'Get-JdkDesiredVersions' {
     # ----------------------------------------------------------------------
 
         It 'accepts a list of one entry and returns it as a Spec array with the resolved version' {
-            $vm = New-VmConfigFromJson -ResolvedVersion '21.0.11+10-LTS' -Json @'
+            $vm = New-VmConfigFromJson -ResolvedVersion '21.0.11+10' -Json @'
 { "javaDevKit": [ { "vendor": "temurin", "version": "21" } ] }
 '@
             $result = Get-JdkDesiredVersions -VmConfig $vm
@@ -113,7 +113,7 @@ Describe 'Get-JdkDesiredVersions' {
             @($result).Count            | Should -Be 1
             $result[0].Provider         | Should -Be 'javaDevKit'
             $result[0].Vendor           | Should -Be 'temurin'
-            $result[0].Version          | Should -Be '21.0.11+10-LTS'
+            $result[0].Version          | Should -Be '21.0.11+10'
             $result[0].RequestedVersion | Should -Be '21'
         }
 

@@ -147,8 +147,18 @@ function Resolve-AdoptiumRelease {
         )
     }
 
+    # Reconstruct the concrete version from the structured numeric fields
+    # rather than passing through version_data.openjdk_version. For LTS
+    # feature releases Adoptium adorns openjdk_version with a vendor tag
+    # (e.g. '21.0.11+10-LTS'), and some lines carry an interim-patch
+    # component ('11.0.16.1+1'). Downstream consumers - notably the
+    # Ansible jdk role's granularity assertion and its build filter -
+    # accept only the canonical 'major.minor.security+build' shape, so
+    # emit exactly that. The same numeric fields are already trusted for
+    # candidate filtering above, so this introduces no new dependency.
+    $vd = $pick.version_data
     return @{
-        ResolvedVersion = $pick.version_data.openjdk_version
+        ResolvedVersion = "$($vd.major).$($vd.minor).$($vd.security)+$($vd.build)"
         Sha256          = $binary.package.checksum
         DownloadUrl     = $binary.package.link
         ArchiveName     = $binary.package.name
