@@ -14,5 +14,5 @@ jobs:
     # provision-toolchains.sh, the way this repo now installs toolchains.
     # users/runners stay on their ansible defaults.
     with:
-      flow-spec: '{"usersFlow":"ansible","runnersFlow":"ansible","toolchainsFlow":"ansible"}'
+      flow-spec: '{"usersFlow":"ansible","runnersFlow":"ansible","toolchainsFlow":"custom-powershell"}'
     secrets: inherit
