@@ -968,4 +968,48 @@ Describe 'Invoke-VmPostProvisioning' {
             $global:_PostProv_Calls['Get-VmSwitchHostIp'].Count | Should -Be 0
         }
     }
+
+    # ------------------------------------------------------------------
+    Context '-SkipToolchains (toolchains installed by the separate Ansible command)' {
+    # ------------------------------------------------------------------
+        # With -SkipToolchains the per-VM reconciler must not run here and
+        # javaDevKit alone must not open the transport (the separate
+        # provision-toolchains.sh command installs toolchains instead).
+        # files / envVars / router work is unchanged.
+
+        It 'does NOT dispatch the reconciler when -SkipToolchains is set' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithFiles) -SkipToolchains
+
+            $global:_PostProv_Calls['Invoke-ToolchainReconciliation'].Count | Should -Be 0
+            $global:_PostProv_Calls['Get-Providers'].Count                  | Should -Be 0
+        }
+
+        It 'opens no transport for a javaDevKit-only VM when -SkipToolchains is set' {
+            # javaDevKit no longer justifies the SSH cost - the Ansible command
+            # installs it, so a toolchain-only VM is a no-op here.
+            Invoke-VmPostProvisioning -Vm (New-VmWithJdk) -SkipToolchains
+
+            $global:_PostProv_Calls['Invoke-WithVmFileServer'].Count | Should -Be 0
+            $global:_PostProv_Calls['New-VmSshClient'].Count         | Should -Be 0
+        }
+
+        It 'still dispatches files (and skips the reconciler) when -SkipToolchains is set' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithFiles) -SkipToolchains
+
+            $global:_PostProv_Calls['Copy-VmFiles'].Count                   | Should -Be 1
+            $global:_PostProv_Calls['Invoke-ToolchainReconciliation'].Count | Should -Be 0
+        }
+
+        It 'still runs Assert-RouterReady for a router VM when -SkipToolchains is set' {
+            Invoke-VmPostProvisioning -Vm (New-RouterVm) -SkipToolchains
+
+            $global:_PostProv_Calls['Assert-RouterReady'].Count | Should -Be 1
+        }
+
+        It 'still dispatches Set-EnvironmentVariables when -SkipToolchains is set' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithEnvVars) -SkipToolchains
+
+            $global:_PostProv_Calls['Set-EnvironmentVariables'].Count | Should -Be 1
+        }
+    }
 }

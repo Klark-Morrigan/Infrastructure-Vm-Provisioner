@@ -319,6 +319,33 @@ Describe 'provision.ps1 - post-provisioning wiring (Step 5)' {
     }
 }
 
+Describe 'provision.ps1 - toolchain engine selection (-SkipToolchains)' {
+
+    It 'declares a -SkipToolchains switch parameter' {
+        # The engine is selected by a visible, per-invocation parameter (set by
+        # the (Ansible) menu scenario), not an ambient env var.
+        $text = Get-Content -Path $script:provisionPath -Raw
+        $text | Should -Match '\[switch\]\s*\$SkipToolchains'
+    }
+
+    It 'threads -SkipToolchains into Invoke-VmPostProvisioning' {
+        $call = $script:commands |
+            Where-Object { $_.GetCommandName() -eq 'Invoke-VmPostProvisioning' } |
+            Select-Object -First 1
+        $call.Extent.Text | Should -Match 'SkipToolchains'
+    }
+
+    It 'does not orchestrate the Ansible flow from PowerShell' {
+        # The Ansible toolchain path is a separate operator command
+        # (provision-toolchains.sh), run by the (Ansible) scenario - not shelled
+        # out from here. So provision.ps1 references neither the removed engine
+        # resolver nor an Ansible shell-out helper.
+        $text = Get-Content -Path $script:provisionPath -Raw
+        $text | Should -Not -Match 'Get-ToolchainEngine'
+        $text | Should -Not -Match 'Invoke-AnsibleToolchainProvisioning'
+    }
+}
+
 Describe 'provision.ps1 - jump host wiring (feature 53 step 3 follow-up)' {
 
     # The host has no route into the per-environment private switch

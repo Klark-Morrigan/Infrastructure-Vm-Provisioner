@@ -39,7 +39,17 @@ param(
     # data.
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
-    [string] $SecretSuffix
+    [string] $SecretSuffix,
+
+    # Skip the in-line PowerShell toolchain reconciler in post-provisioning.
+    # Off by default, so a bare `provision` installs toolchains exactly as
+    # before. The Ansible toolchain path is a SEPARATE operator command
+    # (hyper-v/ubuntu/Ansible/ops/provision-toolchains.sh): the '(Ansible)'
+    # menu scenario runs `provision -SkipToolchains` and then that command,
+    # so the two engines are selected the same way the sibling repos select
+    # theirs (create-users / register-runners vs their (Ansible) variants) -
+    # by which command a scenario names, not by an ambient env var.
+    [switch] $SkipToolchains
 )
 
 Set-StrictMode -Version Latest
@@ -160,6 +170,11 @@ $ErrorActionPreference = 'Stop'
 # ---------------------------------------------------------------------------
 
 $vmDefs = Read-VmProvisionerConfig -SecretSuffix $SecretSuffix
+
+if ($SkipToolchains) {
+    Write-Host "Toolchains: skipped (install separately via provision-toolchains.sh)" `
+        -ForegroundColor Cyan
+}
 
 # ---------------------------------------------------------------------------
 # 3. Idempotency and safety checks
@@ -446,9 +461,16 @@ try {
 
     Invoke-WithPhaseTimer -Name 'Post-provisioning' -Action {
         foreach ($vm in $vmsToProcess) {
-            Invoke-VmPostProvisioning -Vm $vm
+            Invoke-VmPostProvisioning -Vm $vm -SkipToolchains:$SkipToolchains
         }
     }
+
+    # Toolchains are installed here, in step 9's per-VM reconciler, unless
+    # -SkipToolchains was passed. The Ansible alternative is a separate
+    # operator command (hyper-v/ubuntu/Ansible/ops/provision-toolchains.sh),
+    # run after this by the '(Ansible)' scenario - not orchestrated from here,
+    # so provision.ps1 stays a pure host-side PowerShell flow with no WSL
+    # shell-out, matching how the sibling repos keep their two engines apart.
 
     Write-Host ""
     Write-Host "Provisioning complete." -ForegroundColor Green

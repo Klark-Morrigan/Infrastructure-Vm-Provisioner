@@ -7,13 +7,17 @@
 # (Common-Ansible roles/jdk, roles/dotnet_sdk, roles/dotnet_tools) and are
 # resolved from the sibling checkout via ANSIBLE_ROLES_PATH.
 #
-# The desired toolchain versions arrive as a forwarded --extra-vars
-# override the wrapper appends (jdk_versions / dotnet_sdk_versions /
-# dotnet_tools_tools). Those values are the CONCRETE, pinned versions the
-# acquire/verify/stage step resolved and staged on the host file server -
-# not the operator's loose pins - so the target's install-time re-resolve
-# lands on exactly the build that was verified and staged. host_file_server
-# _base_url is threaded in by the bridge's Toolchains extra-vars fragment.
+# Toolchains are targeted PER HOST. The acquire/verify/stage step forwards a
+# single play-wide --extra-vars dict `toolchains_resolved_by_host`, keyed by
+# vmName (which the bridge also uses as inventory_hostname). The play `vars:`
+# below select THIS host's entry by inventory_hostname into jdk_versions /
+# dotnet_sdk_versions / dotnet_tools_tools, so each host installs only what its
+# own VM definition asked for. Those values are the CONCRETE, pinned versions
+# the stage step resolved and staged - not the operator's loose pins - so the
+# target's install-time re-resolve lands on exactly the build that was verified
+# and staged. A host absent from the dict installs nothing (empty defaults).
+# host_file_server_base_url is threaded in by the bridge's always-on inventory
+# extra-vars fragment.
 #
 # Role order is significant on the INSTALL direction this playbook drives:
 # - jdk is independent and runs first.
@@ -31,6 +35,16 @@
   hosts: vm_provisioner_hosts
   gather_facts: true
   any_errors_fatal: false
+  vars:
+    # This host's slice of the per-host resolved map, then its three role
+    # vars. Play vars are templated per host, so inventory_hostname resolves
+    # to each host in turn; an absent host defaults to installing nothing.
+    _host_toolchains: >-
+      {{ (toolchains_resolved_by_host | default({}))[inventory_hostname]
+         | default({}) }}
+    jdk_versions: "{{ _host_toolchains.jdk_versions | default([]) }}"
+    dotnet_sdk_versions: "{{ _host_toolchains.dotnet_sdk_versions | default([]) }}"
+    dotnet_tools_tools: "{{ _host_toolchains.dotnet_tools_tools | default([]) }}"
   tasks:
     - name: Reconcile the JDK toolchain
       ansible.builtin.import_role:

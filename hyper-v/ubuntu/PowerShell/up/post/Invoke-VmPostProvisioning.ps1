@@ -26,19 +26,31 @@ function Invoke-VmPostProvisioning {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [object] $Vm
+        [object] $Vm,
+
+        # Skip the per-VM PowerShell toolchain reconciler. Off by default, so
+        # the reconciler runs and javaDevKit alone can open the transport - the
+        # legacy behaviour. When set (provision.ps1 -SkipToolchains, used by the
+        # Ansible scenario), the reconciler dispatch below is skipped and a
+        # toolchain-only VM opens no session, because the separate Ansible
+        # command installs toolchains instead.
+        [Parameter()]
+        [switch] $SkipToolchains
     )
 
     # Decide which steps apply before opening any transport. If nothing
     # applies, exit silently - no file server, no SSH, no log noise.
     $hasFiles   = $Vm.PSObject.Properties['files'] -and
                   @($Vm.files).Count -gt 0
-    # javaDevKit is reconciler-owned: presence of the field is enough to
-    # warrant opening the transport even when the operator's intent is
-    # "ensure none installed" (javaDevKit: null / []). The reconciler
-    # decides install vs uninstall from the desired/installed diff; this
-    # gate just decides whether to pay the SSH cost at all.
-    $hasJdk     = $Vm.PSObject.Properties['javaDevKit']
+    # javaDevKit opens the transport only when the reconciler will run (not
+    # -SkipToolchains): presence of the field is enough to warrant the SSH cost
+    # even when the intent is "ensure none installed" (javaDevKit: null / []),
+    # because the reconciler decides install vs uninstall from the
+    # desired/installed diff. When toolchains are skipped here (the Ansible
+    # command installs them instead), javaDevKit alone must NOT open the
+    # transport - otherwise a toolchain-only VM would pay for an idle session.
+    $hasJdk     = (-not $SkipToolchains) -and
+                  [bool]$Vm.PSObject.Properties['javaDevKit']
     # Gate on field presence (not entries.Count): `entries: []` is the
     # operator's explicit "remove the managed block" intent, so it must
     # still route through to the transport.
@@ -313,52 +325,57 @@ function Invoke-VmPostProvisioning {
                     }
             }
 
-            # Reconciler dispatch. Get-Providers is parameterised by the
-            # VM so each provider can capture VM-scoped state (e.g. the
-            # JDK provider closes over _jdkTarballPath / _jdkResolvedVersion
-            # populated by Invoke-JdkAcquisition).
-            #
-            # OnProviderComplete attributes each provider's wall-clock
-            # to its own sub-step bucket (reconcile/<providerName>) so
-            # the timing report shows where reconciler time went.
-            # Failed providers still contribute their partial duration;
-            # the -Failed switch makes the sub-step's status sticky
-            # Failed even if a later VM's iteration succeeds.
-            #
-            # Re-bind $addSubStepDuration into a fresh local before the
-            # inner GetNewClosure(). PowerShell's GetNewClosure only
-            # snapshots the IMMEDIATE local scope's variable table -
-            # lexically visible captures from a parent closure (here
-            # the outer post-block, which captured $addSubStepDuration
-            # from Invoke-VmPostProvisioning's scope) do NOT propagate
-            # into the new closure. Without this rebind, the inner
-            # closure's $addSubStepDuration is $null at invocation time
-            # and the callback fails with "expression after '&' produced
-            # an object that was not valid", silently leaving the
-            # reconcile/<provider> sub-step rows un-updated.
-            $addSubStepDurationLocal = $addSubStepDuration
-            $onProviderComplete = {
-                param($providerName, $elapsedMs, $hadError)
-                if ($hadError) {
-                    & $addSubStepDurationLocal `
-                        -Parent    'Post-provisioning' `
-                        -Name      "reconcile/$providerName" `
-                        -ElapsedMs $elapsedMs `
-                        -Failed
-                } else {
-                    & $addSubStepDurationLocal `
-                        -Parent    'Post-provisioning' `
-                        -Name      "reconcile/$providerName" `
-                        -ElapsedMs $elapsedMs
-                }
-            }.GetNewClosure()
+            # Reconciler dispatch - unless -SkipToolchains. When skipped, the
+            # separate Ansible command (provision-toolchains.sh) installs
+            # toolchains instead, so the per-VM reconciler is skipped here.
+            if (-not $SkipToolchains) {
+                # Get-Providers is parameterised by the VM so each provider can
+                # capture VM-scoped state (e.g. the JDK provider closes over
+                # _jdkTarballPath / _jdkResolvedVersion populated by
+                # Invoke-JdkAcquisition).
+                #
+                # OnProviderComplete attributes each provider's wall-clock
+                # to its own sub-step bucket (reconcile/<providerName>) so
+                # the timing report shows where reconciler time went.
+                # Failed providers still contribute their partial duration;
+                # the -Failed switch makes the sub-step's status sticky
+                # Failed even if a later VM's iteration succeeds.
+                #
+                # Re-bind $addSubStepDuration into a fresh local before the
+                # inner GetNewClosure(). PowerShell's GetNewClosure only
+                # snapshots the IMMEDIATE local scope's variable table -
+                # lexically visible captures from a parent closure (here
+                # the outer post-block, which captured $addSubStepDuration
+                # from Invoke-VmPostProvisioning's scope) do NOT propagate
+                # into the new closure. Without this rebind, the inner
+                # closure's $addSubStepDuration is $null at invocation time
+                # and the callback fails with "expression after '&' produced
+                # an object that was not valid", silently leaving the
+                # reconcile/<provider> sub-step rows un-updated.
+                $addSubStepDurationLocal = $addSubStepDuration
+                $onProviderComplete = {
+                    param($providerName, $elapsedMs, $hadError)
+                    if ($hadError) {
+                        & $addSubStepDurationLocal `
+                            -Parent    'Post-provisioning' `
+                            -Name      "reconcile/$providerName" `
+                            -ElapsedMs $elapsedMs `
+                            -Failed
+                    } else {
+                        & $addSubStepDurationLocal `
+                            -Parent    'Post-provisioning' `
+                            -Name      "reconcile/$providerName" `
+                            -ElapsedMs $elapsedMs
+                    }
+                }.GetNewClosure()
 
-            & $invokeReconciliation `
-                -SshClient          $sshClient `
-                -Server             $server `
-                -Vm                 $vmRef `
-                -Providers          @(& $getProviders -Vm $vmRef) `
-                -OnProviderComplete $onProviderComplete
+                & $invokeReconciliation `
+                    -SshClient          $sshClient `
+                    -Server             $server `
+                    -Vm                 $vmRef `
+                    -Providers          @(& $getProviders -Vm $vmRef) `
+                    -OnProviderComplete $onProviderComplete
+            }
 
             if ($hasEnvVars) {
                 # Stylistically last: env-var values may legitimately

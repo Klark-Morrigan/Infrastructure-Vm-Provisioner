@@ -53,15 +53,65 @@ Describe 'Stage-ToolchainArtifacts' {
         }
     }
 
+    Context 'Read-ToolchainDesiredState source B (VmProvisionerConfig)' {
+        It 'reads VmProvisionerConfig by suffix and projects to a per-host map' {
+            # Source B reads the per-VM inventory vault and projects it to the
+            # per-host map keyed by vmName; mock the vault read and let the real
+            # projection run so each host keeps ONLY its own toolchains.
+            Mock Read-VmProvisionerConfig {
+                @(
+                    [pscustomobject]@{ vmName = 'a'; kind = 'workload'
+                                       javaDevKit = [pscustomobject]@{ vendor = 'temurin'; version = '21' } },
+                    [pscustomobject]@{ vmName = 'b'; kind = 'workload'
+                                       dotnetSdk = [pscustomobject]@{ channel = '10.0'; version = '10.0.100' } }
+                )
+            }
+
+            $result = Read-ToolchainDesiredState -Suffix 'Production'
+
+            Should -Invoke Read-VmProvisionerConfig -Times 1 -Exactly `
+                -ParameterFilter { $SecretSuffix -eq 'Production' }
+            $result.a.jdk_versions                   | Should -Be @('21')
+            @($result.a.dotnet_sdk_versions).Count   | Should -Be 0
+            $result.b.dotnet_sdk_versions[0].channel | Should -Be '10.0'
+            @($result.b.jdk_versions).Count          | Should -Be 0
+        }
+    }
+
+    Context 'empty fleet (no VM requests any toolchain)' {
+        It 'emits the contract and an empty per-host map without touching upstream' {
+            # An empty per-host map must not throw (the StrictMode .Properties
+            # trap) and must stage nothing.
+            Mock Read-ToolchainDesiredState { [pscustomobject]@{} }
+            Mock Resolve-AdoptiumRelease {}
+            Mock New-Item {}
+            Mock Set-Content {}
+
+            $out = Invoke-ToolchainStaging `
+                -ConfigPath        'ignored-mocked' `
+                -StagingDirectory  'TestDrive:\staging' `
+                -ResolvedConfigOut 'TestDrive:\resolved.json'
+
+            Should -Not -Invoke Resolve-AdoptiumRelease
+            Should -Invoke Set-Content -Times 1 -ParameterFilter {
+                $Value -like '*toolchains_resolved_by_host*'
+            }
+            ($out -join "`n") | Should -Match 'STAGING_DIR='
+        }
+    }
+
     Context 'checksum verification gate (a JDK pin)' {
         BeforeEach {
             # One JDK pin desired; no .NET SDK / tools, so only the JDK path
             # exercises the gate.
             Mock Read-ToolchainDesiredState {
+                # Per-host map: one host wanting one JDK.
                 [pscustomobject]@{
-                    jdk_versions        = @('21')
-                    dotnet_sdk_versions = @()
-                    dotnet_tools_tools  = @()
+                    'node-01' = [pscustomobject]@{
+                        jdk_versions        = @('21')
+                        dotnet_sdk_versions = @()
+                        dotnet_tools_tools  = @()
+                    }
                 }
             }
             Mock Resolve-AdoptiumRelease {
@@ -111,7 +161,11 @@ Describe 'Stage-ToolchainArtifacts' {
             Should -Invoke Invoke-WebRequest -Times 1 -ParameterFilter {
                 $OutFile -like '*OpenJDK21U-jdk_x64_linux_hotspot_21.0.5_11.tar.gz'
             }
+            # The pin is nested under the host's own key in the per-host map,
+            # not at the document root - proof the resolution is per host.
             Should -Invoke Set-Content -Times 1 -ParameterFilter {
+                $Value -like '*toolchains_resolved_by_host*' -and
+                $Value -like '*node-01*' -and
                 $Value -like '*21.0.5+11*'
             }
 

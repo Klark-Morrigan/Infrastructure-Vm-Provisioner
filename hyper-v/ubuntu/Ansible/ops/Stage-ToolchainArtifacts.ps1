@@ -48,19 +48,19 @@
 [CmdletBinding()]
 param(
     # Loose desired-state source A: a JSON file. Primary input for tests and
-    # the interim operator-supplied spec. Shape (every key optional, defaults
-    # to none):
-    #   { "jdk_versions": ["21"],
-    #     "dotnet_sdk_versions": [{"channel":"10.0","version":"10.0"}],
-    #     "dotnet_tools_tools": [{"id":"...","version":"5.4.4"}] }
+    # the interim operator-supplied spec. Shape is a per-host map keyed by
+    # vmName (every host and every key optional):
+    #   { "ubuntu-01": { "jdk_versions": ["21"],
+    #                    "dotnet_sdk_versions": [{"channel":"10.0","version":"10.0"}],
+    #                    "dotnet_tools_tools": [{"id":"...","version":"5.4.4"}] } }
     [Parameter()]
     [string] $ToolchainsConfigPath,
 
-    # Loose desired-state source B: read ToolchainsConfig-<SecretSuffix> from
-    # the local Toolchains vault (the same secret the bridge's Toolchains
-    # extra-vars fragment reads, so both consume one desired-state SSOT).
-    # Step 9.1 folds this block into VmProvisionerConfig; until then it is its
-    # own interim vault.
+    # Loose desired-state source B: read the per-VM VmProvisionerConfig-<Secret
+    # Suffix> secret from the local VmProvisioner vault (the same secret the
+    # bridge reads for its inventory, so desired-state and inventory share one
+    # SSOT), and aggregate every VM's javaDevKit / dotnetSdk / dotnetTools into
+    # the flat estate-wide superset the resolve/stage half below consumes.
     [Parameter()]
     [string] $SecretSuffix,
 
@@ -91,6 +91,14 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\..\PowerShell\up\dotnet\Resolve-DotnetSdkRelease.ps1"
 . "$PSScriptRoot\..\..\PowerShell\up\dotnet\Invoke-DotnetToolAcquisition.ps1"
 
+# Desired-state now lives in the per-VM VmProvisionerConfig (the same secret the
+# bridge reads for its inventory), so the vault source reuses that vault's
+# single "vault -> validated VMs" entry point and projects each VM's toolchain
+# fields into a per-host map keyed by vmName. Both are dot-sourced (functions
+# only, no load-time side effects) for the same reason as the resolvers above.
+. "$PSScriptRoot\..\..\PowerShell\common\config\Read-VmProvisionerConfig.ps1"
+. "$PSScriptRoot\ConvertTo-PerVmToolchainConfig.ps1"
+
 # ---------------------------------------------------------------------------
 # Get-ToolchainArrayField
 #   StrictMode-safe read of an optional array field off the parsed config.
@@ -116,9 +124,11 @@ function Get-ToolchainArrayField {
 
 # ---------------------------------------------------------------------------
 # Read-ToolchainDesiredState
-#   Resolve the loose desired-state from whichever source the caller named:
-#   a JSON file (-ToolchainsConfigPath) or the Toolchains vault
-#   (-SecretSuffix). Exactly one is required.
+#   Resolve the loose desired-state as a per-host map { vmName: { jdk_versions,
+#   dotnet_sdk_versions, dotnet_tools_tools } } from whichever source the
+#   caller named: a JSON file already in that shape (-ToolchainsConfigPath), or
+#   the per-VM VmProvisionerConfig vault projected to it (-SecretSuffix).
+#   Exactly one is required.
 # ---------------------------------------------------------------------------
 function Read-ToolchainDesiredState {
     [CmdletBinding()]
@@ -143,17 +153,14 @@ function Read-ToolchainDesiredState {
         return (Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json)
     }
 
-    # Vault path. Read through the Infrastructure.Secrets wrapper the bridge
-    # uses so a provider swap touches one place; the vault name mirrors the
-    # <VaultName>Config-<suffix> secret convention (vault 'Toolchains').
-    Import-Module Infrastructure.Secrets -ErrorAction Stop
-    Use-MicrosoftPowerShellSecretStoreProvider
-    $secretName = "ToolchainsConfig-$Suffix"
-    $json = Get-InfrastructureSecret -VaultName 'Toolchains' -SecretName $secretName
-    if ([string]::IsNullOrWhiteSpace($json)) {
-        throw "Stage-ToolchainArtifacts: secret 'Toolchains/$secretName' is empty."
-    }
-    return ($json | ConvertFrom-Json)
+    # Vault path. Read the per-VM VmProvisionerConfig through its own single
+    # "vault -> validated VMs" entry point (Read-VmProvisionerConfig), so the
+    # config schema is validated in exactly one place, then project each VM's
+    # toolchain fields into a per-host map keyed by vmName. Each host installs
+    # only its own toolchains (the playbook looks its entry up by
+    # inventory_hostname).
+    $vmDefs = Read-VmProvisionerConfig -SecretSuffix $Suffix
+    return (ConvertTo-PerVmToolchainConfig -VmConfigs $vmDefs)
 }
 
 # ---------------------------------------------------------------------------
@@ -293,78 +300,112 @@ function Invoke-ToolchainStaging {
     }
     $null = New-Item -ItemType Directory -Path $StagingDirectory -Force
 
-    $desired = Read-ToolchainDesiredState -ConfigPath $ConfigPath -Suffix $Suffix
+    $desiredByHost = Read-ToolchainDesiredState -ConfigPath $ConfigPath -Suffix $Suffix
 
-    $jdkPins  = Get-ToolchainArrayField -Config $desired -Name 'jdk_versions'
-    $sdkPins  = Get-ToolchainArrayField -Config $desired -Name 'dotnet_sdk_versions'
-    $toolPins = Get-ToolchainArrayField -Config $desired -Name 'dotnet_tools_tools'
+    # Resolve each host's loose pins to concrete builds, staging + verifying
+    # each UNIQUE artifact once. The caches memoize across hosts so a JDK / SDK
+    # / tool shared by several VMs is resolved, downloaded, and checksum-checked
+    # a single time (Save-VerifiedArtifact is itself idempotent via its
+    # lockfile, but the caches also skip the redundant upstream metadata fetch).
+    $jdkCache  = @{}   # loose pin         -> concrete jdk version
+    $sdkCache  = @{}   # "channel|version" -> { channel, concrete version }
+    $toolCache = @{}   # "id|version"      -> { id, version }
 
-    $resolvedJdk   = @()
-    $resolvedSdk   = @()
-    $resolvedTools = @()
+    # Per-host concrete map. The playbook looks each host up by
+    # inventory_hostname; a host absent here installs nothing.
+    $resolvedByHost = [ordered]@{}
 
-    foreach ($pin in $jdkPins) {
-        [Console]::Error.WriteLine("Resolving JDK '$pin' ...")
-        $r = Resolve-AdoptiumRelease -Vendor 'temurin' -Version ([string]$pin)
-        Save-VerifiedArtifact `
-            -Url             $r.DownloadUrl `
-            -Destination     (Join-Path $StagingDirectory $r.ArchiveName) `
-            -ExpectedHashHex $r.Sha256 `
-            -Algorithm       'SHA256' `
-            -ResolvedVersion $r.ResolvedVersion
-        # The role accepts a full "21.0.5+11" pin and re-resolves it to this
-        # exact build, so the concrete resolved version IS the pin.
-        $resolvedJdk += $r.ResolvedVersion
-    }
+    # Iterate the property collection directly (not .Properties.Name): under
+    # StrictMode, member-enumerating .Name off an EMPTY object - a fleet with no
+    # toolchains - throws "property 'Name' cannot be found".
+    foreach ($hostProp in $desiredByHost.PSObject.Properties) {
+        $vmName = $hostProp.Name
+        $cfg    = $hostProp.Value
 
-    foreach ($entry in $sdkPins) {
-        $channel = [string]$entry.channel
-        $version = [string]$entry.version
-        [Console]::Error.WriteLine("Resolving .NET SDK '$channel' / '$version' ...")
-        $r = Resolve-DotnetSdkRelease -Channel $channel -RequestedVersion $version
-        # The .NET file name is the download URL's leaf, which is exactly the
-        # archive the dotnet_sdk role re-derives and pulls by.
-        $archive = Split-Path -Leaf $r.DownloadUrl
-        Save-VerifiedArtifact `
-            -Url             $r.DownloadUrl `
-            -Destination     (Join-Path $StagingDirectory $archive) `
-            -ExpectedHashHex $r.Sha512 `
-            -Algorithm       'SHA512' `
-            -ResolvedVersion $r.ResolvedVersion
-        # Pin the channel's resolved SDK to its exact version so the role's
-        # re-resolve is deterministic.
-        $resolvedSdk += [pscustomobject]@{
-            channel = $channel
-            version = $r.ResolvedVersion
+        $hostJdk   = @()
+        $hostSdk   = @()
+        $hostTools = @()
+
+        foreach ($pin in (Get-ToolchainArrayField -Config $cfg -Name 'jdk_versions')) {
+            $key = [string]$pin
+            if (-not $jdkCache.ContainsKey($key)) {
+                [Console]::Error.WriteLine("Resolving JDK '$key' ...")
+                $r = Resolve-AdoptiumRelease -Vendor 'temurin' -Version $key
+                Save-VerifiedArtifact `
+                    -Url             $r.DownloadUrl `
+                    -Destination     (Join-Path $StagingDirectory $r.ArchiveName) `
+                    -ExpectedHashHex $r.Sha256 `
+                    -Algorithm       'SHA256' `
+                    -ResolvedVersion $r.ResolvedVersion
+                # The role accepts a full "21.0.5+11" pin and re-resolves it to
+                # this exact build, so the concrete resolved version IS the pin.
+                $jdkCache[$key] = $r.ResolvedVersion
+            }
+            $hostJdk += $jdkCache[$key]
+        }
+
+        foreach ($entry in (Get-ToolchainArrayField -Config $cfg -Name 'dotnet_sdk_versions')) {
+            $channel = [string]$entry.channel
+            $version = [string]$entry.version
+            $key = "$channel|$version"
+            if (-not $sdkCache.ContainsKey($key)) {
+                [Console]::Error.WriteLine("Resolving .NET SDK '$channel' / '$version' ...")
+                $r = Resolve-DotnetSdkRelease -Channel $channel -RequestedVersion $version
+                # The .NET file name is the download URL's leaf, exactly the
+                # archive the dotnet_sdk role re-derives and pulls by.
+                $archive = Split-Path -Leaf $r.DownloadUrl
+                Save-VerifiedArtifact `
+                    -Url             $r.DownloadUrl `
+                    -Destination     (Join-Path $StagingDirectory $archive) `
+                    -ExpectedHashHex $r.Sha512 `
+                    -Algorithm       'SHA512' `
+                    -ResolvedVersion $r.ResolvedVersion
+                # Pin the channel's resolved SDK to its exact version so the
+                # role's re-resolve is deterministic.
+                $sdkCache[$key] = [pscustomobject]@{
+                    channel = $channel
+                    version = $r.ResolvedVersion
+                }
+            }
+            $hostSdk += $sdkCache[$key]
+        }
+
+        foreach ($tool in (Get-ToolchainArrayField -Config $cfg -Name 'dotnet_tools_tools')) {
+            $id      = [string]$tool.id
+            $version = [string]$tool.version
+            $key = "$id|$version"
+            if (-not $toolCache.ContainsKey($key)) {
+                [Console]::Error.WriteLine("Resolving .NET tool '$id@$version' ...")
+                $meta    = Resolve-NugetPackageHash -Id $id -Version $version
+                $archive = "dotnet-tool-$id-$version.nupkg"
+                Save-VerifiedArtifact `
+                    -Url             $meta.SourceUrl `
+                    -Destination     (Join-Path $StagingDirectory $archive) `
+                    -ExpectedHashHex $meta.HashHex `
+                    -Algorithm       'SHA512' `
+                    -ResolvedVersion $version
+                # Tool pins are already exact (id + exact NuGet version).
+                $toolCache[$key] = [pscustomobject]@{ id = $id; version = $version }
+            }
+            $hostTools += $toolCache[$key]
+        }
+
+        # @() casts keep single-element results as JSON arrays.
+        $resolvedByHost[$vmName] = [pscustomobject]@{
+            jdk_versions        = @($hostJdk)
+            dotnet_sdk_versions = @($hostSdk)
+            dotnet_tools_tools  = @($hostTools)
         }
     }
 
-    foreach ($tool in $toolPins) {
-        $id      = [string]$tool.id
-        $version = [string]$tool.version
-        [Console]::Error.WriteLine("Resolving .NET tool '$id@$version' ...")
-        $meta    = Resolve-NugetPackageHash -Id $id -Version $version
-        $archive = "dotnet-tool-$id-$version.nupkg"
-        Save-VerifiedArtifact `
-            -Url             $meta.SourceUrl `
-            -Destination     (Join-Path $StagingDirectory $archive) `
-            -ExpectedHashHex $meta.HashHex `
-            -Algorithm       'SHA512' `
-            -ResolvedVersion $version
-        # Tool pins are already exact (id + exact NuGet version), so they pass
-        # through unchanged.
-        $resolvedTools += [pscustomobject]@{ id = $id; version = $version }
-    }
-
-    # The pinned document handed to the roles. Emitted with the role variable
-    # names so ansible-playbook can consume it as a plain --extra-vars file.
-    # @() casts keep single-element results as JSON arrays.
+    # The pinned document handed to the roles, keyed by host under a single
+    # top-level wrapper key so it rides the play-wide --extra-vars channel
+    # without colliding with any role var; the consumer playbook selects each
+    # host's entry by inventory_hostname.
     $resolved = [pscustomobject]@{
-        jdk_versions        = @($resolvedJdk)
-        dotnet_sdk_versions = @($resolvedSdk)
-        dotnet_tools_tools  = @($resolvedTools)
+        toolchains_resolved_by_host = [pscustomobject]$resolvedByHost
     }
-    $resolvedJson = $resolved | ConvertTo-Json -Depth 6
+    $resolvedJson = $resolved | ConvertTo-Json -Depth 8
     Set-Content -LiteralPath $ResolvedConfigOut -Value $resolvedJson -Encoding UTF8
 
     # A stable descriptor of exactly what was staged. The file server contract
