@@ -6,9 +6,36 @@ BeforeAll {
     # parsed structure rather than literal whitespace. Installed here on
     # demand because it is not part of Install-ModuleDependencies (which
     # covers production dependencies only).
+    #
+    # A hosted CI runner reaches this as its FIRST real Install-Module of
+    # the job (Pester ships pre-installed, so the harness never installs
+    # anything), and a fresh session has neither the NuGet package
+    # provider bootstrapped nor PSGallery trusted - so a bare
+    # Install-Module throws, fails the whole BeforeAll, and marks every
+    # test in the container failed. Bootstrap both prerequisites, then
+    # install with a short retry to ride out a transient PSGallery
+    # resolution blip. Production's Install-ModuleDependencies does the
+    # same bootstrap for the same reason.
     if (-not (Get-Module -ListAvailable -Name powershell-yaml)) {
-        Install-Module powershell-yaml -Scope CurrentUser `
-            -Force -AllowClobber -ErrorAction Stop
+        if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+            Install-PackageProvider -Name NuGet -MinimumVersion '2.8.5.201' `
+                -Scope CurrentUser -Force -ForceBootstrap | Out-Null
+        }
+        if ((Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue).InstallationPolicy `
+                -ne 'Trusted') {
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+        }
+        for ($attempt = 1; ; $attempt++) {
+            try {
+                Install-Module powershell-yaml -Scope CurrentUser `
+                    -Force -AllowClobber -ErrorAction Stop
+                break
+            }
+            catch {
+                if ($attempt -ge 3) { throw }
+                Start-Sleep -Seconds (5 * $attempt)
+            }
+        }
     }
     Import-Module powershell-yaml -Force -ErrorAction Stop
 
