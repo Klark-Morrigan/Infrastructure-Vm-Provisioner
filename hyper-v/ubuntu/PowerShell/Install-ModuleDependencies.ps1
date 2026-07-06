@@ -82,15 +82,19 @@ if (-not $_nuget -or $_nuget.Version -lt [Version]'2.8.5.201') {
 }
 
 # Step 2 - Common.PowerShell (chicken-and-egg bootstrap)
-# Floor is 8.1.0: Infrastructure.Network.Windows (installed in step 3)
-# declares Common.PowerShell >= 8.1.0 in its RequiredModules. Because the
-# bootstrap imports Common.PowerShell into the session here, loading an
-# older 7.x first would collide with that requirement when Network.Windows
-# is imported. Loading 8.1.0 up front keeps a single compatible version live.
+# Floor is 9.1.0: that release ships the 2-level phase-timing compat shims
+# (Initialize-PhaseTimings / Invoke-WithPhaseTimer / Invoke-WithSubStepTimer /
+# Add-SubStepDuration / Write-PhaseTimingReport) that provision.ps1 dropped its
+# local copies of and now consumes from the module. Subsumes the older 8.1.0
+# floor (Infrastructure.Network.Windows, installed in step 3, declares
+# Common.PowerShell >= 8.1.0 in its RequiredModules). Because the bootstrap
+# imports Common.PowerShell into the session here, loading an older version
+# first would collide with those requirements; loading 9.1.0 up front keeps a
+# single compatible version live.
 $_common = Get-Module -ListAvailable -Name Common.PowerShell |
     Sort-Object Version -Descending | Select-Object -First 1
-if (-not $_common -or $_common.Version -lt [Version]'8.1.0') {
-    Install-PowerShellCommonWithRetry -MinimumVersion '8.1.0'
+if (-not $_common -or $_common.Version -lt [Version]'9.1.0') {
+    Install-PowerShellCommonWithRetry -MinimumVersion '9.1.0'
     # Re-query so the comparison below uses the freshly installed version.
     $_common = Get-Module -ListAvailable -Name Common.PowerShell |
         Sort-Object Version -Descending | Select-Object -First 1

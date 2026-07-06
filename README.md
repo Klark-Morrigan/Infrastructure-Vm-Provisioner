@@ -1497,7 +1497,7 @@ Infrastructure-VM-Provisioner/
 |  |- shared/               # Unit tests for shared/ (setup-secrets)
 |  |- PowerShell/           # Mirrors the PowerShell reconciler slice
 |  |  |- common/            # Unit tests for common/ helpers (config, diag, network, power, ssh, ui)
-|  |  |- up/                # Unit tests for up/ (config, disk, jdk, dotnet, seed, network, post, reconciler, timing, vm)
+|  |  |- up/                # Unit tests for up/ (config, disk, jdk, dotnet, seed, network, post, reconciler, vm)
 |  |  `- down/              # Unit tests for down/ (network, vm)
 |  `- Ansible/              # Mirrors the Ansible slice (Stage-ToolchainArtifacts)
 |- scripts/

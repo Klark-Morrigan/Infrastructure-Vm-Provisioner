@@ -150,11 +150,12 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\up\network\setup-network.ps1"
 . "$PSScriptRoot\up\vm\Remove-VmSeedIso.ps1"
 . "$PSScriptRoot\up\vm\create-vm.ps1"
-. "$PSScriptRoot\up\timing\Initialize-PhaseTimings.ps1"
-. "$PSScriptRoot\up\timing\Invoke-WithPhaseTimer.ps1"
-. "$PSScriptRoot\up\timing\Add-SubStepDuration.ps1"
-. "$PSScriptRoot\up\timing\Invoke-WithSubStepTimer.ps1"
-. "$PSScriptRoot\up\timing\Write-PhaseTimingReport.ps1"
+# The five phase-timing verbs (Initialize-PhaseTimings, Invoke-WithPhaseTimer,
+# Add-SubStepDuration, Invoke-WithSubStepTimer, Write-PhaseTimingReport) are the
+# 2-level compat shims exported by Common.PowerShell (imported by
+# Install-ModuleDependencies below). The local up/timing copies were deleted so
+# the shared module is the single source of truth; the shims keep their exact
+# legacy signatures and byte-identical report, so no call site changes here.
 
 # ---------------------------------------------------------------------------
 # 1. Install / import every required module via the centralised helper.
