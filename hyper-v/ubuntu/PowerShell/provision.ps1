@@ -363,8 +363,14 @@ try {
                         -ForegroundColor Yellow
                     # Print the report before exiting so the operator
                     # still sees how far we got. exit bypasses the
-                    # outer finally, so call it explicitly here.
+                    # outer finally, so call it explicitly here - and, for
+                    # the same reason, emit the opt-in export here too so a
+                    # partial reboot-required run still hands its timings to
+                    # the parent (rationale at the finally block below).
                     Write-PhaseTimingReport
+                    if ($env:TIMING_TREE_OUTPUT_PATH) {
+                        Export-PhaseTimingTree -Path $env:TIMING_TREE_OUTPUT_PATH
+                    }
                     exit 0
                 }
                 throw
@@ -478,4 +484,15 @@ try {
 }
 finally {
     Write-PhaseTimingReport
+
+    # Cross-process handoff (opt-in). When a parent orchestrator (the E2E
+    # runner) sets TIMING_TREE_OUTPUT_PATH, also serialise the phase/sub-step
+    # tree to that path so the parent can graft this run's timings under the
+    # part that shelled out to provision.ps1. Neutral variable name - the
+    # script does not know who consumes it. Fires on success AND failure,
+    # exactly like the console report above; the shim no-ops when timings
+    # were never initialised. Unset = unchanged (console report only).
+    if ($env:TIMING_TREE_OUTPUT_PATH) {
+        Export-PhaseTimingTree -Path $env:TIMING_TREE_OUTPUT_PATH
+    }
 }

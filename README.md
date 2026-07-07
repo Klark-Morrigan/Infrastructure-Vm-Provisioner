@@ -19,6 +19,7 @@
   - [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables)
   - [Router VM (kind: router)](#router-vm-kind-router)
 - [provision.ps1](#provisionps1)
+  - [Phase-timing report and cross-process export](#phase-timing-report-and-cross-process-export)
 - [Test-HostNetworkPreflight.ps1](#test-hostnetworkpreflightps1)
 - [Get-VmRuntimeDiag.ps1](#get-vmruntimediagps1)
 - [start-vms.ps1](#start-vmsps1)
@@ -988,6 +989,35 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
     sourcing `/etc/profile.d/`. Login shells pick the same dir up
     automatically because `DotnetSdkProvider`'s `/etc/profile.d/dotnet.sh`
     prepends `DOTNET_TOOLS_ROOT` to `PATH`.
+
+### Phase-timing report and cross-process export
+
+Every `provision.ps1` run wraps its phases (host network setup, disk
+acquisition, VM creation, post-provisioning, ...) in a timing framework and
+prints a per-phase / per-sub-step wall-clock report at the end - on success,
+on failure, and on the WSL2-reboot-required early exit. The framework is the
+shared `Common.PowerShell` phase-timing surface (`Initialize-PhaseTimings`,
+`Invoke-WithPhaseTimer`, `Write-PhaseTimingReport`); the console report always
+prints and needs no configuration.
+
+**Cross-process export (opt-in).** When `provision.ps1` runs as a child of a
+parent orchestrator - the [Infrastructure-E2E](https://github.com/Klark-Morrigan/Infrastructure-E2E)
+runner - the parent sets the `TIMING_TREE_OUTPUT_PATH` environment variable to
+a file path before shelling out. On that opt-in, provision.ps1 also serialises
+its phase/sub-step tree to that path (via `Export-PhaseTimingTree`) so the
+parent can graft this run's timings under the part that shelled out, turning an
+opaque "provisioning" span into its VM-boot / acquisition / wait-for-SSH
+breakdown. The variable name is deliberately neutral - provision.ps1 does not
+know who consumes the artifact.
+
+- The export fires on the same success, failure, and reboot-required paths as
+  the console report, so a partial run still emits what it measured.
+- When `TIMING_TREE_OUTPUT_PATH` is unset (a bare operator run), nothing is
+  written and behaviour is unchanged - console report only.
+
+Requires `Common.PowerShell >= 9.2.0` (the release that added
+`Export-PhaseTimingTree`); the bootstrap floor in
+`Install-ModuleDependencies.ps1` pins it.
 
 ---
 
