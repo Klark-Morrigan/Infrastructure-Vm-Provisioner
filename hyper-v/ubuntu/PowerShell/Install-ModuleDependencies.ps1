@@ -82,21 +82,23 @@ if (-not $_nuget -or $_nuget.Version -lt [Version]'2.8.5.201') {
 }
 
 # Step 2 - Common.PowerShell (chicken-and-egg bootstrap)
-# Floor is 9.2.0: that release adds Export-PhaseTimingTree, the export
-# counterpart of Write-PhaseTimingReport that provision.ps1's outer finally
-# calls on the TIMING_TREE_OUTPUT_PATH opt-in to hand its timing tree to a
-# parent orchestrator. 9.1.0 shipped the 2-level phase-timing compat shims
-# (Initialize-PhaseTimings / Invoke-WithPhaseTimer / Invoke-WithSubStepTimer /
-# Add-SubStepDuration / Write-PhaseTimingReport) provision.ps1 also consumes.
-# Subsumes the older 8.1.0 floor (Infrastructure.Network.Windows, installed in
-# step 3, declares Common.PowerShell >= 8.1.0 in its RequiredModules). Because
-# the bootstrap imports Common.PowerShell into the session here, loading an
-# older version first would collide with those requirements; loading 9.2.0 up
-# front keeps a single compatible version live.
+# Floor is 9.3.0: that release adds Export-PhaseTimingTreeIfRequested, the
+# self-guarding opt-in wrapper over Export-PhaseTimingTree that provision.ps1's
+# outer finally and Wsl2NotReady reboot-exit call (a single unguarded call each)
+# to hand its timing tree to a parent orchestrator on the TIMING_TREE_OUTPUT_PATH
+# opt-in. 9.2.0 shipped the underlying Export-PhaseTimingTree; 9.1.0 shipped the
+# 2-level phase-timing compat shims (Initialize-PhaseTimings /
+# Invoke-WithPhaseTimer / Invoke-WithSubStepTimer / Add-SubStepDuration /
+# Write-PhaseTimingReport) provision.ps1 also consumes. Subsumes the older 8.1.0
+# floor (Infrastructure.Network.Windows, installed in step 3, declares
+# Common.PowerShell >= 8.1.0 in its RequiredModules). Because the bootstrap
+# imports Common.PowerShell into the session here, loading an older version
+# first would collide with those requirements; loading 9.3.0 up front keeps a
+# single compatible version live.
 $_common = Get-Module -ListAvailable -Name Common.PowerShell |
     Sort-Object Version -Descending | Select-Object -First 1
-if (-not $_common -or $_common.Version -lt [Version]'9.2.0') {
-    Install-PowerShellCommonWithRetry -MinimumVersion '9.2.0'
+if (-not $_common -or $_common.Version -lt [Version]'9.3.0') {
+    Install-PowerShellCommonWithRetry -MinimumVersion '9.3.0'
     # Re-query so the comparison below uses the freshly installed version.
     $_common = Get-Module -ListAvailable -Name Common.PowerShell |
         Sort-Object Version -Descending | Select-Object -First 1

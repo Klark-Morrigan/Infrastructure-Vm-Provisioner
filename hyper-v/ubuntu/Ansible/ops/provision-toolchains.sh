@@ -53,6 +53,13 @@ CA_CONSUMER_ROOT="$(cd "${script_dir}/.." && pwd)"
 source "${script_dir}/imports/_log.sh"
 # shellcheck source=hyper-v/ubuntu/Ansible/ops/imports/_common-ansible-root.sh
 source "${script_dir}/imports/_common-ansible-root.sh"
+# shellcheck source=hyper-v/ubuntu/Ansible/ops/imports/_timing.sh
+source "${script_dir}/imports/_timing.sh"
+
+# Arm the timing emitter (a no-op unless TIMING_TREE_OUTPUT_PATH is set) so the
+# E2E orchestrator can graft this flow's staging / dispatch sub-steps under its
+# provisioning part. Neutral opt-in; the flow does not name its consumer.
+timing_init "provision-toolchains"
 
 # Pre-stage the toolchain artifacts Windows-side and learn the directory the
 # file server will serve, its version tag, and the concrete pinned-versions
@@ -60,7 +67,9 @@ source "${script_dir}/imports/_common-ansible-root.sh"
 # needs to serve the directory it is handed. The helper narrates on stderr and
 # prints three KEY=value lines on stdout.
 log_info "Staging toolchain artifacts (resolve, verify checksum, stage) ..."
+timing_span_begin "stage toolchain artifacts"
 stage_out="$("${script_dir}/_stage-toolchain-artifacts.sh" --suffix "${SECRET_SUFFIX}")"
+timing_span_end
 staging_dir="$(grep     '^STAGING_DIR='         <<<"${stage_out}" | head -n1 | cut -d= -f2-)"
 staging_version="$(grep '^STAGING_VERSION='     <<<"${stage_out}" | head -n1 | cut -d= -f2-)"
 resolved_wsl="$(grep    '^RESOLVED_CONFIG_WSL=' <<<"${stage_out}" | head -n1 | cut -d= -f2-)"
@@ -82,7 +91,25 @@ export CA_CONSUMER_ROOT
 # (toolchains_resolved_by_host); the playbook selects each host's entry so the
 # roles install exactly what staging verified for that host. The path is
 # /mnt-form because ansible-playbook reads it under the WSL controller.
-exec "${common_ansible_root}/ops/_run-playbook.sh" \
+#
+# Dispatch is the flow's dominant span. When timing is requested, run the
+# playbook under a span so its duration lands in the tree and the EXIT-trap
+# flush emits the artifact afterward; otherwise exec exactly as before, so the
+# uninstrumented path stays byte-for-byte unchanged.
+playbook_cmd=("${common_ansible_root}/ops/_run-playbook.sh" \
     playbooks/provision-toolchains.yml \
     --extra-vars "@${resolved_wsl}" \
-    "$@"
+    "$@")
+# shellcheck disable=SC2310  # predicate in `if`; set -e intentionally relaxed
+if timing_enabled; then
+    timing_span_begin "run playbook"
+    playbook_rc=0
+    "${playbook_cmd[@]}" || playbook_rc=$?
+    if [[ "${playbook_rc}" -eq 0 ]]; then
+        timing_span_end
+    else
+        timing_span_end --failed
+    fi
+    exit "${playbook_rc}"
+fi
+exec "${playbook_cmd[@]}"

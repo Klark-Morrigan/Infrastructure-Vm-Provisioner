@@ -434,23 +434,25 @@ Describe 'provision.ps1 - new-vs-existing pipeline split' {
     }
 }
 
-Describe 'provision.ps1 - cross-process timing export (D1-B)' {
+Describe 'provision.ps1 - cross-process timing export (feature 88 D1-B / D2-B)' {
 
     # provision.ps1 shells out to nothing here; it is instead the CHILD half of
     # the process-boundary timing bridge - a parent orchestrator sets
     # $env:TIMING_TREE_OUTPUT_PATH and provision.ps1 serialises its phase tree
-    # there via the Export-PhaseTimingTree shim. The behavioural guarantee that
-    # the shim writes schema-valid JSON when a path is given and no-ops when the
-    # context was never initialised is owned by Common.PowerShell's
-    # Export-PhaseTimingTree.Tests.ps1. provision.ps1 has top-level side effects
-    # (vault read, module imports) so it cannot be dot-sourced to exercise it
-    # end-to-end; these AST checks therefore pin what provision.ps1 adds - the
-    # env-var guard and the two call sites - the same structural way the rest of
-    # this suite pins wiring.
+    # there. D2-B collapsed the hand-written `if ($env:...) { Export-PhaseTimingTree
+    # ... }` guard at each site to a single self-guarding
+    # Export-PhaseTimingTreeIfRequested call: the env-var name and the guard now
+    # live once inside the Common.PowerShell shim, whose behaviour (writes when
+    # the var is set, no-ops when unset or the context was never initialised) is
+    # owned by that module's Export-PhaseTimingTreeIfRequested.Tests.ps1.
+    # provision.ps1 has top-level side effects (vault read, module imports) so it
+    # cannot be dot-sourced to exercise it end-to-end; these AST checks therefore
+    # pin what provision.ps1 owns - the two unguarded call sites - the same
+    # structural way the rest of this suite pins wiring.
 
     BeforeAll {
         $script:exportCalls = @($script:commands |
-            Where-Object { $_.GetCommandName() -eq 'Export-PhaseTimingTree' })
+            Where-Object { $_.GetCommandName() -eq 'Export-PhaseTimingTreeIfRequested' })
 
         # The outer try/finally (the one with a Finally block); the inner
         # Wsl2NotReady try has a catch but no finally. Its Finally offsets
@@ -463,32 +465,36 @@ Describe 'provision.ps1 - cross-process timing export (D1-B)' {
         }, $true) | Select-Object -First 1
     }
 
-    It 'invokes Export-PhaseTimingTree exactly twice (finally + reboot-exit)' {
+    It 'invokes Export-PhaseTimingTreeIfRequested exactly twice (finally + reboot-exit)' {
         # exit 0 in the Wsl2NotReady branch bypasses the finally, so each path
         # must emit its own export - one call would silently drop the partial
         # reboot-required run's timings.
         $script:exportCalls.Count | Should -Be 2
     }
 
-    It 'guards every export behind an $env:TIMING_TREE_OUTPUT_PATH check' {
-        # Unset => the guard is false => no call => no file written, so the
-        # opt-out path leaves an operator run's behaviour unchanged.
-        foreach ($call in $script:exportCalls) {
-            $ifAst = $call.Parent
-            while ($null -ne $ifAst -and
-                   -not ($ifAst -is [System.Management.Automation.Language.IfStatementAst])) {
-                $ifAst = $ifAst.Parent
-            }
-            $ifAst | Should -Not -BeNullOrEmpty `
-                -Because 'an unconditional export would drop a stray artifact on every operator run'
-            $ifAst.Clauses[0].Item1.Extent.Text |
-                Should -Match 'env:TIMING_TREE_OUTPUT_PATH'
-        }
+    It 'no longer calls the pre-D2-B guarded Export-PhaseTimingTree directly' {
+        # Regression guard for a partial revert: the raw export verb belongs
+        # behind the self-guarding shim now, so a bare call here would mean the
+        # hand-written env guard crept back in.
+        $raw = @($script:commands |
+            Where-Object { $_.GetCommandName() -eq 'Export-PhaseTimingTree' })
+        $raw.Count | Should -Be 0
     }
 
-    It 'passes $env:TIMING_TREE_OUTPUT_PATH as the export -Path' {
+    It 'no longer hand-writes the TIMING_TREE_OUTPUT_PATH env guard' {
+        # The env-var name is single-sourced inside the shim now; a lingering
+        # `if ($env:TIMING_TREE_OUTPUT_PATH)` (or a -Path binding of it) would
+        # mean a site was left un-collapsed.
+        $text = Get-Content -Path $script:provisionPath -Raw
+        $text | Should -Not -Match 'env:TIMING_TREE_OUTPUT_PATH' `
+            -Because 'D2-B moved the guard and the contract name into the Common.PowerShell shim'
+    }
+
+    It 'calls the shim unguarded (no -Path argument)' {
+        # The shim owns the destination via its env-var read; a -Path here would
+        # reintroduce the per-site contract knowledge D2-B removed.
         foreach ($call in $script:exportCalls) {
-            $call.Extent.Text | Should -Match '-Path\s+\$env:TIMING_TREE_OUTPUT_PATH'
+            $call.Extent.Text | Should -Not -Match '-Path'
         }
     }
 
@@ -514,13 +520,13 @@ Describe 'provision.ps1 - cross-process timing export (D1-B)' {
             -Because 'a partial reboot-required run must still hand off its timings despite exiting early'
     }
 
-    It 'raises the Common.PowerShell floor to the Export-PhaseTimingTree release (>= 9.2.0)' {
-        # The shim ships in Common.PowerShell 9.2.0; the bootstrap floor must
+    It 'raises the Common.PowerShell floor to the Export-PhaseTimingTreeIfRequested release (>= 9.3.0)' {
+        # The shim ships in Common.PowerShell 9.3.0; the bootstrap floor must
         # rise so the import resolves it. Pin the MinimumVersion so a downgrade
         # cannot silently leave provision.ps1 calling an unexported verb.
         $depsPath = Join-Path (Split-Path $script:provisionPath -Parent) `
             'Install-ModuleDependencies.ps1'
         $depsText = Get-Content -Path $depsPath -Raw
-        $depsText | Should -Match "MinimumVersion '(9\.(?:[2-9]|\d\d+)\.\d+|[1-9]\d+\.\d+\.\d+)'"
+        $depsText | Should -Match "MinimumVersion '(9\.(?:[3-9]|\d\d+)\.\d+|[1-9]\d+\.\d+\.\d+)'"
     }
 }
