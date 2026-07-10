@@ -393,6 +393,25 @@ Describe 'Invoke-RouterSeedIsoGeneration' {
             }
         }
 
+        It 'marks priv0 optional but leaves ext0 required' {
+            # priv0 has no upstream peer at first boot, so optional: true
+            # keeps systemd-networkd-wait-online - and the cloud-init /
+            # sshd chain ordered after it - from blocking on it. ext0 is
+            # the upstream and stays required. Capture via side-effect so a
+            # regex hiccup reads as an assertion failure, not "no match".
+            Mock Test-Path { $true }
+            $script:capturedUserData = $null
+            Mock New-SeedIso { $script:capturedUserData = $Files['user-data'] }
+            Invoke-RouterSeedIsoGeneration -Vm (New-RouterTestVm)
+            $ud = $script:capturedUserData
+            $privBlock = [regex]::Match($ud,
+                '(?s)priv0:.*?(?=\n(?: {4}\w+:|[A-Za-z]|$))').Value
+            $privBlock | Should -Match 'optional: true'
+            # Exactly one optional: true in the whole document proves ext0
+            # (and nothing else) did not also get it.
+            ([regex]::Matches($ud, 'optional: true')).Count | Should -Be 1
+        }
+
         It 'matches each ethernet entry by its deterministic MAC' {
             Mock Test-Path { $true }
             Mock New-SeedIso {}

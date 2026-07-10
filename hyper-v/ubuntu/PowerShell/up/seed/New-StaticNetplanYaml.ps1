@@ -41,6 +41,16 @@
 #   resolver for downstream VMs), so its entry skips those blocks. The
 #   workload caller continues to pass both so its existing behaviour is
 #   byte-for-byte preserved.
+#
+#   `-Optional` emits `optional: true`, which netplan translates to
+#   RequiredForOnline=no in the generated networkd unit. The router's
+#   private NIC (priv0) has no upstream peer at first boot, so without this
+#   `systemd-networkd-wait-online` blocks on it up to its 120s timeout;
+#   because cloud-init's network stage is ordered After that unit (and the
+#   patched sshd After cloud-config -> cloud-init), the stall pushes back
+#   the host's wait-for-SSH probe. Marking priv0 optional lets boot proceed
+#   once ext0 (kept required) is up. Workload VMs never pass it - their one
+#   NIC must be online for the VM to be useful at all.
 # ---------------------------------------------------------------------------
 function New-StaticNetplanYaml {
     [CmdletBinding()]
@@ -53,6 +63,7 @@ function New-StaticNetplanYaml {
         [Parameter()]          [string] $Key = 'eth0',
         [Parameter()]          [string] $MacAddress,
         [Parameter()]          [string] $SetName,
+        [Parameter()]          [switch] $Optional,
         [Parameter()]          [switch] $NoWrapper
     )
 
@@ -70,6 +81,11 @@ function New-StaticNetplanYaml {
     }
     if ($SetName) {
         $lines.Add("      set-name: $SetName")
+    }
+    # optional: true => RequiredForOnline=no, so systemd-networkd-wait-online
+    # does not gate boot on this link (see header for the sshd-probe chain).
+    if ($Optional) {
+        $lines.Add('      optional: true')
     }
     $lines.Add('      dhcp4: false')
     $lines.Add('      addresses:')

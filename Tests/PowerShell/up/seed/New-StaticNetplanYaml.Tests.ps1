@@ -252,6 +252,30 @@ Describe 'New-StaticNetplanYaml' {
     }
 
     # ------------------------------------------------------------------
+    Context 'Optional switch (RequiredForOnline=no)' {
+    # ------------------------------------------------------------------
+        # The router's private NIC is marked optional so
+        # systemd-networkd-wait-online does not gate boot (and, through
+        # cloud-init's network stage, the patched sshd) on a link with no
+        # upstream peer at first boot. Workload NICs stay required.
+
+        It 'omits optional by default' {
+            $eth = (ConvertTo-NetplanModel -Yaml (New-TestYaml))['ethernets']['eth0']
+            $eth['optional'] | Should -BeNullOrEmpty
+        }
+
+        It 'emits optional: true when -Optional is set' {
+            $yaml = New-StaticNetplanYaml `
+                -Key        'priv0' `
+                -IpAddress  '10.10.0.1' `
+                -SubnetMask '24' `
+                -Optional
+            $eth = (ConvertTo-NetplanModel -Yaml $yaml)['ethernets']['priv0']
+            $eth['optional'] | Should -Be $true
+        }
+    }
+
+    # ------------------------------------------------------------------
     Context 'optional Gateway and Dns' {
     # ------------------------------------------------------------------
         # The router VM's private-side NIC has no upstream gateway and

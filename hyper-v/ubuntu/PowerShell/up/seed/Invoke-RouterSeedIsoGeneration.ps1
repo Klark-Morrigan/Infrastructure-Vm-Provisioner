@@ -160,12 +160,21 @@ function Invoke-RouterSeedIsoGeneration {
             -NoWrapper
     }
 
+    # priv0 is marked optional so systemd-networkd-wait-online does not block
+    # boot waiting for the private NIC to reach "online". It has no upstream
+    # peer at first boot (downstream workloads boot later), so without this
+    # wait-online sits on it up to its 120s timeout - and because cloud-init's
+    # network stage runs After that unit and the patched sshd runs After
+    # cloud-config -> cloud-init, that stall directly inflates the router's
+    # wait-for-SSH. ext0 stays required (no -Optional) so the upstream link
+    # must be up before the runcmd apt work runs.
     $privEntry = New-StaticNetplanYaml `
         -Key        'priv0' `
         -MacAddress $privMac.Netplan `
         -SetName    'priv0' `
         -IpAddress  $Vm.privateIpAddress `
         -SubnetMask $Vm.subnetMask `
+        -Optional `
         -NoWrapper
 
     $netplanYaml = @"
