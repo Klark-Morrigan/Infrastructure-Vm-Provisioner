@@ -32,7 +32,8 @@
 #       cloud-init-blame.txt        - per-module wall-clock (headline)
 #       cloud-init-show.txt         - full stage / event timeline
 #       systemd-blame.txt           - per-unit startup time
-#       systemd-critical-chain.txt  - what cloud-final.service waited on
+#       systemd-critical-chain.txt  - what cloud-final AND ssh.service
+#                                     waited on (incl. networkd-wait-online)
 #
 #     Status (snapshot AT capture time, so reflects post-cloud-init state)
 #       cloud-init-status.txt       - `cloud-init status --long` (state, errors)
@@ -65,6 +66,12 @@
 #                                     DNS lookup via default and via
 #                                     8.8.8.8 directly, HTTP probe of
 #                                     archive.ubuntu.com
+#       network-boot-timeline.txt   - monotonic journal of networkd /
+#                                     networkd-wait-online / ssh.service /
+#                                     cloud-config / cloud-final: when ext0
+#                                     got its address vs when sshd started
+#                                     (adjudicates H1 vs H2 for the router's
+#                                     slow wait-for-SSH)
 #
 #     Logs (full files, not tails)
 #       cloud-init.log              - cloud-init's own module log
@@ -144,8 +151,15 @@ function Invoke-CloudInitDiagnostics {
         'cloud-init-blame.txt'        = 'cloud-init analyze blame'
         'cloud-init-show.txt'         = 'cloud-init analyze show'
         'systemd-blame.txt'           = 'systemd-analyze blame'
+        # ssh.service + networkd-wait-online are in the chain so the H1
+        # question - did the router's direct SSH probe wait on the network
+        # reaching its static IP - is answerable from the tree, not just
+        # cloud-init's own stages.
         'systemd-critical-chain.txt'  =
-            'systemd-analyze critical-chain cloud-init.service cloud-init-final.service'
+            'systemd-analyze critical-chain ' +
+            'cloud-init.service cloud-init-final.service ' +
+            'cloud-config.service ssh.service ' +
+            'systemd-networkd-wait-online.service'
 
         # ---------- Status ----------
         'cloud-init-status.txt'       = 'cloud-init status --long'
@@ -249,6 +263,20 @@ function Invoke-CloudInitDiagnostics {
             'curl --max-time 10 -sS -o /dev/null ' +
             '-w "http_code=%{http_code} time_total=%{time_total}\n" ' +
             'http://archive.ubuntu.com/ 2>&1'
+        # H1-decisive artifact. One journal, monotonic (seconds-since-boot)
+        # timestamps, of the four units whose relative order settles the
+        # router's slow wait-for-SSH: when networkd assigned ext0 its
+        # address (and whether it was the init-local static or a DHCP lease
+        # first), when networkd-wait-online completed, when cloud-config
+        # (sshd's ordering gate) finished, and when ssh.service actually
+        # started. If ext0's static address lands only near cloud-final,
+        # H1 (hotplug-shadow deferral) holds; if it lands early at
+        # init-local yet sshd still starts late, look to H2 (cold-host
+        # boot I/O). -o short-monotonic is what makes the deltas readable.
+        'network-boot-timeline.txt'   =
+            'sudo journalctl --no-pager -o short-monotonic ' +
+            '-u systemd-networkd -u systemd-networkd-wait-online.service ' +
+            '-u ssh.service -u cloud-config.service -u cloud-final.service'
 
         # ---------- Logs (full) ----------
         'cloud-init.log'              = 'sudo cat /var/log/cloud-init.log'

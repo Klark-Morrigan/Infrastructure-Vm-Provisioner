@@ -76,7 +76,7 @@ BeforeAll {
             # Base image VHDX is cached (match the base name, not the VM disk).
             if ($Path -match '24\.04.*\.vhdx$')                   { return $true  }
             # Sentinel present - WSL2 patching is skipped.
-            if ($Path -match '\.image-patched-v4$')                { return $true  }
+            if ($Path -match '\.image-patched-v5$')                { return $true  }
             # Per-VM disk is absent - triggers copy + resize.
             if ($Path -match 'node-01\.vhdx$')                    { return $false }
             return $false
@@ -95,7 +95,7 @@ Describe 'Invoke-DiskImageAcquisition' {
                 param($Path, $PathType)
                 if ($PathType -eq 'Container')         { return $false }
                 if ($Path -match '24\.04.*\.vhdx$')    { return $true  }
-                if ($Path -match '\.image-patched-v4$') { return $true  }
+                if ($Path -match '\.image-patched-v5$') { return $true  }
                 if ($Path -match 'node-01\.vhdx$')     { return $false }
                 return $false
             }
@@ -152,7 +152,7 @@ Describe 'Invoke-DiskImageAcquisition' {
             Mock Test-Path {
                 param($Path, $PathType)
                 if ($PathType -eq 'Container')         { return $true  }
-                if ($Path -match '\.image-patched-v4$') { return $true  }
+                if ($Path -match '\.image-patched-v5$') { return $true  }
                 if ($Path -match 'node-01\.vhdx$')     { return $false }
                 return $false    # base image absent
             }
@@ -287,7 +287,7 @@ Describe 'Invoke-DiskImageAcquisition' {
 
             Should -Invoke Invoke-BaseImagePatch -Times 1 -Exactly -ParameterFilter {
                 $BaseImagePath -eq 'C:\VHDs\ubuntu-24.04-server-cloudimg-amd64.vhdx' -and
-                $SentinelPath  -eq 'C:\VHDs\ubuntu-24.04-server-cloudimg-amd64.image-patched-v4'
+                $SentinelPath  -eq 'C:\VHDs\ubuntu-24.04-server-cloudimg-amd64.image-patched-v5'
             }
         }
 
@@ -302,7 +302,7 @@ Describe 'Invoke-DiskImageAcquisition' {
             Mock Test-Path {
                 param($Path, $PathType)
                 if ($PathType -eq 'Container')         { return $true }
-                if ($Path -match '\.image-patched-v4$') { return $true }
+                if ($Path -match '\.image-patched-v5$') { return $true }
                 return $true    # base image + per-VM disk both present
             }
             Mock Copy-Item {}

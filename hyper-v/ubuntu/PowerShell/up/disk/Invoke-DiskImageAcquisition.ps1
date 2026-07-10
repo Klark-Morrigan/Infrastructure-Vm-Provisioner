@@ -162,13 +162,17 @@ function Invoke-DiskImageAcquisition {
     #                          MASKED - BROKEN: masking ssh.socket
     #                          breaks ssh.service's activation chain
     #                          so multi-user.target was never reached
-    #   .image-patched-v4    - current: drop-in on ssh.service ONLY,
-    #                          ssh.socket left untouched
+    #   .image-patched-v4    - drop-in on ssh.service ONLY, ssh.socket
+    #                          left untouched
+    #   .image-patched-v5    - current: + Patch 3, empty
+    #                          90-hotplug-azure.yaml so the router's static
+    #                          netplan wins at init-local and ext0 holds its
+    #                          static IP before the direct SSH probe runs
     # Bumping the name on each substantive change forces existing
     # patched images to be re-patched and pick up the fix; the new
     # patch run also cleans up obsolete drop-in files from prior revs.
     # ------------------------------------------------------------------
-    $patchedSentinel = $baseImagePath -replace '\.vhdx$', '.image-patched-v4'
+    $patchedSentinel = $baseImagePath -replace '\.vhdx$', '.image-patched-v5'
     Invoke-WithSubStepTimer `
         -Parent 'Disk image acquisition' `
         -Name   'WSL2 base-image patch' `

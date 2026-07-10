@@ -66,6 +66,29 @@
 #     blocks until the user exists - which is the property we
 #     actually needed.
 #
+#   Patch 3: neutralise the Azure hotplug netplan for early static IP
+#     The Ubuntu Azure cloud image ships /etc/netplan/90-hotplug-azure.yaml
+#     with an 'ephemeral' entry that forces dhcp4 on every hv_netvsc NIC
+#     NOT named eth0. A router VM's seed renames its two NICs to ext0 /
+#     priv0 via netplan set-name, so both match that pattern; the hotplug
+#     file's higher priority (90 > the seed's init-local 50-cloud-init.yaml)
+#     then shadows the static config at cloud-init's init-local stage. The
+#     router seed does overwrite the file, but only in a config-stage
+#     write_files entry whose re-apply is deferred to a runcmd
+#     `netplan apply` (cloud-final). So ext0 sits on a wrong / absent
+#     address from init-local through cloud-config, and because sshd is
+#     ordered After=cloud-config.service (Patch 2), the host's DIRECT SSH
+#     probe of the router's static IP cannot connect until cloud-final -
+#     the bulk of the router's ~250s wait-for-SSH versus ~40s for a
+#     single-NIC workload (whose eth0 the hotplug entry never matches).
+#     Writing the empty-but-valid override into the BASE IMAGE makes the
+#     seed's static network-config the only effective netplan from
+#     init-local onward, so ext0 holds its static IP before cloud-config
+#     and the probe connects right after it, like the workload. The
+#     content is generic (no per-VM data), so the base image is the right
+#     layer; the seed's own write_files copy stays as an idempotent
+#     safety net for any image not re-patched.
+#
 #   Implementation:
 #     1. Skip immediately if the sentinel file is present (already patched).
 #     2. Delegate WSL2 readiness to Assert-Wsl2Ready (Common.PowerShell). It
@@ -85,7 +108,7 @@
 #     BaseImagePath  - absolute path to the base .vhdx to patch.
 #     SentinelPath   - absolute path to the sentinel file that marks the
 #                      patch as done (conventionally
-#                      <base>.image-patched-v4). The version suffix is
+#                      <base>.image-patched-v5). The version suffix is
 #                      bumped on every substantive change so existing
 #                      cached images get re-patched and pick up the fix:
 #                        v1: After=cloud-init.target (sshd never started)
@@ -97,6 +120,9 @@
 #                            masking ssh.socket broke ssh.service)
 #                        v4: drop-in on ssh.service only, ssh.socket
 #                            untouched
+#                        v5: + Patch 3, empty 90-hotplug-azure.yaml so
+#                            the router's static netplan wins at
+#                            init-local (early static IP for the SSH probe)
 #                      The re-patch run also removes obsolete drop-in
 #                      files left behind by prior revs.
 # ---------------------------------------------------------------------------
@@ -249,6 +275,15 @@ function Invoke-BaseImagePatch {
             # cloud images, so any /etc/systemd/system/ssh.socket file
             # is either the v3 mask symlink or operator override.
             '      if [ -L "$M/etc/systemd/system/ssh.socket" ] && [ "$(readlink "$M/etc/systemd/system/ssh.socket")" = "/dev/null" ]; then rm -f "$M/etc/systemd/system/ssh.socket"; fi'
+            # Patch 3: overwrite the Azure hotplug netplan with an empty
+            # (but valid) document so it stops shadowing the seed's static
+            # network-config at init-local. See the header for why the
+            # router's set-name-renamed NICs are shadowed and a workload's
+            # eth0 is not. mkdir -p guards the (normally present) dir; 0600
+            # matches the seed's write_files permissions for the same path.
+            '      mkdir -p "$M/etc/netplan"'
+            '      printf "network:\n  version: 2\n" > "$M/etc/netplan/90-hotplug-azure.yaml"'
+            '      chmod 0600 "$M/etc/netplan/90-hotplug-azure.yaml"'
             '      echo "OK:$P:$(ls $CFG)"'
             '      sync'
             '      umount "$M"'
