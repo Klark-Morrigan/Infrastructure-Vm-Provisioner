@@ -372,16 +372,23 @@ function Invoke-BaseImagePatch {
             throw "Root ext4 patch failed (exit $LASTEXITCODE): $patchOut"
         }
 
-        # patchOut is "OK:<device>:acl=<rc>:<cfg dir listing>"
-        # The listing must include 99-nocloud.cfg (our file), confirming we
-        # wrote to the correct partition. acl=<rc> reports Patch 4's exit
-        # code: 0 = acl baked in, non-zero = bake skipped (best-effort; the
-        # register play installs it at runtime instead).
-        if ("$patchOut" -notmatch '^OK:') {
+        # The success sentinel is "OK:<device>:acl=<rc>:<cfg dir listing>".
+        # Patch 4 runs apt inside the chroot, whose stderr (kept for
+        # diagnosability) is merged into $patchOut by the 2>&1 above, so the
+        # sentinel is no longer guaranteed to be the first/only line. Pull it
+        # out by pattern rather than anchoring ^OK: on the whole blob. The
+        # listing must include 99-nocloud.cfg (our file), confirming we wrote
+        # to the correct partition. acl=<rc> reports Patch 4's exit code:
+        # 0 = acl baked in, non-zero = bake skipped (best-effort; the register
+        # play installs it at runtime instead).
+        $okLine = @($patchOut) |
+            Where-Object { $_ -match '^OK:' } |
+            Select-Object -Last 1
+        if (-not $okLine) {
             throw "Unexpected patch output (expected OK:...): $patchOut"
         }
-        $aclRc = if ("$patchOut" -match ':acl=([^:]+):') { $Matches[1] } else { '?' }
-        Write-Host "  cloud.cfg.d: $($patchOut -replace '^OK:[^:]+:acl=[^:]+:','')"
+        $aclRc = if ($okLine -match ':acl=([^:]+):') { $Matches[1] } else { '?' }
+        Write-Host "  cloud.cfg.d: $($okLine -replace '^OK:[^:]+:acl=[^:]+:','')"
         Write-Host "  [OK] NoCloud datasource enabled in base image." `
             -ForegroundColor Green
         if ($aclRc -eq '0') {

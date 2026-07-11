@@ -133,4 +133,65 @@ Describe 'Invoke-BaseImagePatch' {
             Should -Invoke New-Item -Times 0
         }
     }
+
+    # ------------------------------------------------------------------
+    Context 'patch output is multi-line - sentinel parsed from the noise' {
+    # ------------------------------------------------------------------
+        # Regression guard. Patch 4 runs apt inside the chroot; apt stderr is
+        # merged into the captured output, so the OK: sentinel is no longer
+        # the first (or only) line. An early version anchored ^OK: on the
+        # whole blob and threw on a perfectly successful bake because dozens
+        # of apt lines preceded the sentinel (seen first in an E2E run). The
+        # function must locate the OK: line wherever it lands and succeed.
+
+        BeforeEach {
+            Mock Test-Path { $false }
+            Mock Assert-Wsl2Ready {}
+            Mock Mount-VHD { [PSCustomObject]@{ DiskNumber = 7 } }
+            Mock Dismount-VHD {}
+            Mock New-Item {}
+
+            # lsblk is called twice (before then after --bare); return one
+            # extra device the second time so exactly one 'new' device is
+            # detected. base64 is matched before lsblk so the encoded script
+            # blob (which itself contains the word lsblk) cannot be mistaken
+            # for an lsblk probe.
+            $script:lsblkCalls = 0
+            Mock wsl {
+                $joined = "$args"
+                if ($args -contains '--bare')  { $global:LASTEXITCODE = 0; return '' }
+                if ($joined -match 'base64 -d') {
+                    $global:LASTEXITCODE = 0
+                    # apt chatter BEFORE the sentinel - the exact shape that
+                    # broke the ^OK: anchor in the field.
+                    return @(
+                        'Get:1 http://archive.ubuntu.com/ubuntu noble InRelease [126 kB]'
+                        'Reading package lists...'
+                        'Setting up acl (2.3.2-1build1.1) ...'
+                        'OK:/dev/sdh1:acl=0:99-nocloud.cfg README'
+                    )
+                }
+                if ($joined -match 'noheadings') {
+                    $global:LASTEXITCODE = 0
+                    $script:lsblkCalls++
+                    if ($script:lsblkCalls -eq 1) { return 'sda' }  # before
+                    return @('sda', 'sdh')                          # after: sdh new
+                }
+                $global:LASTEXITCODE = 0; return ''
+            }
+        }
+
+        It 'completes without throwing when OK: is not the first output line' {
+            { Invoke-BaseImagePatch -BaseImagePath $BaseImage -SentinelPath $Sentinel } |
+                Should -Not -Throw
+        }
+
+        It 'creates the sentinel after a successful multi-line bake' {
+            Invoke-BaseImagePatch -BaseImagePath $BaseImage -SentinelPath $Sentinel
+
+            Should -Invoke New-Item -Times 1 -Exactly -ParameterFilter {
+                $Path -eq $Sentinel
+            }
+        }
+    }
 }
