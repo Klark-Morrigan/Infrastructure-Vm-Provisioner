@@ -324,13 +324,20 @@ function Invoke-BaseImagePatch {
             '      printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > "$M/etc/resolv.conf"'
             '      ACL_RC=0'
             '      chroot "$M" /usr/bin/env DEBIAN_FRONTEND=noninteractive apt-get update || ACL_RC=1'
-            '      if [ "$ACL_RC" = 0 ]; then chroot "$M" /usr/bin/env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends acl || ACL_RC=1; fi'
+            # apt stdout (dozens of Get:/progress lines) is dropped so the
+            # only thing this script writes to stdout stays the OK:/FAIL:
+            # sentinel the PS layer parses; stderr is kept so a real apt
+            # error still surfaces in the captured output on failure.
+            # Acquire::Languages=none skips the Translation-* indexes (a large
+            # share of the metadata) - we only need Packages to resolve acl,
+            # and this is a throwaway cache (lists are removed below anyway).
+            '      if [ "$ACL_RC" = 0 ]; then chroot "$M" /usr/bin/env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends acl >/dev/null || ACL_RC=1; fi'
             '      chroot "$M" apt-get clean 2>/dev/null'
             '      rm -rf "$M/var/lib/apt/lists/"* 2>/dev/null'
             '      rm -f "$M/etc/resolv.conf"'
             '      if [ "$RESTORE_MODE" = link ]; then ln -s "$RLINK" "$M/etc/resolv.conf";'
             '      elif [ "$RESTORE_MODE" = file ]; then mv "$M/etc/resolv.conf.vmpatchbak" "$M/etc/resolv.conf"; fi'
-            '      umount "$M/sys" 2>/dev/null; umount "$M/proc" 2>/dev/null; umount "$M/dev" 2>/dev/null'
+            '      umount "$M/sys" 2>/dev/null; umount "$M/proc" 2>/dev/null; umount "$M/dev/pts" 2>/dev/null; umount "$M/dev" 2>/dev/null'
             # Patch 4 is best-effort: if the apt bake failed (e.g. transient
             # WSL network), the boot-critical Patches 1-3 are already written,
             # so we still succeed and let the register play's fallback install
