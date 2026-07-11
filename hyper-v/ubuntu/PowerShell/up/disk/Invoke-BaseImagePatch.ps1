@@ -316,6 +316,11 @@ function Invoke-BaseImagePatch {
             # for DNS. The image's original resolv.conf (a systemd-resolved
             # symlink) is captured and restored so the VM boots unchanged.
             '      mount --bind /dev  "$M/dev"'
+            # --bind of /dev is non-recursive, so the host's devpts submount
+            # is not carried in; mount a fresh one so dpkg maintainer scripts
+            # can openpt (else apt warns "Can not write log (Is /dev/pts
+            # mounted?)"). Non-fatal if it fails, hence 2>/dev/null.
+            '      mount -t devpts devpts "$M/dev/pts" 2>/dev/null'
             '      mount --bind /proc "$M/proc"'
             '      mount --bind /sys  "$M/sys"'
             '      RESTORE_MODE=none'
