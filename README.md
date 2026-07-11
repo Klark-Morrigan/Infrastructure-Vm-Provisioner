@@ -19,11 +19,17 @@
   - [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables)
   - [Router VM (kind: router)](#router-vm-kind-router)
 - [provision.ps1](#provisionps1)
+  - [Phase-timing report and cross-process export](#phase-timing-report-and-cross-process-export)
 - [Test-HostNetworkPreflight.ps1](#test-hostnetworkpreflightps1)
 - [Get-VmRuntimeDiag.ps1](#get-vmruntimediagps1)
 - [start-vms.ps1](#start-vmsps1)
 - [ensure-vms-ready.ps1](#ensure-vms-readyps1)
 - [deprovision.ps1](#deprovisionps1)
+- [Toolchain provisioning via Ansible (Common-Ansible)](#toolchain-provisioning-via-ansible-common-ansible)
+  - [Toolchain engine (selecting the live path)](#toolchain-engine-selecting-the-live-path)
+  - [Consuming Common-Ansible](#consuming-common-ansible)
+  - [Acquire, verify, stage (the integrity gate)](#acquire-verify-stage-the-integrity-gate)
+  - [Running the flow](#running-the-flow)
 - [CI](#ci)
 - [Repo structure](#repo-structure)
 
@@ -58,19 +64,19 @@ PSGallery automatically on first run.
 
 ```powershell
 # 1. Store config in the local vault (once per machine)
-.\hyper-v\ubuntu\setup-secrets.ps1 -ConfigFile C:\private\vm-config.json
+.\hyper-v\ubuntu\shared\setup-secrets.ps1 -ConfigFile C:\private\vm-config.json
 
 # 2. Provision VMs (run as Administrator)
-.\hyper-v\ubuntu\provision.ps1
+.\hyper-v\ubuntu\PowerShell\provision.ps1
 
 # 3. Bring VMs back up after a reboot (run as Administrator)
-.\hyper-v\ubuntu\start-vms.ps1
+.\hyper-v\ubuntu\PowerShell\start-vms.ps1
 
 # 4. Bring the fleet back to ready after a host reboot (run as Administrator)
-.\hyper-v\ubuntu\ensure-vms-ready.ps1 -SecretSuffix Production
+.\hyper-v\ubuntu\PowerShell\ensure-vms-ready.ps1 -SecretSuffix Production
 
 # 5. Remove VMs when no longer needed (run as Administrator)
-.\hyper-v\ubuntu\deprovision.ps1
+.\hyper-v\ubuntu\PowerShell\deprovision.ps1
 ```
 
 ---
@@ -153,10 +159,10 @@ Run once per machine before `provision.ps1`.
 
 ```powershell
 # Recommended: read config from a file outside the repo
-.\setup-secrets.ps1 -ConfigFile C:\private\vm-config.json
+.\hyper-v\ubuntu\shared\setup-secrets.ps1 -ConfigFile C:\private\vm-config.json
 
 # Optional: require a vault-level password on top of Windows user scope
-.\setup-secrets.ps1 -ConfigFile C:\private\vm-config.json -RequireVaultPassword
+.\hyper-v\ubuntu\shared\setup-secrets.ps1 -ConfigFile C:\private\vm-config.json -RequireVaultPassword
 ```
 
 Installs `Microsoft.PowerShell.SecretManagement` and
@@ -748,7 +754,7 @@ through reconcile and installing a JDK on the gateway.
 Run as Administrator after `setup-secrets.ps1` has stored the config.
 
 ```powershell
-.\provision.ps1
+.\hyper-v\ubuntu\PowerShell\provision.ps1
 ```
 
 Reads `VmProvisionerConfig` from the vault and for each VM definition:
@@ -921,8 +927,12 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
 
     ### Reconciler
 
-    Post-provisioning also runs a toolchain **reconciler** in parallel
-    with the legacy `files` / `javaDevKit` / `envVars` branches. For each
+    The toolchain **reconciler** is the PowerShell toolchain path that
+    `provision` runs in-line by default (see
+    [Toolchain engine](#toolchain-engine-selecting-the-live-path) for how it
+    is selected against the Ansible alternative). Unless `provision` is
+    called with `-SkipToolchains`, post-provisioning runs the reconciler in
+    parallel with the `files` / `javaDevKit` / `envVars` branches. For each
     VM the orchestrator:
 
     1. Calls `Initialize-VmManifestStore` once, creating
@@ -979,6 +989,37 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
     sourcing `/etc/profile.d/`. Login shells pick the same dir up
     automatically because `DotnetSdkProvider`'s `/etc/profile.d/dotnet.sh`
     prepends `DOTNET_TOOLS_ROOT` to `PATH`.
+
+### Phase-timing report and cross-process export
+
+Every `provision.ps1` run wraps its phases (host network setup, disk
+acquisition, VM creation, post-provisioning, ...) in a timing framework and
+prints a per-phase / per-sub-step wall-clock report at the end - on success,
+on failure, and on the WSL2-reboot-required early exit. The framework is the
+shared `Common.PowerShell` phase-timing surface (`Initialize-PhaseTimings`,
+`Invoke-WithPhaseTimer`, `Write-PhaseTimingReport`); the console report always
+prints and needs no configuration.
+
+**Cross-process export (opt-in).** When `provision.ps1` runs as a child of a
+parent orchestrator - the [Infrastructure-E2E](https://github.com/Klark-Morrigan/Infrastructure-E2E)
+runner - the parent sets the `TIMING_TREE_OUTPUT_PATH` environment variable to
+a file path before shelling out. On that opt-in, provision.ps1 also serialises
+its phase/sub-step tree to that path (via `Export-PhaseTimingTreeIfRequested`,
+the self-guarding shim that reads the variable and exports only when it is set)
+so the parent can graft this run's timings under the part that shelled out,
+turning an opaque "provisioning" span into its VM-boot / acquisition /
+wait-for-SSH breakdown. The variable name is deliberately neutral - provision.ps1
+does not know who consumes the artifact, and the guard and contract name live
+once inside the shim rather than being hand-written at each export site.
+
+- The export fires on the same success, failure, and reboot-required paths as
+  the console report, so a partial run still emits what it measured.
+- When `TIMING_TREE_OUTPUT_PATH` is unset (a bare operator run), nothing is
+  written and behaviour is unchanged - console report only.
+
+Requires `Common.PowerShell >= 9.3.0` (the release that added
+`Export-PhaseTimingTreeIfRequested`); the bootstrap floor in
+`Install-ModuleDependencies.ps1` pins it.
 
 ---
 
@@ -1077,7 +1118,7 @@ every VM in `VmProvisionerConfig` back to `Running` after a host reboot, a
 manual shutdown, or a Hyper-V "Saved" state caused by a host power event.
 
 ```powershell
-.\start-vms.ps1
+.\hyper-v\ubuntu\PowerShell\start-vms.ps1
 ```
 
 Reads the same `VmProvisionerConfig` from the vault and for each VM calls
@@ -1112,7 +1153,7 @@ Run as Administrator to bring an already-provisioned fleet back to
 then waits until each one is actually reachable over SSH.
 
 ```powershell
-.\hyper-v\ubuntu\ensure-vms-ready.ps1 -SecretSuffix Production
+.\hyper-v\ubuntu\PowerShell\ensure-vms-ready.ps1 -SecretSuffix Production
 ```
 
 **What "ready" means** — powered on, booted, and answering an `SSH-`
@@ -1156,7 +1197,7 @@ when you (or automation) need the fleet actually reachable over SSH.
 Run as Administrator to remove VMs that were created by `provision.ps1`.
 
 ```powershell
-.\deprovision.ps1
+.\hyper-v\ubuntu\PowerShell\deprovision.ps1
 ```
 
 Reads the same `VmProvisionerConfig` from the vault and for each VM definition:
@@ -1199,6 +1240,136 @@ After all VMs are processed:
 **The base Ubuntu image is not deleted.** It is shared across all VMs of the
 same Ubuntu version and is not specific to any single config entry. Delete it
 manually from `vhdPath` if it is no longer needed.
+
+---
+
+## Toolchain provisioning via Ansible (Common-Ansible)
+
+An Ansible-driven flow that installs the section-1 toolchains (JDK, .NET SDK,
+.NET global tools) onto already-provisioned VMs, using the reusable roles that
+live in the [Common-Ansible](https://github.com/Klark-Morrigan/Common-Ansible)
+substrate. It installs the toolchains authored in the `javaDevKit` /
+`dotnetSdk` / `dotnetTools` config fields documented above, per host. It is a
+**peer** to the in-repo PowerShell [reconciler](#reconciler) - the operator
+picks one (see [Toolchain engine](#toolchain-engine-selecting-the-live-path)).
+The reusable roles are substrate and stay in Common-Ansible - only the "who
+gets what, on which box" wiring (the playbook, the acquire/verify/stage step,
+and the operator wrappers) lives here, in the consumer that owns the estate's
+egress.
+
+### Toolchain engine (selecting the live path)
+
+Toolchains have two interchangeable engines, selected the same way the sibling
+repos (Vm-Users, GitHubRunners) select theirs - **by which command runs**, not
+an ambient env var. There is no default engine baked into a flag; a bare
+`provision` simply keeps its historical behaviour.
+
+| To use | Run |
+| --- | --- |
+| PowerShell reconciler (in-line, per VM) | `provision` - installs toolchains during post-provisioning. This is what a bare `provision` does. |
+| Ansible flow (per host) | `provision -SkipToolchains`, then `provision-toolchains.sh`. The reconciler stays out of the way; the Ansible command installs each host's own toolchains. |
+
+Both read the same desired-state (`VmProvisionerConfig`), so the two chains are
+interchangeable. In the `.menu` launcher these are the `provision` /
+`provision (skip toolchains)` / `provision-toolchains (Ansible)` entries, and
+the end-to-end scenarios pair them: the `(custom PS)` chain runs
+`provision`; the `(Ansible)` chain runs `provision (skip toolchains)` then
+`provision-toolchains (Ansible)`. Live correctness of either path is verified
+through Infrastructure-E2E.
+
+The flow lives under `hyper-v/ubuntu/Ansible/`:
+
+- `playbooks/provision-toolchains.yml` - composes the substrate `jdk`,
+  `dotnet_sdk`, and `dotnet_tools` roles against every host in the fleet
+  inventory.
+- `ops/provision-toolchains.sh` - the operator entry point.
+- `ops/_stage-toolchain-artifacts.sh` + `ops/Stage-ToolchainArtifacts.ps1` -
+  the acquire/verify/stage step (below).
+- `ops/ConvertTo-PerVmToolchainConfig.ps1` - projects each VM's toolchain
+  fields into a per-host map (keyed by vmName) the staging step resolves.
+
+The host file server URL reaches the roles through the substrate bridge's
+always-on inventory fragment, so this flow declares no extra vault.
+
+### Consuming Common-Ansible
+
+The roles are not standalone - they read the dispatch bridge's extra-vars and
+inventory contract - so roles and bridge are one substrate, consumed together
+from a single **sibling checkout** of Common-Ansible under the same parent
+directory (`c:\a_Code\Common-Ansible`; override with `COMMON_ANSIBLE_ROOT`).
+The wrapper declares this repo's needs to the consumer-agnostic bridge through
+its `CA_*` contract: the `VmProvisioner` inventory vault (which also holds the
+desired toolchains), the host file server, and `CA_CONSUMER_ROOT` (this repo's
+`hyper-v/ubuntu/Ansible/` slice) so the bridge resolves the playbook from here
+while the reusable roles resolve from the sibling.
+
+### Acquire, verify, stage (the integrity gate)
+
+The roles pull their tarballs / packages from the host file server by archive
+name and deliberately do **not** verify a checksum at install (they trust the
+file server). Integrity therefore lives in this consumer, in
+`Stage-ToolchainArtifacts.ps1`, which runs before the file server starts and,
+for each desired toolchain:
+
+1. resolves the operator's loose pin (e.g. `21`) against upstream (Adoptium for
+   the JDK, the .NET release feed for the SDK, NuGet for tools) into a concrete
+   build - reusing this repo's own reconciler resolvers so resolution stays one
+   source of truth;
+2. downloads the artifact from upstream and **verifies its checksum**, failing
+   the whole run (nothing reaches any VM) on a mismatch;
+3. stages the verified artifact under the exact archive name the role re-derives
+   and pulls by; and
+4. writes a per-artifact lockfile pin and a resolved-config document of the
+   **concrete** versions.
+
+The concrete versions are the pin: the roles re-resolve on the target, so they
+are handed the exact resolved build (`21.0.5+11`, not `21`) as an
+`--extra-vars` override, which stops the target picking a newer upstream build
+than the one that was verified and staged.
+
+The desired toolchains are read from the per-VM `VmProvisionerConfig` secret -
+the same secret the bridge reads for its inventory, so desired-state and
+inventory share one source of truth. Each VM's `javaDevKit` / `dotnetSdk` /
+`dotnetTools` fields (the fields the reconciler documents above) are projected
+into a **per-host map** keyed by vmName, whose values are the role-variable
+shape the roles consume:
+
+```json
+{
+  "toolchains_resolved_by_host": {
+    "ubuntu-01-ci": {
+      "jdk_versions": ["21.0.5+11"],
+      "dotnet_sdk_versions": [{ "channel": "10.0", "version": "10.0.100" }],
+      "dotnet_tools_tools": [{ "id": "dotnet-reportgenerator-globaltool",
+                               "version": "5.4.4" }]
+    },
+    "ubuntu-02-ci": { "jdk_versions": ["17.0.13+11"] }
+  }
+}
+```
+
+Each host installs **only its own** toolchains: the stage step forwards this
+map as one play-wide `--extra-vars` dict, and the playbook selects a host's
+entry by `inventory_hostname` (the bridge keys inventory hosts by vmName). A
+host absent from the map installs nothing. The stage step de-duplicates the
+staged artifact set, so a build shared by several hosts is fetched and verified
+once. The projection lives in `ops/ConvertTo-PerVmToolchainConfig.ps1`.
+
+### Running the flow
+
+Requires a WSL controller - bootstrap it with
+[`ops/bootstrap-controller.sh`](hyper-v/ubuntu/Ansible/ops/bootstrap-controller.sh)
+(the `bootstrap-controller (Ansible)` menu entry), a thin shim that reuses the
+shared Common-Ansible controller - the local `VmProvisioner` vault populated
+(including each VM's toolchain fields), and the Common-Ansible sibling checkout
+present.
+
+```bash
+# From hyper-v/ubuntu/Ansible/ops/, with SECRET_SUFFIX naming the lifecycle:
+SECRET_SUFFIX=Production ./provision-toolchains.sh
+# Forwarded args reach ansible-playbook unchanged, e.g.:
+SECRET_SUFFIX=Production ./provision-toolchains.sh --limit ubuntu-02-ci --check
+```
 
 ---
 
@@ -1268,101 +1439,99 @@ Infrastructure-VM-Provisioner/
 |     `- ci-bash.yml        # Delegates to Common-Automation reusable ci-bash.yml
 |- hyper-v/
 |  `- ubuntu/
-|     |- provision.ps1       # Entry point - orchestrates all provisioning steps
-|     |- start-vms.ps1       # Entry point - brings provisioned VMs back to Running
-|     |- deprovision.ps1     # Entry point - reverses provision.ps1
-|     |- setup-secrets.ps1   # One-time vault setup
-|     |- common/
-|     |  |- config/
-|     |  |  |- ConvertFrom-VmConfigJson.ps1  # JSON parsing and validation; delegates the optional 'files' array to Infrastructure.HyperV's Assert-VmFilesField
-|     |  |  |- Assert-JavaDevKitField.ps1    # Validates optional javaDevKit field
-|     |  |  |- Get-SanitizedVmDisplay.ps1    # Masks password in diagnostic output
-|     |  |  |- Group-VmsByEnvironment.ps1    # Per-environment view: groups VM defs by privateSwitchName and partitions each group into RouterVms / WorkloadVms. Single source of truth shared by preflight, provision step 7, and deprovision teardown.
-|     |  |  `- Read-VmProvisionerConfig.ps1  # Shared bootstrap helper: vault read + schema validation, reused by provision / start-vms / deprovision
-|     |  |- diag/
-|     |  |  |- Get-VmDiagFolder.ps1          # Pure helper: the single source of truth for <vhdPath>/diagnostics/<vmName>/<timestamp>/ - every diag artifact (console.log, cloud-init-*.txt, ssh.log, runtime-diag.log) lands at the same path.
-|     |  |  `- Invoke-VmRuntimeDiag.ps1      # Host-side + best-effort guest-side runtime snapshot. Auto-fires from create-vm.ps1's wait-for-SSH and router-side reachability timeout paths. Manual entry point: scripts\Get-VmRuntimeDiag.ps1.
-|     |  `- network/
-|     |     |- preflight/
-|     |     |  |- Assert-HostNetworkPreflight.ps1   # Orchestrator: seven host-side network checks (switch type, vNIC up + IP, MAC story, connected route, host-vs-VM IP collision, vEthernet profile, ICS DNS proxy reachability). The profile + DNS checks delegate to Infrastructure.Network.Windows (Test-HostNetworkProfileSetting / Test-IcsDnsProxyReachable). Throws on FAIL via Assert-PreflightFindings. Gate at provision.ps1 step 4; manual entry: scripts\Test-HostNetworkPreflight.ps1.
-|     |     |  |- Assert-PreflightFindings.ps1      # Multi-line throw collector: consolidates every FAIL finding into one operator-facing error.
-|     |     |  `- checks/
-|     |     |     `- Test-IsCurrentSessionElevated.ps1   # Pure predicate: WindowsPrincipal admin check used by check 0. (The Profile / DNS-reachable / ICS-DNS-proxy / Reset-IcsSharing checks moved to Infrastructure.Network.Windows.)
-|     |     |- Assert-WorkloadReachableViaRouter.ps1 # Workload-side reachability gate: SSHs through the router VM jump host to a workload's private IP. Surfaces dead workloads before per-VM dispatch.
-|     |     |- Get-VmAdapterIPv4.ps1                # Pure helper: extracts IPv4 from VMNetworkAdapter objects under StrictMode (PSObject.Properties guard + IPv4 anchor regex).
-|     |     |- Resolve-ExistingRouterIp.ps1        # Router-IP lookup from existing Hyper-V state when the router is already up (reconcile path).
-|     |     `- Remove-LegacySingletonNat.ps1       # Idempotent NetNat + host vNIC cleanup at a given gateway IP. Shared by Invoke-NetworkSetup (provision) and Invoke-NetworkTeardown (deprovision); also exports Test-IpInPrefix.
-|     |- up/
-|     |  |- config/
-|     |  |  |- Assert-EnvironmentConsistency.ps1 # Per-env preflight: shared gateway/subnet, exactly-one router per env, gateway = router's privateIpAddress. Built on Group-VmsByEnvironment.
-|     |  |  `- Select-VmsForProvisioning.ps1     # Pre-flight VM-existence and IP-conflict checks; dispatches the per-env preflight to Assert-EnvironmentConsistency before any per-VM classification
-|     |  |- disk/
-|     |  |  |- Invoke-DiskImageAcquisition.ps1  # Downloads, converts, caches base VHDX
-|     |  |  `- Invoke-BaseImagePatch.ps1        # Patches cloud-init datasource via WSL2
-|     |  |- jdk/
-|     |  |  |- Resolve-AdoptiumRelease.ps1            # Resolves version granularity via Adoptium v3 API
-|     |  |  |- Invoke-JdkAcquisition.ps1              # Downloads + verifies tarball, writes lockfile pin
-|     |  |  |- Get-JdkBinariesForSymlinking.ps1       # Enumerates the JDK bin/ dir on the VM for /usr/local/bin symlink wiring
-|     |  |  |- JdkProvider.Get-DesiredVersions.ps1    # Reconciler op: parses javaDevKit into typed Spec records
-|     |  |  |- JdkProvider.Get-InstalledVersions.ps1  # Reconciler op: reads JDK manifests from the on-VM store
-|     |  |  |- JdkProvider.Install-Version.ps1        # Reconciler op: extracts tarball, writes profile.d + symlinks, records manifest
-|     |  |  |- JdkProvider.Uninstall-Version.ps1      # Reconciler op: manifest-driven teardown of one JDK install
-|     |  |  `- Get-JdkProvider.ps1                    # Composes the four ops into an IToolchainProvider object
-|     |  |- dotnet/
-|     |  |  |- Resolve-DotnetSdkRelease.ps1             # Resolves version granularity via Microsoft's release-metadata feed
-|     |  |  |- Invoke-DotnetSdkAcquisition.ps1          # Host-side .NET SDK tarball prefetch + lockfile pin
-|     |  |  |- Invoke-DotnetToolAcquisition.ps1         # Host-side .nupkg prefetch with SHA-512 + nuget.org repo-signature verification
-|     |  |  |- nuget-trusted-signers.config             # Pinned nuget.org trusted-signers config used by 'dotnet nuget verify'
-|     |  |  |- DotnetSdkProvider.Get-DesiredVersions.ps1   # Reconciler op: parses dotnetSdk into a typed Spec
-|     |  |  |- DotnetSdkProvider.Get-InstalledVersions.ps1 # Reconciler op: reads SDK manifests from the on-VM store
-|     |  |  |- DotnetSdkProvider.Install-Version.ps1       # Reconciler op: extracts tarball, writes profile.d, symlinks, manifest
-|     |  |  |- DotnetSdkProvider.Uninstall-Version.ps1     # Reconciler op: manifest-driven teardown of one SDK install
-|     |  |  |- Get-VmDotnetToolChildren.ps1             # Predicts child-manifest entries for the SDK manifest's `children` array
-|     |  |  |- Get-DotnetSdkProvider.ps1                # Composes the SDK ops into an IToolchainProvider; closes over the derived child-manifest entries
-|     |  |  |- DotnetToolsProvider.Get-DesiredVersions.ps1   # Reconciler op: parses dotnetTools into typed Spec records
-|     |  |  |- DotnetToolsProvider.Get-InstalledVersions.ps1 # Reconciler op: reads tool manifests from the on-VM store
-|     |  |  |- DotnetToolsProvider.Install-Version.ps1       # Reconciler op: stages .nupkg, dotnet tool install, /usr/local/bin symlinks, manifest
-|     |  |  |- DotnetToolsProvider.Uninstall-Version.ps1     # Reconciler op: ownership-bounded teardown of one tool install
-|     |  |  `- Get-DotnetToolsProvider.ps1              # Composes the tools ops into an IToolchainProvider; sets ParentProvider = 'dotnetSdk'
-|     |  |- acquire/
-|     |  |  `- Invoke-VmAcquisitions.ps1        # Per-VM host-side acquisition orchestrator; dispatches each per-software acquirer guarded by its opt-in field
-|     |  |- post/
-|     |  |  |- Invoke-VmPostProvisioning.ps1    # Per-VM transport orchestrator (file server + SSH + cloud-init wait), dispatches steps; throws fatally on cloud-init non-zero exit with a pointer at the diagnostics folder
-|     |  |  |- Wait-CloudInitFinished.ps1       # Polls 'cloud-init status' over SSH; streams a dot per poll (line-wraps every 60), returns elapsed/budget/status so the caller stamps a summary line. 600s wall-clock cap.
-|     |  |  |- Invoke-VmFilesDispatch.ps1       # Single-vs-bulk router for the 'files' step entries (presence of 'pattern' = bulk). Owns the operator-visible "[files] processing N entry(s)" cadence and the JSON-order contract.
-|     |  |  |- Assert-RouterReady.ps1           # Strict post-cloud-init check of a router VM's full state: IPv4 forwarding, nftables + dnsmasq active, MASQUERADE/FORWARD nft rules, priv0 carries the private IP. Fail-fast at provision time.
-|     |  |  |- Invoke-CloudInitDiagnostics.ps1  # Captures cloud-init-output.log + cloud-init.log + netplan + reachability into <vhdPath>/diagnostics/<vmName>/<timestamp>/ alongside console.log. Fires on every post-provisioning run, not just failures.
-|     |  |  |- Invoke-SerialConsoleCapture.ps1  # Mirrors the VM's serial console to console.log during VM-creation wait.
-|     |  |  |- New-DiagnosticSshClientWrapper.ps1 # Wraps the real SshClient with a tee-to-file logger covering the whole post-provisioning phase (writes ssh.log next to console.log).
-|     |  |  `- Set-EnvironmentVariables.ps1     # Step: writes a managed block of NAME="VALUE" lines into /etc/environment via Infrastructure.HyperV's Set-VmEnvironmentVariables
-|     |  |- network/
-|     |  |  `- setup-network.ps1               # Per-env wrapper around Remove-LegacySingletonNat; switch creation lives in Initialize-PrivateSwitch / Initialize-ExternalSwitch
-|     |  |- seed/
-|     |  |  |- generate-seed-iso.ps1           # Builds cloud-init seed ISO
-|     |  |  |- New-StaticNetplanYaml.ps1       # Builds netplan v2 YAML for the VM's static NIC (embedded in user-data write_files)
-|     |  |  `- iso.ps1                         # IMAPI2 ISO creation helper
-|     |  `- vm/
-|     |     `- create-vm.ps1                   # Creates, boots, and polls each VM
-|     `- down/
-|        |- network/
-|        |  `- teardown-network.ps1         # Per-env teardown: delegates legacy NetNat + host IP cleanup to Remove-LegacySingletonNat, then removes the Private switch when empty
-|        `- vm/
-|           `- remove-vm.ps1               # Stops, removes VM, deletes VHDX and config dir
+|     |- shared/            # Slice: cross-impl vault writer both toolchains read
+|     |  `- setup-secrets.ps1   # One-time vault setup
+|     |- PowerShell/        # Slice: host-driven PowerShell reconciler (provision/deprovision)
+|     |  |- provision.ps1       # Entry point - orchestrates all provisioning steps
+|     |  |- start-vms.ps1       # Entry point - brings provisioned VMs back to Running
+|     |  |- deprovision.ps1     # Entry point - reverses provision.ps1
+|     |  |- common/
+|     |  |  |- config/
+|     |  |  |  |- ConvertFrom-VmConfigJson.ps1  # JSON parsing and validation; delegates the optional 'files' array to Infrastructure.HyperV's Assert-VmFilesField
+|     |  |  |  |- Assert-JavaDevKitField.ps1    # Validates optional javaDevKit field
+|     |  |  |  |- Get-SanitizedVmDisplay.ps1    # Masks password in diagnostic output
+|     |  |  |  |- Group-VmsByEnvironment.ps1    # Per-environment view: groups VM defs by privateSwitchName and partitions each group into RouterVms / WorkloadVms. Single source of truth shared by preflight, provision step 7, and deprovision teardown.
+|     |  |  |  `- Read-VmProvisionerConfig.ps1  # Shared bootstrap helper: vault read + schema validation, reused by provision / start-vms / deprovision
+|     |  |  |- diag/
+|     |  |  |  |- Get-VmDiagFolder.ps1          # Pure helper: the single source of truth for <vhdPath>/diagnostics/<vmName>/<timestamp>/ - every diag artifact (console.log, cloud-init-*.txt, ssh.log, runtime-diag.log) lands at the same path.
+|     |  |  |  `- Invoke-VmRuntimeDiag.ps1      # Host-side + best-effort guest-side runtime snapshot. Auto-fires from create-vm.ps1's wait-for-SSH and router-side reachability timeout paths. Manual entry point: scripts\Get-VmRuntimeDiag.ps1.
+|     |  |  `- network/
+|     |  |     |- preflight/
+|     |  |     |  |- Assert-HostNetworkPreflight.ps1   # Orchestrator: seven host-side network checks (switch type, vNIC up + IP, MAC story, connected route, host-vs-VM IP collision, vEthernet profile, ICS DNS proxy reachability). The profile + DNS checks delegate to Infrastructure.Network.Windows (Test-HostNetworkProfileSetting / Test-IcsDnsProxyReachable). Throws on FAIL via Assert-PreflightFindings. Gate at provision.ps1 step 4; manual entry: scripts\Test-HostNetworkPreflight.ps1.
+|     |  |     |  |- Assert-PreflightFindings.ps1      # Multi-line throw collector: consolidates every FAIL finding into one operator-facing error.
+|     |  |     |  `- checks/
+|     |  |     |     `- Test-IsCurrentSessionElevated.ps1   # Pure predicate: WindowsPrincipal admin check used by check 0. (The Profile / DNS-reachable / ICS-DNS-proxy / Reset-IcsSharing checks moved to Infrastructure.Network.Windows.)
+|     |  |     |- Assert-WorkloadReachableViaRouter.ps1 # Workload-side reachability gate: SSHs through the router VM jump host to a workload's private IP. Surfaces dead workloads before per-VM dispatch.
+|     |  |     |- Get-VmAdapterIPv4.ps1                # Pure helper: extracts IPv4 from VMNetworkAdapter objects under StrictMode (PSObject.Properties guard + IPv4 anchor regex).
+|     |  |     |- Resolve-ExistingRouterIp.ps1        # Router-IP lookup from existing Hyper-V state when the router is already up (reconcile path).
+|     |  |     `- Remove-LegacySingletonNat.ps1       # Idempotent NetNat + host vNIC cleanup at a given gateway IP. Shared by Invoke-NetworkSetup (provision) and Invoke-NetworkTeardown (deprovision); also exports Test-IpInPrefix.
+|     |  |- up/
+|     |  |  |- config/
+|     |  |  |  |- Assert-EnvironmentConsistency.ps1 # Per-env preflight: shared gateway/subnet, exactly-one router per env, gateway = router's privateIpAddress. Built on Group-VmsByEnvironment.
+|     |  |  |  `- Select-VmsForProvisioning.ps1     # Pre-flight VM-existence and IP-conflict checks; dispatches the per-env preflight to Assert-EnvironmentConsistency before any per-VM classification
+|     |  |  |- disk/
+|     |  |  |  |- Invoke-DiskImageAcquisition.ps1  # Downloads, converts, caches base VHDX
+|     |  |  |  `- Invoke-BaseImagePatch.ps1        # Patches base image via WSL2 (datasource, sshd order, netplan, acl)
+|     |  |  |- jdk/
+|     |  |  |  |- Resolve-AdoptiumRelease.ps1            # Resolves version granularity via Adoptium v3 API
+|     |  |  |  |- Invoke-JdkAcquisition.ps1              # Downloads + verifies tarball, writes lockfile pin
+|     |  |  |  |- Get-JdkBinariesForSymlinking.ps1       # Enumerates the JDK bin/ dir on the VM for /usr/local/bin symlink wiring
+|     |  |  |  |- JdkProvider.Get-DesiredVersions.ps1    # Reconciler op: parses javaDevKit into typed Spec records
+|     |  |  |  |- JdkProvider.Get-InstalledVersions.ps1  # Reconciler op: reads JDK manifests from the on-VM store
+|     |  |  |  |- JdkProvider.Install-Version.ps1        # Reconciler op: extracts tarball, writes profile.d + symlinks, records manifest
+|     |  |  |  |- JdkProvider.Uninstall-Version.ps1      # Reconciler op: manifest-driven teardown of one JDK install
+|     |  |  |  `- Get-JdkProvider.ps1                    # Composes the four ops into an IToolchainProvider object
+|     |  |  |- dotnet/
+|     |  |  |  |- Resolve-DotnetSdkRelease.ps1             # Resolves version granularity via Microsoft's release-metadata feed
+|     |  |  |  |- Invoke-DotnetSdkAcquisition.ps1          # Host-side .NET SDK tarball prefetch + lockfile pin
+|     |  |  |  |- Invoke-DotnetToolAcquisition.ps1         # Host-side .nupkg prefetch with SHA-512 + nuget.org repo-signature verification
+|     |  |  |  |- nuget-trusted-signers.config             # Pinned nuget.org trusted-signers config used by 'dotnet nuget verify'
+|     |  |  |  |- DotnetSdkProvider.Get-DesiredVersions.ps1   # Reconciler op: parses dotnetSdk into a typed Spec
+|     |  |  |  |- DotnetSdkProvider.Get-InstalledVersions.ps1 # Reconciler op: reads SDK manifests from the on-VM store
+|     |  |  |  |- DotnetSdkProvider.Install-Version.ps1       # Reconciler op: extracts tarball, writes profile.d, symlinks, manifest
+|     |  |  |  |- DotnetSdkProvider.Uninstall-Version.ps1     # Reconciler op: manifest-driven teardown of one SDK install
+|     |  |  |  |- Get-VmDotnetToolChildren.ps1             # Predicts child-manifest entries for the SDK manifest's `children` array
+|     |  |  |  |- Get-DotnetSdkProvider.ps1                # Composes the SDK ops into an IToolchainProvider; closes over the derived child-manifest entries
+|     |  |  |  |- DotnetToolsProvider.Get-DesiredVersions.ps1   # Reconciler op: parses dotnetTools into typed Spec records
+|     |  |  |  |- DotnetToolsProvider.Get-InstalledVersions.ps1 # Reconciler op: reads tool manifests from the on-VM store
+|     |  |  |  |- DotnetToolsProvider.Install-Version.ps1       # Reconciler op: stages .nupkg, dotnet tool install, /usr/local/bin symlinks, manifest
+|     |  |  |  |- DotnetToolsProvider.Uninstall-Version.ps1     # Reconciler op: ownership-bounded teardown of one tool install
+|     |  |  |  `- Get-DotnetToolsProvider.ps1              # Composes the tools ops into an IToolchainProvider; sets ParentProvider = 'dotnetSdk'
+|     |  |  |- acquire/
+|     |  |  |  `- Invoke-VmAcquisitions.ps1        # Per-VM host-side acquisition orchestrator; dispatches each per-software acquirer guarded by its opt-in field
+|     |  |  |- post/
+|     |  |  |  |- Invoke-VmPostProvisioning.ps1    # Per-VM transport orchestrator (file server + SSH + cloud-init wait), dispatches steps; throws fatally on cloud-init non-zero exit with a pointer at the diagnostics folder
+|     |  |  |  |- Wait-CloudInitFinished.ps1       # Polls 'cloud-init status' over SSH; streams a dot per poll (line-wraps every 60), returns elapsed/budget/status so the caller stamps a summary line. 600s wall-clock cap.
+|     |  |  |  |- Invoke-VmFilesDispatch.ps1       # Single-vs-bulk router for the 'files' step entries (presence of 'pattern' = bulk). Owns the operator-visible "[files] processing N entry(s)" cadence and the JSON-order contract.
+|     |  |  |  |- Assert-RouterReady.ps1           # Strict post-cloud-init check of a router VM's full state: IPv4 forwarding, nftables + dnsmasq active, MASQUERADE/FORWARD nft rules, priv0 carries the private IP. Fail-fast at provision time.
+|     |  |  |  |- Invoke-CloudInitDiagnostics.ps1  # Captures cloud-init-output.log + cloud-init.log + netplan + reachability into <vhdPath>/diagnostics/<vmName>/<timestamp>/ alongside console.log. Fires on every post-provisioning run, not just failures.
+|     |  |  |  |- Invoke-SerialConsoleCapture.ps1  # Mirrors the VM's serial console to console.log during VM-creation wait.
+|     |  |  |  |- New-DiagnosticSshClientWrapper.ps1 # Wraps the real SshClient with a tee-to-file logger covering the whole post-provisioning phase (writes ssh.log next to console.log).
+|     |  |  |  `- Set-EnvironmentVariables.ps1     # Step: writes a managed block of NAME="VALUE" lines into /etc/environment via Infrastructure.HyperV's Set-VmEnvironmentVariables
+|     |  |  |- network/
+|     |  |  |  `- setup-network.ps1               # Per-env wrapper around Remove-LegacySingletonNat; switch creation lives in Initialize-PrivateSwitch / Initialize-ExternalSwitch
+|     |  |  |- seed/
+|     |  |  |  |- generate-seed-iso.ps1           # Builds cloud-init seed ISO
+|     |  |  |  |- New-StaticNetplanYaml.ps1       # Builds netplan v2 YAML for the VM's static NIC (embedded in user-data write_files)
+|     |  |  |  `- iso.ps1                         # IMAPI2 ISO creation helper
+|     |  |  `- vm/
+|     |  |     `- create-vm.ps1                   # Creates, boots, and polls each VM
+|     |  `- down/
+|     |     |- network/
+|     |     |  `- teardown-network.ps1         # Per-env teardown: delegates legacy NetNat + host IP cleanup to Remove-LegacySingletonNat, then removes the Private switch when empty
+|     |     `- vm/
+|     |        `- remove-vm.ps1               # Stops, removes VM, deletes VHDX and config dir
+|     `- Ansible/           # Slice: on-VM toolchain push (Common-Ansible bridge)
+|        |- ops/            # Stage-ToolchainArtifacts.ps1 (reuses PowerShell/up resolvers), provision-toolchains.sh, imports/
+|        |- playbooks/      # provision-toolchains.yml
+|        `- requirements.yml
 |- Tests/
-|  |- common/
-|  |  |- config/             # Unit tests for common/config helpers
-|  |  |- diag/               # Unit tests for common/diag helpers
-|  |  `- network/            # Unit tests for common/network helpers
-|  |- up/
-|  |  |- config/             # Unit tests for up/config helpers
-|  |  |- disk/               # Unit tests for up/disk
-|  |  |- jdk/                # Unit tests for up/jdk
-|  |  |- network/            # Unit tests for up/network
-|  |  |- seed/               # Unit tests for up/seed
-|  |  `- vm/                 # Unit tests for up/vm
-|  `- down/
-|     |- network/            # Unit tests for down/network
-|     `- vm/                 # Unit tests for down/vm
+|  |- shared/               # Unit tests for shared/ (setup-secrets)
+|  |- PowerShell/           # Mirrors the PowerShell reconciler slice
+|  |  |- common/            # Unit tests for common/ helpers (config, diag, network, power, ssh, ui)
+|  |  |- up/                # Unit tests for up/ (config, disk, jdk, dotnet, seed, network, post, reconciler, vm)
+|  |  `- down/              # Unit tests for down/ (network, vm)
+|  `- Ansible/              # Mirrors the Ansible slice (Stage-ToolchainArtifacts)
 |- scripts/
 |  |- Run-Tests.ps1                       # Unit-test runner (delegates to Common-PowerShell)
 |  |- Run-IntegrationTests.ps1            # Docker-host integration runner (delegates to Common-PowerShell)
@@ -1380,6 +1549,14 @@ Each scenario follows the `hypervisor/guest-os/` convention. Future scenarios
 (e.g. `hyper-v/windows-server/`, `vmware/ubuntu/`) extend the tree without
 changing the root structure. Each scenario folder is self-contained — its own
 scripts, its own secrets setup, its own README if needed.
+
+Within a scenario, the tree splits into three self-contained slices - the same
+`shared` / `PowerShell` / `Ansible` convention every consumer in the fleet
+carries: `shared/` holds the cross-impl vault writer (`setup-secrets.ps1`) both
+toolchain implementations read; `PowerShell/` holds the host-driven PowerShell
+reconciler (the `provision` / `deprovision` entry scripts and their
+`common` / `up` / `down` helpers); `Ansible/` holds the on-VM toolchain-push
+flow that bridges to Common-Ansible.
 
 **Recommended specs for a self-hosted GitHub Actions runner:**
 

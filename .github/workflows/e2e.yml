@@ -9,4 +9,10 @@ on:
 jobs:
   e2e:
     uses: Klark-Morrigan/Infrastructure-E2E/.github/workflows/e2e.yml@master
+    # Exercise this repo's own toolchain path (the Ansible flow) on every PR:
+    # toolchainsFlow=ansible drives provision -SkipToolchains + the standalone
+    # provision-toolchains.sh, the way this repo now installs toolchains.
+    # users/runners stay on their ansible defaults.
+    with:
+      flow-spec: '{"usersFlow":"ansible","runnersFlow":"ansible","toolchainsFlow":"ansible"}'
     secrets: inherit

@@ -1,0 +1,74 @@
+---
+# Operator-facing entry into the toolchain provisioning flow. Composes the
+# reusable Common-Ansible substrate roles (jdk -> dotnet_sdk ->
+# dotnet_tools) against every host the bash bridge dropped into the
+# vm_provisioner_hosts inventory group. This playbook and its wrapper are
+# the consumer half of plan step 5.5; the roles themselves are substrate
+# (Common-Ansible roles/jdk, roles/dotnet_sdk, roles/dotnet_tools) and are
+# resolved from the sibling checkout via ANSIBLE_ROLES_PATH.
+#
+# Toolchains are targeted PER HOST. The acquire/verify/stage step forwards a
+# single play-wide --extra-vars dict `toolchains_resolved_by_host`, keyed by
+# vmName (which the bridge also uses as inventory_hostname). The play `vars:`
+# below select THIS host's entry by inventory_hostname into jdk_versions /
+# dotnet_sdk_versions / dotnet_tools_tools, so each host installs only what its
+# own VM definition asked for. Those values are the CONCRETE, pinned versions
+# the stage step resolved and staged - not the operator's loose pins - so the
+# target's install-time re-resolve lands on exactly the build that was verified
+# and staged. A host absent from the dict installs nothing (empty defaults).
+# host_file_server_base_url is threaded in by the bridge's always-on inventory
+# extra-vars fragment.
+#
+# Role order is significant on the INSTALL direction this playbook drives:
+# - jdk is independent and runs first.
+# - dotnet_sdk before dotnet_tools: the tools role needs the `dotnet`
+#   driver the SDK role installs (/usr/local/bin/dotnet) on PATH before any
+#   `dotnet tool` operation. The symmetric teardown ordering (tools before
+#   the SDK) is a separate down-direction concern, owned by a future
+#   teardown flow and documented in the dotnet_tools role README.
+#
+# Shared posture rationale (hosts, gather_facts, why role order lives in the
+# play rather than in role meta deps) mirrors the substrate consumers'
+# playbook conventions.
+#
+# gather_facts is off: none of the three toolchain roles reads a gathered
+# fact - architecture is a static var (jdk_architecture, dotnet_sdk_architecture),
+# version resolution is driven by operator pins, and installs use
+# apt/command/get_url which need no facts. With zero consumers, running the
+# setup module is pure cost, so we skip it outright and reclaim the whole
+# per-run gather (~6-12s each, ~40s aggregate across the lifecycle). If a later
+# task ever needs a specific fact, re-enable with a narrow gather_subset rather
+# than a full gather. Skip rather than fact-cache on purpose: this harness
+# recycles VM IPs across lifecycles, so a host-keyed cache would serve a
+# torn-down VM's facts to a fresh VM at the same address. Skipping has no state
+# to invalidate.
+
+- name: Provision toolchains on provisioned VMs
+  hosts: vm_provisioner_hosts
+  gather_facts: false
+  any_errors_fatal: false
+  vars:
+    # This host's slice of the per-host resolved map, then its three role
+    # vars. Play vars are templated per host, so inventory_hostname resolves
+    # to each host in turn; an absent host defaults to installing nothing.
+    _host_toolchains: >-
+      {{ (toolchains_resolved_by_host | default({}))[inventory_hostname]
+         | default({}) }}
+    jdk_versions: "{{ _host_toolchains.jdk_versions | default([]) }}"
+    dotnet_sdk_versions: "{{ _host_toolchains.dotnet_sdk_versions | default([]) }}"
+    dotnet_tools_tools: "{{ _host_toolchains.dotnet_tools_tools | default([]) }}"
+  tasks:
+    - name: Reconcile the JDK toolchain
+      ansible.builtin.import_role:
+        name: jdk
+      tags: jdk
+
+    - name: Reconcile the .NET SDK toolchain
+      ansible.builtin.import_role:
+        name: dotnet_sdk
+      tags: dotnet_sdk
+
+    - name: Reconcile the .NET global tools
+      ansible.builtin.import_role:
+        name: dotnet_tools
+      tags: dotnet_tools

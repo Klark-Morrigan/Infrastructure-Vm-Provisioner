@@ -41,7 +41,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$ubuntu   = Join-Path $repoRoot 'hyper-v\ubuntu'
+# The PowerShell reconciler (entry scripts + common/ helpers) lives under
+# the hyper-v\ubuntu\PowerShell slice; this diag tool reuses those helpers.
+$ubuntu   = Join-Path $repoRoot 'hyper-v\ubuntu\PowerShell'
 
 # Install-ModuleDependencies.ps1 is a script BODY, not a function:
 # dot-sourcing it executes the install + import directly into the
