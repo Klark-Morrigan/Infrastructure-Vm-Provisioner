@@ -328,7 +328,6 @@ function Invoke-BaseImagePatch {
             '      elif [ -e "$M/etc/resolv.conf" ]; then mv "$M/etc/resolv.conf" "$M/etc/resolv.conf.vmpatchbak"; RESTORE_MODE=file; fi'
             '      printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > "$M/etc/resolv.conf"'
             '      ACL_RC=0'
-            '      chroot "$M" /usr/bin/env DEBIAN_FRONTEND=noninteractive apt-get update || ACL_RC=1'
             # apt stdout (dozens of Get:/progress lines) is dropped so the
             # only thing this script writes to stdout stays the OK:/FAIL:
             # sentinel the PS layer parses; stderr is kept so a real apt
@@ -336,6 +335,7 @@ function Invoke-BaseImagePatch {
             # Acquire::Languages=none skips the Translation-* indexes (a large
             # share of the metadata) - we only need Packages to resolve acl,
             # and this is a throwaway cache (lists are removed below anyway).
+            '      chroot "$M" /usr/bin/env DEBIAN_FRONTEND=noninteractive apt-get update -o Acquire::Languages=none >/dev/null || ACL_RC=1'
             '      if [ "$ACL_RC" = 0 ]; then chroot "$M" /usr/bin/env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends acl >/dev/null || ACL_RC=1; fi'
             '      chroot "$M" apt-get clean 2>/dev/null'
             '      rm -rf "$M/var/lib/apt/lists/"* 2>/dev/null'
