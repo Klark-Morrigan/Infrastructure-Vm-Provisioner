@@ -29,7 +29,7 @@ BeforeAll {
     # script-scoped so the It blocks below can read them; Pester v5 shares
     # BeforeAll script: variables with the container's tests.
     $script:BaseImage = 'C:\VHDs\ubuntu-24.04-server-cloudimg-amd64.vhdx'
-    $script:Sentinel  = 'C:\VHDs\ubuntu-24.04-server-cloudimg-amd64.image-patched-v5'
+    $script:Sentinel  = 'C:\VHDs\ubuntu-24.04-server-cloudimg-amd64.image-patched-v6'
 }
 
 Describe 'Invoke-BaseImagePatch' {

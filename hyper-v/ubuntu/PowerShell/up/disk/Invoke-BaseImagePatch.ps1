@@ -89,6 +89,22 @@
 #     layer; the seed's own write_files copy stays as an idempotent
 #     safety net for any image not re-patched.
 #
+#   Patch 4: bake the `acl` package into the base image
+#     Ansible's unprivileged become-user handoff grants the target user
+#     access to its temp files via setfacl, which ships in the `acl`
+#     package that a minimal Ubuntu cloud image omits. The runner register
+#     play (Infrastructure-GitHubRunners) installs it as a pre_task, but on
+#     a fresh VM that apt task pays a ~61s archive metadata refresh - the
+#     single biggest task in that play - dominated by `apt-get update` over
+#     the VM's NAT path, not the tiny package. Installing acl once here, in
+#     the same VHDX patch pass, amortises that cost into the base image; the
+#     play then detects acl present and skips its apt path entirely (it
+#     keeps the apt fallback for any host not built from this base image).
+#     apt runs inside a chroot of the mounted root so it resolves against
+#     the image's own sources.list / dpkg db (version-correct), with
+#     /dev, /proc and /sys bind-mounted and a temporary resolv.conf that is
+#     restored afterwards so the booted VM is unchanged apart from acl.
+#
 #   Implementation:
 #     1. Skip immediately if the sentinel file is present (already patched).
 #     2. Delegate WSL2 readiness to Assert-Wsl2Ready (Common.PowerShell). It
@@ -108,7 +124,7 @@
 #     BaseImagePath  - absolute path to the base .vhdx to patch.
 #     SentinelPath   - absolute path to the sentinel file that marks the
 #                      patch as done (conventionally
-#                      <base>.image-patched-v5). The version suffix is
+#                      <base>.image-patched-v6). The version suffix is
 #                      bumped on every substantive change so existing
 #                      cached images get re-patched and pick up the fix:
 #                        v1: After=cloud-init.target (sshd never started)
@@ -123,6 +139,9 @@
 #                        v5: + Patch 3, empty 90-hotplug-azure.yaml so
 #                            the router's static netplan wins at
 #                            init-local (early static IP for the SSH probe)
+#                        v6: + Patch 4, `acl` baked into the base image so
+#                            the runner register play's ~61s apt install
+#                            no-ops
 #                      The re-patch run also removes obsolete drop-in
 #                      files left behind by prior revs.
 # ---------------------------------------------------------------------------
@@ -284,7 +303,40 @@ function Invoke-BaseImagePatch {
             '      mkdir -p "$M/etc/netplan"'
             '      printf "network:\n  version: 2\n" > "$M/etc/netplan/90-hotplug-azure.yaml"'
             '      chmod 0600 "$M/etc/netplan/90-hotplug-azure.yaml"'
-            '      echo "OK:$P:$(ls $CFG)"'
+            # Patch 4: bake the `acl` package into the base image. Ansible's
+            # unprivileged become-user handoff shells out to setfacl (shipped
+            # in the acl package, which minimal Ubuntu omits); on a fresh VM
+            # the runner register play otherwise pays a ~61s archive metadata
+            # refresh to apt-install it. Baking it once amortises that into
+            # this one-time base-image patch, after which the play's apt task
+            # detects it present and skips its whole refresh+install path.
+            # apt runs inside a chroot so it resolves against the IMAGE's own
+            # sources.list and dpkg db (version-correct), with /dev, /proc and
+            # /sys bind-mounted from the WSL host and a temporary resolv.conf
+            # for DNS. The image's original resolv.conf (a systemd-resolved
+            # symlink) is captured and restored so the VM boots unchanged.
+            '      mount --bind /dev  "$M/dev"'
+            '      mount --bind /proc "$M/proc"'
+            '      mount --bind /sys  "$M/sys"'
+            '      RESTORE_MODE=none'
+            '      if [ -L "$M/etc/resolv.conf" ]; then RLINK=$(readlink "$M/etc/resolv.conf"); rm -f "$M/etc/resolv.conf"; RESTORE_MODE=link;'
+            '      elif [ -e "$M/etc/resolv.conf" ]; then mv "$M/etc/resolv.conf" "$M/etc/resolv.conf.vmpatchbak"; RESTORE_MODE=file; fi'
+            '      printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > "$M/etc/resolv.conf"'
+            '      ACL_RC=0'
+            '      chroot "$M" /usr/bin/env DEBIAN_FRONTEND=noninteractive apt-get update || ACL_RC=1'
+            '      if [ "$ACL_RC" = 0 ]; then chroot "$M" /usr/bin/env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends acl || ACL_RC=1; fi'
+            '      chroot "$M" apt-get clean 2>/dev/null'
+            '      rm -rf "$M/var/lib/apt/lists/"* 2>/dev/null'
+            '      rm -f "$M/etc/resolv.conf"'
+            '      if [ "$RESTORE_MODE" = link ]; then ln -s "$RLINK" "$M/etc/resolv.conf";'
+            '      elif [ "$RESTORE_MODE" = file ]; then mv "$M/etc/resolv.conf.vmpatchbak" "$M/etc/resolv.conf"; fi'
+            '      umount "$M/sys" 2>/dev/null; umount "$M/proc" 2>/dev/null; umount "$M/dev" 2>/dev/null'
+            # Patch 4 is best-effort: if the apt bake failed (e.g. transient
+            # WSL network), the boot-critical Patches 1-3 are already written,
+            # so we still succeed and let the register play's fallback install
+            # acl at runtime. ACL_RC is carried out in the OK line so the PS
+            # layer can warn without failing the provision.
+            '      echo "OK:$P:acl=$ACL_RC:$(ls $CFG)"'
             '      sync'
             '      umount "$M"'
             '      rmdir "$M"'
@@ -308,16 +360,29 @@ function Invoke-BaseImagePatch {
             throw "Root ext4 patch failed (exit $LASTEXITCODE): $patchOut"
         }
 
-        # patchOut is "OK:<device>:<cfg dir listing>"
-        # The listing must include both 99-nocloud.cfg (our file) and
-        # ideally 90_dpkg.cfg (the Azure override we're superseding),
-        # confirming we wrote to the correct partition.
+        # patchOut is "OK:<device>:acl=<rc>:<cfg dir listing>"
+        # The listing must include 99-nocloud.cfg (our file), confirming we
+        # wrote to the correct partition. acl=<rc> reports Patch 4's exit
+        # code: 0 = acl baked in, non-zero = bake skipped (best-effort; the
+        # register play installs it at runtime instead).
         if ("$patchOut" -notmatch '^OK:') {
             throw "Unexpected patch output (expected OK:...): $patchOut"
         }
-        Write-Host "  cloud.cfg.d: $($patchOut -replace '^OK:[^:]+:','')"
+        $aclRc = if ("$patchOut" -match ':acl=([^:]+):') { $Matches[1] } else { '?' }
+        Write-Host "  cloud.cfg.d: $($patchOut -replace '^OK:[^:]+:acl=[^:]+:','')"
         Write-Host "  [OK] NoCloud datasource enabled in base image." `
             -ForegroundColor Green
+        if ($aclRc -eq '0') {
+            Write-Host "  [OK] acl package baked into base image." `
+                -ForegroundColor Green
+        } else {
+            # Non-fatal: boot-critical patches already applied. The runner
+            # register play's acl pre_task installs it at runtime instead.
+            Write-Warning (
+                "acl bake into base image failed (rc=$aclRc; likely WSL " +
+                "network). The register play will apt-install acl at runtime."
+            )
+        }
     }
     finally {
         wsl --unmount $physDrive 2>&1 | Out-Null

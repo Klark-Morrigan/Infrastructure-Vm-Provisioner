@@ -1471,7 +1471,7 @@ Infrastructure-VM-Provisioner/
 |     |  |  |  `- Select-VmsForProvisioning.ps1     # Pre-flight VM-existence and IP-conflict checks; dispatches the per-env preflight to Assert-EnvironmentConsistency before any per-VM classification
 |     |  |  |- disk/
 |     |  |  |  |- Invoke-DiskImageAcquisition.ps1  # Downloads, converts, caches base VHDX
-|     |  |  |  `- Invoke-BaseImagePatch.ps1        # Patches cloud-init datasource via WSL2
+|     |  |  |  `- Invoke-BaseImagePatch.ps1        # Patches base image via WSL2 (datasource, sshd order, netplan, acl)
 |     |  |  |- jdk/
 |     |  |  |  |- Resolve-AdoptiumRelease.ps1            # Resolves version granularity via Adoptium v3 API
 |     |  |  |  |- Invoke-JdkAcquisition.ps1              # Downloads + verifies tarball, writes lockfile pin
