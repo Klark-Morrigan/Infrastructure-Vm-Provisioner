@@ -1410,9 +1410,10 @@ scripts/run-ci-yaml-and-bash.sh              # or double-click scripts\run-ci-ya
 To run just one half:
 
 ```bash
-# Lint half only (shellcheck, actionlint, action-validator, yamllint,
-# ansible-lint). Distinct from the Pester runner Run-Tests.ps1; runs no
-# PowerShell tests.
+# Lint half only: the cross-cutting linters (shellcheck, actionlint,
+# action-validator, yamllint) via Common-Automation, then the composer
+# ansible-lint via Common-Ansible's controller venv. Distinct from the
+# Pester runner Run-Tests.ps1; runs no PowerShell tests.
 scripts/run-lint-yaml-and-bash.sh            # or double-click scripts\run-lint-yaml-and-bash.bat
 
 # Bats test half only.
@@ -1423,10 +1424,17 @@ scripts/run-tests-bash.sh                    # or double-click scripts\run-tests
 scripts/fix-permissions.sh     # or scripts\fix-permissions.bat
 ```
 
-All three runners are thin shims over Common-Automation's engine, pointed at
-this repo via the `COMMON_AUTOMATION_TARGET_REPO` env var, so a sibling
-checkout at `..\Common-Automation` is required. `.gitattributes` pins `*.sh`
-to LF and `*.bat` to CRLF - Linux CI runners reject CRLF shebangs.
+These runners delegate the cross-cutting linters and bats to Common-
+Automation's engine, pointed at this repo via the
+`COMMON_AUTOMATION_TARGET_REPO` env var, so a sibling checkout at
+`..\Common-Automation` is required. The lint runner additionally runs the
+composer ansible-lint through `scripts/run-lint-ansible.sh`, which reuses the
+shared Common-Ansible controller venv and puts the substrate roles on
+`ANSIBLE_ROLES_PATH` (so `jdk` / `dotnet_sdk` / `dotnet_tools` resolve) - so a
+sibling checkout at `..\Common-Ansible` with a bootstrapped `.venv` is
+required for that step (it auto-skips with a `::notice::` if absent).
+`.gitattributes` pins `*.sh` to LF and `*.bat` to CRLF - Linux CI runners
+reject CRLF shebangs.
 
 ---
 
@@ -1543,7 +1551,8 @@ Infrastructure-VM-Provisioner/
 |  |- Test-HostNetworkPreflight.ps1       # Manual entry point: host-side network sanity-check (Assert-HostNetworkPreflight)
 |  |- Get-VmRuntimeDiag.ps1               # Manual entry point: host + guest runtime diag snapshot (Invoke-VmRuntimeDiag)
 |  |- run-ci-yaml-and-bash.sh / run-ci-yaml-and-bash.bat              # MAIN local runner: full lint suite + bats tests (Common-Automation engine)
-|  |- run-lint-yaml-and-bash.sh / run-lint-yaml-and-bash.bat          # Lint half only (shellcheck, actionlint, action-validator, yamllint, ansible-lint)
+|  |- run-lint-yaml-and-bash.sh / run-lint-yaml-and-bash.bat          # Lint half only (cross-cutting linters via Common-Automation + composer ansible-lint)
+|  |- run-lint-ansible.sh                                             # Composer ansible-lint via the shared Common-Ansible controller venv
 |  |- run-tests-bash.sh / run-tests-bash.bat                          # Bats test half only
 |  `- fix-permissions.sh / fix-permissions.bat  # Re-stage +x on tracked *.sh via the shared engine
 `- README.md
