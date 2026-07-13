@@ -1,0 +1,27 @@
+# Ansible-domain CI gate for this repo, delegated to Common-Ansible's
+# reusable ci-ansible.yml (the re-homed ansible-lint gate that used to
+# live in Common-Automation's ci-yaml.yml, next to the controller venv
+# that pins its toolchain).
+#
+# This repo is a SUBSTRATE-ONLY COMPOSER: it ships NO roles of its own -
+# its single playbook
+# (hyper-v/ubuntu/Ansible/playbooks/provision-toolchains.yml) statically
+# import_roles the Common-Ansible substrate roles (jdk, dotnet_sdk,
+# dotnet_tools). Because those imports are static, ansible-lint's
+# syntax-check must resolve them, so this caller passes
+# composes-substrate-roles: true; the reusable workflow's substrate-
+# composer branch then puts the staged substrate roles/ on
+# ANSIBLE_ROLES_PATH so the roles resolve at lint time. The root
+# ansible.cfg shim exists only to stop the gate auto-skipping this repo
+# (see ansible.cfg for why it carries no roles_path of its own).
+name: Common-Ansible
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ci-ansible:
+    uses: Klark-Morrigan/Common-Ansible/.github/workflows/ci-ansible.yml@master
+    with:
+      composes-substrate-roles: true
