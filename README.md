@@ -1386,14 +1386,17 @@ Klark-Morrigan/Common-PowerShell/.github/workflows/ci-powershell.yml@master
 The shared workflow runs `scripts\Run-Tests.ps1` on PowerShell 7.
 No additional CI configuration is needed in this repo.
 
-Two more thin workflows lint the YAML and Bash surfaces by delegating to
-**Common-Automation**, so the lint config is single-sourced and cannot drift
-per repo:
+Thin workflows lint the YAML, Bash, and Ansible surfaces by delegating to a
+shared reusable workflow, so the lint config is single-sourced and cannot
+drift per repo. YAML/Bash come from **Common-Automation**; the Ansible gate
+comes from **Common-Ansible** (re-homed next to the controller venv that pins
+its ansible-lint toolchain):
 
-| Workflow | Runs |
-|---|---|
-| `.github/workflows/ci-yaml.yml` | actionlint, action-validator, yamllint, ansible-lint |
-| `.github/workflows/ci-bash.yml` | shellcheck, check-sh-executable, bats |
+| Workflow | Delegates to | Runs |
+|---|---|---|
+| `.github/workflows/ci-yaml.yml` | Common-Automation | actionlint, action-validator, yamllint |
+| `.github/workflows/ci-bash.yml` | Common-Automation | shellcheck, check-sh-executable, bats |
+| `.github/workflows/ci-ansible.yml` | Common-Ansible | ansible-lint (composer: substrate roles on path) |
 
 Each linter auto-skips when its surface is absent. To reproduce CI locally
 (Git Bash + Docker), use the main runner. It runs the full lint suite AND the
@@ -1436,7 +1439,8 @@ Infrastructure-VM-Provisioner/
 |  `- workflows/
 |     |- ci.yml             # Delegates to shared ci-powershell.yml in Common-PowerShell
 |     |- ci-yaml.yml        # Delegates to Common-Automation reusable ci-yaml.yml
-|     `- ci-bash.yml        # Delegates to Common-Automation reusable ci-bash.yml
+|     |- ci-bash.yml        # Delegates to Common-Automation reusable ci-bash.yml
+|     `- ci-ansible.yml     # Delegates to Common-Ansible reusable ci-ansible.yml (composer)
 |- hyper-v/
 |  `- ubuntu/
 |     |- shared/            # Slice: cross-impl vault writer both toolchains read
