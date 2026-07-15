@@ -29,6 +29,7 @@
   - [Toolchain engine (selecting the live path)](#toolchain-engine-selecting-the-live-path)
   - [Consuming Common-Ansible](#consuming-common-ansible)
   - [Acquire, verify, stage (the integrity gate)](#acquire-verify-stage-the-integrity-gate)
+  - [The toolchains taxonomy block (sections 2 and 3)](#the-toolchains-taxonomy-block-sections-2-and-3)
   - [Running the flow](#running-the-flow)
 - [CI](#ci)
 - [Repo structure](#repo-structure)
@@ -262,6 +263,7 @@ After first boot, connect via `ssh username@ipAddress`.
 | `dotnetTools`   | array?  | Optional. Installs .NET global tools system-wide on first boot. Requires `dotnetSdk` on the same VM. See [Optional: install .NET global tools](#optional-install-net-global-tools). |
 | `files`         | array?  | Optional. Copies arbitrary host files onto the VM. See [Optional: copy files to the VM](#optional-copy-files-to-the-vm). |
 | `envVars`       | object? | Optional. Writes a managed block of system-wide environment variables into `/etc/environment`. See [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables). |
+| `toolchains`    | object? | Optional. Section-2/3 acquisition taxonomy block (`vmDownloaded` apt packages, `baseImage` daemons). Read **only by the Ansible toolchain flow**, not the PowerShell reconciler. Not supported on `kind: router`. See [The toolchains taxonomy block](#the-toolchains-taxonomy-block-sections-2-and-3). |
 
 ### Optional: install a JDK
 
@@ -1245,13 +1247,19 @@ manually from `vhdPath` if it is no longer needed.
 
 ## Toolchain provisioning via Ansible (Common-Ansible)
 
-An Ansible-driven flow that installs the section-1 toolchains (JDK, .NET SDK,
-.NET global tools) onto already-provisioned VMs, using the reusable roles that
-live in the [Common-Ansible](https://github.com/Klark-Morrigan/Common-Ansible)
-substrate. It installs the toolchains authored in the `javaDevKit` /
-`dotnetSdk` / `dotnetTools` config fields documented above, per host. It is a
-**peer** to the in-repo PowerShell [reconciler](#reconciler) - the operator
-picks one (see [Toolchain engine](#toolchain-engine-selecting-the-live-path)).
+An Ansible-driven flow that installs toolchains onto already-provisioned VMs,
+using the reusable roles that live in the
+[Common-Ansible](https://github.com/Klark-Morrigan/Common-Ansible) substrate.
+It spans all three sections of the acquisition taxonomy: section 1 (host-pushed
+JDK / .NET SDK / .NET global tools, from the `javaDevKit` / `dotnetSdk` /
+`dotnetTools` config fields documented above), section 2 (VM-downloaded apt
+packages) and section 3 (the Docker daemon), the latter two from the
+[`toolchains` taxonomy block](#the-toolchains-taxonomy-block-sections-2-and-3).
+Every tool is installed per host. It is a **peer** to the in-repo PowerShell
+[reconciler](#reconciler) - the operator picks one (see
+[Toolchain engine](#toolchain-engine-selecting-the-live-path)); note the
+reconciler covers section 1 only, so a VM that needs section-2/3 tools must use
+the Ansible flow.
 The reusable roles are substrate and stay in Common-Ansible - only the "who
 gets what, on which box" wiring (the playbook, the acquire/verify/stage step,
 and the operator wrappers) lives here, in the consumer that owns the estate's
@@ -1279,9 +1287,10 @@ through Infrastructure-E2E.
 
 The flow lives under `hyper-v/ubuntu/Ansible/`:
 
-- `playbooks/provision-toolchains.yml` - composes the substrate `jdk`,
-  `dotnet_sdk`, and `dotnet_tools` roles against every host in the fleet
-  inventory.
+- `playbooks/provision-toolchains.yml` - composes the substrate roles against
+  every host in the fleet inventory, one per taxonomy section: `jdk` ->
+  `dotnet_sdk` -> `dotnet_tools` (section 1), `toolchain_apt` (section 2), and
+  `docker` (section 3, gated on a `docker` entry in the host's `baseImage`).
 - `ops/provision-toolchains.sh` - the operator entry point.
 - `ops/_stage-toolchain-artifacts.sh` + `ops/Stage-ToolchainArtifacts.ps1` -
   the acquire/verify/stage step (below).
@@ -1354,6 +1363,45 @@ entry by `inventory_hostname` (the bridge keys inventory hosts by vmName). A
 host absent from the map installs nothing. The stage step de-duplicates the
 staged artifact set, so a build shared by several hosts is fetched and verified
 once. The projection lives in `ops/ConvertTo-PerVmToolchainConfig.ps1`.
+
+### The toolchains taxonomy block (sections 2 and 3)
+
+Sections 2 and 3 need no host-side acquire/verify/stage - the VM pulls apt
+packages from its own archive and Docker from Docker's repo - so they bypass
+the staging channel entirely. They are declared in an optional `toolchains`
+block on the VM's config entry and dispatched straight into their roles by the
+playbook, which selects the block off `vm_provisioner_config` by matching
+`vmName` to `inventory_hostname`. The block's outer shape (only the three known
+section keys, each a list) is validated by the substrate at the point it is
+surfaced; each role validates its own entries. For example, `ubuntu-02-ci`
+declares the `ci-bash` toolchain its self-hosted runner needs:
+
+```json
+"toolchains": {
+  "vmDownloaded": [
+    { "name": "shellcheck", "version": "0.9.0-1"  },
+    { "name": "bats",       "version": "1.10.0-1" }
+  ],
+  "baseImage": [
+    { "name": "docker" }
+  ]
+}
+```
+
+- `vmDownloaded` (section 2) maps 1:1 to `toolchain_apt`'s package list -
+  `{ name, version }` per apt package, the `version` an exact apt pin.
+- `baseImage` (section 3) is a **presence gate**, not a version list: a
+  `docker` entry switches on the `docker` role (a whole-daemon install), which
+  installs and starts the engine.
+
+**Docker group membership is set elsewhere.** This flow installs the daemon but
+leaves `docker_group_members` empty on purpose: the runner service user
+(`runnerUsername`) is owned by the GitHubRunners config, not this provisioner
+secret, so GitHubRunners adds its runner user to the `docker` group in its own
+flow (group membership is additive). Keeping the socket-access grant with the
+repo that knows the user preserves the separation of concerns; a member of the
+`docker` group is root-equivalent on the host, so that grant belongs to the
+narrowest owner.
 
 ### Running the flow
 
