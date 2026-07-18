@@ -1373,8 +1373,10 @@ block on the VM's config entry and dispatched straight into their roles by the
 playbook, which selects the block off `vm_provisioner_config` by matching
 `vmName` to `inventory_hostname`. The block's outer shape (only the three known
 section keys, each a list) is validated by the substrate at the point it is
-surfaced; each role validates its own entries. For example, `ubuntu-02-ci`
-declares the `ci-bash` toolchain its self-hosted runner needs:
+surfaced; each role validates its own entries. The production `ubuntu-02-ci`
+runner carries exactly this block in its `VmProvisionerConfig-Production` entry,
+declaring the `ci-bash` toolchain (shellcheck + bats) plus the Docker daemon its
+self-hosted runner needs:
 
 ```json
 "toolchains": {
