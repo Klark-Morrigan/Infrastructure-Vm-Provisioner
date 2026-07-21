@@ -1,21 +1,41 @@
 ---
 # Operator-facing entry into the toolchain provisioning flow. Composes the
-# reusable Common-Ansible substrate roles (jdk -> dotnet_sdk ->
-# dotnet_tools) against every host the bash bridge dropped into the
-# vm_provisioner_hosts inventory group. This playbook and its wrapper are
-# the consumer half of plan step 5.5; the roles themselves are substrate
-# (Common-Ansible roles/jdk, roles/dotnet_sdk, roles/dotnet_tools) and are
-# resolved from the sibling checkout via ANSIBLE_ROLES_PATH.
+# reusable Common-Ansible substrate roles against every host the bash bridge
+# dropped into the vm_provisioner_hosts inventory group, one role per section
+# of the three-section acquisition taxonomy:
+#   section 1 (host-pushed)   jdk -> dotnet_sdk -> dotnet_tools
+#   section 2 (vm-downloaded) toolchain_apt
+#   section 3 (base-image)    docker
+# This playbook and its wrapper are the consumer half of plan step 5.5; the
+# roles themselves are substrate (Common-Ansible roles/*) resolved from the
+# sibling checkout via ANSIBLE_ROLES_PATH.
 #
-# Toolchains are targeted PER HOST. The acquire/verify/stage step forwards a
-# single play-wide --extra-vars dict `toolchains_resolved_by_host`, keyed by
-# vmName (which the bridge also uses as inventory_hostname). The play `vars:`
-# below select THIS host's entry by inventory_hostname into jdk_versions /
-# dotnet_sdk_versions / dotnet_tools_tools, so each host installs only what its
-# own VM definition asked for. Those values are the CONCRETE, pinned versions
-# the stage step resolved and staged - not the operator's loose pins - so the
-# target's install-time re-resolve lands on exactly the build that was verified
-# and staged. A host absent from the dict installs nothing (empty defaults).
+# Toolchains are targeted PER HOST, from two different desired-state channels:
+#
+# - Section 1 rides `toolchains_resolved_by_host` - the acquire/verify/stage
+#   step's single play-wide --extra-vars dict, keyed by vmName (which the
+#   bridge also uses as inventory_hostname). The play `vars:` below select THIS
+#   host's entry into jdk_versions / dotnet_sdk_versions / dotnet_tools_tools.
+#   Those are the CONCRETE, pinned versions staging resolved and verified - not
+#   the operator's loose pins - so the target's install-time re-resolve lands
+#   on exactly the build that was staged. A host absent from the dict installs
+#   nothing (empty defaults).
+#
+# - Sections 2 and 3 read the raw `toolchains` taxonomy block straight off the
+#   per-VM config (`vm_provisioner_config`, surfaced whole by the bridge's
+#   always-on inventory fragment). apt packages and the docker daemon need no
+#   host-side acquire/verify/stage - the VM pulls them from its own apt archive
+#   and Docker's repo - so they bypass the staging channel and dispatch by
+#   section: `toolchains.vmDownloaded` -> toolchain_apt_packages, and the
+#   presence of a docker entry in `toolchains.baseImage` gates the docker role.
+#
+# BOUNDARY - docker group membership is deliberately NOT set here. This flow
+# installs and starts the daemon (section 3) but leaves docker_group_members
+# empty, because the runner service user (runnerUsername) is owned by the
+# GitHubRunners config, not this provisioner secret. GitHubRunners adds its
+# runner user to the docker group in its own flow (membership is additive), so
+# the socket-access grant stays with the repo that knows the user.
+#
 # host_file_server_base_url is threaded in by the bridge's always-on inventory
 # extra-vars fragment.
 #
@@ -48,15 +68,35 @@
   gather_facts: false
   any_errors_fatal: false
   vars:
-    # This host's slice of the per-host resolved map, then its three role
-    # vars. Play vars are templated per host, so inventory_hostname resolves
-    # to each host in turn; an absent host defaults to installing nothing.
-    _host_toolchains: >-
+    # Section-1 desired-state: this host's slice of the per-host resolved map.
+    # Play vars are templated per host, so inventory_hostname resolves to each
+    # host in turn; an absent host defaults to installing nothing.
+    _host_resolved: >-
       {{ (toolchains_resolved_by_host | default({}))[inventory_hostname]
          | default({}) }}
-    jdk_versions: "{{ _host_toolchains.jdk_versions | default([]) }}"
-    dotnet_sdk_versions: "{{ _host_toolchains.dotnet_sdk_versions | default([]) }}"
-    dotnet_tools_tools: "{{ _host_toolchains.dotnet_tools_tools | default([]) }}"
+    jdk_versions: "{{ _host_resolved.jdk_versions | default([]) }}"
+    dotnet_sdk_versions: "{{ _host_resolved.dotnet_sdk_versions | default([]) }}"
+    dotnet_tools_tools: "{{ _host_resolved.dotnet_tools_tools | default([]) }}"
+
+    # Sections 2/3 desired-state: this host's own config entry, selected out of
+    # the whole-config array by matching vmName to the inventory_hostname the
+    # bridge keyed the host by. A host with no matching definition yields {}.
+    _host_config: >-
+      {{ (vm_provisioner_config | default([]))
+         | selectattr('vmName', 'equalto', inventory_hostname)
+         | first | default({}) }}
+    # Its raw `toolchains` taxonomy block; absent (or an entry without one)
+    # yields {} - install nothing. Read off the entry rather than via
+    # map(attribute=) so a VM lacking the key defaults cleanly instead of
+    # raising on the missing attribute.
+    _host_taxonomy: "{{ _host_config.toolchains | default({}) }}"
+    # Section 2 (vm-downloaded) dispatches straight into the apt role's var;
+    # the {name, version} entry shape matches toolchain_apt_packages 1:1.
+    toolchain_apt_packages: "{{ _host_taxonomy.vmDownloaded | default([]) }}"
+    # Section 3 (base-image) is a presence gate, not a version list: the docker
+    # role is a whole daemon install, so a `docker` entry in baseImage switches
+    # it on rather than parameterizing it.
+    _host_base_image: "{{ _host_taxonomy.baseImage | default([]) }}"
   tasks:
     - name: Reconcile the JDK toolchain
       ansible.builtin.import_role:
@@ -72,3 +112,24 @@
       ansible.builtin.import_role:
         name: dotnet_tools
       tags: dotnet_tools
+
+    # Section 2: apt packages the VM pulls itself (shellcheck, bats). Always
+    # included - it is a no-op with an empty toolchain_apt_packages, so config
+    # alone decides whether anything installs.
+    - name: Reconcile the vm-downloaded (apt) toolchain
+      ansible.builtin.import_role:
+        name: toolchain_apt
+      tags: toolchain_apt
+
+    # Section 3: the Docker daemon. Gated on a `docker` entry in baseImage so a
+    # host that did not ask for it pays no apt-repo/service cost. Dynamic
+    # include so the gate is one evaluation, not a per-task when. Group
+    # membership is intentionally left to GitHubRunners (see the header
+    # BOUNDARY note).
+    - name: Reconcile the Docker daemon (base-image toolchain)
+      ansible.builtin.include_role:
+        name: docker
+      when: >-
+        _host_base_image
+        | selectattr('name', 'equalto', 'docker') | list | length > 0
+      tags: docker
