@@ -4,7 +4,7 @@
 # dropped into the vm_provisioner_hosts inventory group, one role per section
 # of the three-section acquisition taxonomy:
 #   section 1 (host-pushed)   jdk -> dotnet_sdk -> dotnet_tools
-#   section 2 (vm-downloaded) toolchain_apt
+#   section 2 (vm-downloaded) toolchain_apt + toolchain_bats_libs
 #   section 3 (base-image)    docker
 # This playbook and its wrapper are the consumer half of plan step 5.5; the
 # roles themselves are substrate (Common-Ansible roles/*) resolved from the
@@ -23,11 +23,13 @@
 #
 # - Sections 2 and 3 read the raw `toolchains` taxonomy block straight off the
 #   per-VM config (`vm_provisioner_config`, surfaced whole by the bridge's
-#   always-on inventory fragment). apt packages and the docker daemon need no
-#   host-side acquire/verify/stage - the VM pulls them from its own apt archive
-#   and Docker's repo - so they bypass the staging channel and dispatch by
-#   section: `toolchains.vmDownloaded` -> toolchain_apt_packages, and the
-#   presence of a docker entry in `toolchains.baseImage` gates the docker role.
+#   always-on inventory fragment). apt packages, bats libraries, and the docker
+#   daemon need no host-side acquire/verify/stage - the VM pulls them from its
+#   own apt archive, GitHub, and Docker's repo - so they bypass the staging
+#   channel and dispatch by section: `toolchains.vmDownloaded.apt` ->
+#   toolchain_apt_packages and `toolchains.vmDownloaded.batsLibs` ->
+#   toolchain_bats_libs_packages, and the presence of a docker entry in
+#   `toolchains.baseImage` gates the docker role.
 #
 # BOUNDARY - docker group membership is deliberately NOT set here. This flow
 # installs and starts the daemon (section 3) but leaves docker_group_members
@@ -90,9 +92,18 @@
     # map(attribute=) so a VM lacking the key defaults cleanly instead of
     # raising on the missing attribute.
     _host_taxonomy: "{{ _host_config.toolchains | default({}) }}"
-    # Section 2 (vm-downloaded) dispatches straight into the apt role's var;
-    # the {name, version} entry shape matches toolchain_apt_packages 1:1.
-    toolchain_apt_packages: "{{ _host_taxonomy.vmDownloaded | default([]) }}"
+    # Section 2 (vm-downloaded) is split by install mechanism: apt packages
+    # and bats helper libraries. Each sub-list dispatches into its own role's
+    # var, both defaulting to [] so a host omitting a mechanism (or the whole
+    # vmDownloaded block) installs nothing there. The vmDownloaded default is
+    # {} first, so a host with no vmDownloaded key does not raise on the
+    # sub-key lookup.
+    _host_vm_downloaded: "{{ _host_taxonomy.vmDownloaded | default({}) }}"
+    # apt entries match toolchain_apt_packages 1:1 ({name, version}).
+    toolchain_apt_packages: "{{ _host_vm_downloaded.apt | default([]) }}"
+    # batsLibs entries match toolchain_bats_libs_packages 1:1 ({name,
+    # version}); these are GitHub-tarball libraries apt cannot serve.
+    toolchain_bats_libs_packages: "{{ _host_vm_downloaded.batsLibs | default([]) }}"
     # Section 3 (base-image) is a presence gate, not a version list: the docker
     # role is a whole daemon install, so a `docker` entry in baseImage switches
     # it on rather than parameterizing it.
@@ -113,13 +124,24 @@
         name: dotnet_tools
       tags: dotnet_tools
 
-    # Section 2: apt packages the VM pulls itself (shellcheck, bats). Always
-    # included - it is a no-op with an empty toolchain_apt_packages, so config
-    # alone decides whether anything installs.
+    # Section 2, mechanism apt: packages the VM pulls itself (shellcheck, the
+    # bats binary). Always included - it is a no-op with an empty
+    # toolchain_apt_packages, so config alone decides whether anything installs.
     - name: Reconcile the vm-downloaded (apt) toolchain
       ansible.builtin.import_role:
         name: toolchain_apt
       tags: toolchain_apt
+
+    # Section 2, mechanism batsLibs: bats helper libraries (bats-support,
+    # bats-assert, ...) fetched from GitHub tag tarballs, which apt cannot
+    # serve. Baked once here, as the privileged deploy user, so the
+    # unprivileged CI runner user consumes them read-only with no per-run
+    # sudo (the failure mode of bats-action installing them itself). Always
+    # included - a no-op with an empty toolchain_bats_libs_packages.
+    - name: Reconcile the vm-downloaded (bats libraries) toolchain
+      ansible.builtin.import_role:
+        name: toolchain_bats_libs
+      tags: toolchain_bats_libs
 
     # Section 3: the Docker daemon. Gated on a `docker` entry in baseImage so a
     # host that did not ask for it pays no apt-repo/service cost. Dynamic

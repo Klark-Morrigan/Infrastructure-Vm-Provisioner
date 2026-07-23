@@ -263,7 +263,7 @@ After first boot, connect via `ssh username@ipAddress`.
 | `dotnetTools`   | array?  | Optional. Installs .NET global tools system-wide on first boot. Requires `dotnetSdk` on the same VM. See [Optional: install .NET global tools](#optional-install-net-global-tools). |
 | `files`         | array?  | Optional. Copies arbitrary host files onto the VM. See [Optional: copy files to the VM](#optional-copy-files-to-the-vm). |
 | `envVars`       | object? | Optional. Writes a managed block of system-wide environment variables into `/etc/environment`. See [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables). |
-| `toolchains`    | object? | Optional. Section-2/3 acquisition taxonomy block (`vmDownloaded` apt packages, `baseImage` daemons). Read **only by the Ansible toolchain flow**, not the PowerShell reconciler. Not supported on `kind: router`. See [The toolchains taxonomy block](#the-toolchains-taxonomy-block-sections-2-and-3). |
+| `toolchains`    | object? | Optional. Section-2/3 acquisition taxonomy block (`vmDownloaded.apt` packages, `vmDownloaded.batsLibs` bats libraries, `baseImage` daemons). Read **only by the Ansible toolchain flow**, not the PowerShell reconciler. Not supported on `kind: router`. See [The toolchains taxonomy block](#the-toolchains-taxonomy-block-sections-2-and-3). |
 
 ### Optional: install a JDK
 
@@ -1380,18 +1380,31 @@ self-hosted runner needs:
 
 ```json
 "toolchains": {
-  "vmDownloaded": [
-    { "name": "shellcheck", "version": "0.9.0-1"  },
-    { "name": "bats",       "version": "1.10.0-1" }
-  ],
+  "vmDownloaded": {
+    "apt": [
+      { "name": "shellcheck", "version": "0.9.0-1"  },
+      { "name": "bats",       "version": "1.10.0-1" }
+    ],
+    "batsLibs": [
+      { "name": "bats-support", "version": "0.3.0" },
+      { "name": "bats-assert",  "version": "2.1.0" }
+    ]
+  },
   "baseImage": [
     { "name": "docker" }
   ]
 }
 ```
 
-- `vmDownloaded` (section 2) maps 1:1 to `toolchain_apt`'s package list -
-  `{ name, version }` per apt package, the `version` an exact apt pin.
+- `vmDownloaded` (section 2) is split by install **mechanism** into two
+  sub-lists, each `{ name, version }` per entry:
+  - `apt` maps 1:1 to `toolchain_apt`'s package list - distro packages
+    (shellcheck, the bats binary), the `version` an exact apt pin.
+  - `batsLibs` maps 1:1 to `toolchain_bats_libs`'s library list - bats
+    helper libraries fetched from GitHub tag tarballs, the `version` a tag
+    without the leading `v`. apt cannot serve these; baking them here lets
+    the self-hosted runner's CI user load them without the per-run sudo
+    `bats-action` would otherwise need.
 - `baseImage` (section 3) is a **presence gate**, not a version list: a
   `docker` entry switches on the `docker` role (a whole-daemon install), which
   installs and starts the engine.
