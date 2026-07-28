@@ -3,7 +3,7 @@
 # reusable Common-Ansible substrate roles against every host the bash bridge
 # dropped into the vm_provisioner_hosts inventory group, one role per section
 # of the three-section acquisition taxonomy:
-#   section 1 (host-pushed)   jdk -> dotnet_sdk -> dotnet_tools
+#   section 1 (host-pushed)   jdk -> dotnet_sdk -> dotnet_tools, powershell
 #   section 2 (vm-downloaded) toolchain_apt + toolchain_bats_libs
 #   section 3 (base-image)    docker
 # This playbook and its wrapper are the consumer half of plan step 5.5; the
@@ -15,11 +15,14 @@
 # - Section 1 rides `toolchains_resolved_by_host` - the acquire/verify/stage
 #   step's single play-wide --extra-vars dict, keyed by vmName (which the
 #   bridge also uses as inventory_hostname). The play `vars:` below select THIS
-#   host's entry into jdk_versions / dotnet_sdk_versions / dotnet_tools_tools.
+#   host's entry into jdk_versions / dotnet_sdk_versions / dotnet_tools_tools /
+#   powershell_versions.
 #   Those are the CONCRETE, pinned versions staging resolved and verified - not
 #   the operator's loose pins - so the target's install-time re-resolve lands
 #   on exactly the build that was staged. A host absent from the dict installs
-#   nothing (empty defaults).
+#   nothing (empty defaults). For powershell the concrete pin is not merely an
+#   optimisation: that role composes its archive name from the version and
+#   rejects a loose pin outright, so staging's resolution is its only input.
 #
 # - Sections 2 and 3 read the raw `toolchains` taxonomy block straight off the
 #   per-VM config (`vm_provisioner_config`, surfaced whole by the bridge's
@@ -42,7 +45,8 @@
 # extra-vars fragment.
 #
 # Role order is significant on the INSTALL direction this playbook drives:
-# - jdk is independent and runs first.
+# - jdk and powershell are independent of everything else; jdk runs first and
+#   powershell last within section 1, but neither position is load-bearing.
 # - dotnet_sdk before dotnet_tools: the tools role needs the `dotnet`
 #   driver the SDK role installs (/usr/local/bin/dotnet) on PATH before any
 #   `dotnet tool` operation. The symmetric teardown ordering (tools before
@@ -79,6 +83,7 @@
     jdk_versions: "{{ _host_resolved.jdk_versions | default([]) }}"
     dotnet_sdk_versions: "{{ _host_resolved.dotnet_sdk_versions | default([]) }}"
     dotnet_tools_tools: "{{ _host_resolved.dotnet_tools_tools | default([]) }}"
+    powershell_versions: "{{ _host_resolved.powershell_versions | default([]) }}"
 
     # Sections 2/3 desired-state: this host's own config entry, selected out of
     # the whole-config array by matching vmName to the inventory_hostname the
@@ -123,6 +128,16 @@
       ansible.builtin.import_role:
         name: dotnet_tools
       tags: dotnet_tools
+
+    # PowerShell, the interpreter the ci-dotnet composite actions declare via
+    # `shell: pwsh`. Independent of the .NET roles despite the adjacency: it
+    # ships as a self-contained tarball carrying its own runtime, so it needs
+    # neither the SDK nor any ordering against it. Placed after them purely to
+    # keep the section-1 block contiguous.
+    - name: Reconcile the PowerShell toolchain
+      ansible.builtin.import_role:
+        name: powershell
+      tags: powershell
 
     # Section 2, mechanism apt: packages the VM pulls itself (shellcheck, the
     # bats binary). Always included - it is a no-op with an empty

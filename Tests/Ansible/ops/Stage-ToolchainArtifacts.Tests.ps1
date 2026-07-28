@@ -175,4 +175,107 @@ Describe 'Stage-ToolchainArtifacts' {
             ($out -join "`n") | Should -Match 'RESOLVED_CONFIG='
         }
     }
+
+    Context 'PowerShell staging (a loose pwsh pin)' {
+        BeforeEach {
+            # One PowerShell pin desired, deliberately LOOSE ('7.6'). The
+            # powershell role composes its archive name from whatever version
+            # it is handed and rejects anything but major.minor.patch, so the
+            # concrete pin this step writes is the only thing that makes the
+            # role's pull resolvable.
+            Mock Read-ToolchainDesiredState {
+                [pscustomobject]@{
+                    'node-01' = [pscustomobject]@{
+                        jdk_versions        = @()
+                        dotnet_sdk_versions = @()
+                        dotnet_tools_tools  = @()
+                        powershell_versions = @('7.6')
+                    }
+                }
+            }
+            Mock Resolve-PowerShellRelease {
+                @{
+                    ResolvedVersion = '7.6.4'
+                    Sha256          = 'EXPECTEDHASH'
+                    DownloadUrl     = 'https://example.invalid/powershell-7.6.4-linux-x64.tar.gz'
+                    ArchiveName     = 'powershell-7.6.4-linux-x64.tar.gz'
+                }
+            }
+            Mock New-Item {}
+            Mock Test-Path { $false }   # no cache hit
+            Mock Invoke-WebRequest {}
+            Mock Remove-Item {}
+            Mock Set-Content {}
+        }
+
+        It 'stages under the archive name the role re-derives, and pins the concrete version' {
+            Mock Get-FileHash { [pscustomobject]@{ Hash = 'EXPECTEDHASH' } }
+
+            $null = Invoke-ToolchainStaging `
+                -ConfigPath        'ignored-mocked' `
+                -StagingDirectory  'TestDrive:\staging' `
+                -ResolvedConfigOut 'TestDrive:\resolved.json'
+
+            Should -Invoke Resolve-PowerShellRelease -Times 1 -ParameterFilter {
+                $Version -eq '7.6'
+            }
+            # The staged filename must be exactly what the role composes from
+            # the pinned version - a mismatch here is a 404 at converge.
+            Should -Invoke Invoke-WebRequest -Times 1 -ParameterFilter {
+                $OutFile -like '*powershell-7.6.4-linux-x64.tar.gz'
+            }
+            # The resolved document carries the CONCRETE 7.6.4, never the
+            # operator's loose '7.6' - which the role would reject outright.
+            Should -Invoke Set-Content -Times 1 -ParameterFilter {
+                $Value -like '*powershell_versions*' -and
+                $Value -like '*node-01*' -and
+                $Value -like '*7.6.4*'
+            }
+        }
+
+        # The PowerShell tarball reaches the target unverified (the role pulls
+        # by name and trusts the file server), so this is the only checksum
+        # gate in the whole path.
+        It 'throws and stages nothing when the download hash does not match' {
+            Mock Get-FileHash { [pscustomobject]@{ Hash = 'TAMPEREDHASH' } }
+
+            {
+                Invoke-ToolchainStaging `
+                    -ConfigPath        'ignored-mocked' `
+                    -StagingDirectory  'TestDrive:\staging' `
+                    -ResolvedConfigOut 'TestDrive:\resolved.json'
+            } | Should -Throw '*checksum mismatch*'
+
+            Should -Invoke Remove-Item -Times 1 -Exactly
+            Should -Not -Invoke Set-Content
+        }
+
+        It 'resolves a pin shared by several hosts only once' {
+            Mock Get-FileHash { [pscustomobject]@{ Hash = 'EXPECTEDHASH' } }
+            Mock Read-ToolchainDesiredState {
+                $entry = {
+                    [pscustomobject]@{
+                        jdk_versions        = @()
+                        dotnet_sdk_versions = @()
+                        dotnet_tools_tools  = @()
+                        powershell_versions = @('7.6')
+                    }
+                }
+                [pscustomobject]@{
+                    'node-01' = (& $entry)
+                    'node-02' = (& $entry)
+                }
+            }
+
+            $null = Invoke-ToolchainStaging `
+                -ConfigPath        'ignored-mocked' `
+                -StagingDirectory  'TestDrive:\staging' `
+                -ResolvedConfigOut 'TestDrive:\resolved.json'
+
+            # Memoized across hosts: one upstream metadata round trip, not one
+            # per host. api.github.com allows 60 unauthenticated calls an hour,
+            # so this matters at fleet scale.
+            Should -Invoke Resolve-PowerShellRelease -Times 1 -Exactly
+        }
+    }
 }

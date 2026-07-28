@@ -12,15 +12,18 @@
     from the resolved map this function seeds. So the projection is per host,
     NOT a fleet union:
 
-        per-VM { javaDevKit, dotnetSdk, dotnetTools }
+        per-VM { javaDevKit, dotnetSdk, dotnetTools, powershell }
             -> { <vmName>: { jdk_versions, dotnet_sdk_versions,
-                            dotnet_tools_tools }, ... }
+                            dotnet_tools_tools, powershell_versions }, ... }
 
     Rules:
       - javaDevKit {vendor,version} (scalar or 1-list) contributes its bare
         `version` to that host's jdk_versions. The vendor is dropped because
         the jdk role hardcodes temurin (the only vendor the config validator
         accepts), so carrying it would be dead data.
+      - powershell {version} (scalar or 1-list) likewise contributes its bare
+        `version` to that host's powershell_versions. There is no vendor
+        sub-field to drop - Microsoft is the only publisher.
       - dotnetSdk {channel,version} and dotnetTools {id,version} entries match
         the role-var entry shapes 1:1 and pass through verbatim.
       - null / [] / an absent field contributes nothing for that host.
@@ -42,7 +45,7 @@
 .OUTPUTS
     A PSCustomObject whose property names are vmNames and whose values are
     { jdk_versions (string[]), dotnet_sdk_versions ({channel,version}[]),
-    dotnet_tools_tools ({id,version}[]) }.
+    dotnet_tools_tools ({id,version}[]), powershell_versions (string[]) }.
 #>
 function ConvertTo-PerVmToolchainConfig {
     [CmdletBinding()]
@@ -72,6 +75,8 @@ function ConvertTo-PerVmToolchainConfig {
         $sdkSeen  = [System.Collections.Generic.HashSet[string]]::new()
         $tools    = [System.Collections.Generic.List[object]]::new()
         $toolSeen = [System.Collections.Generic.HashSet[string]]::new()
+        $pwsh     = [System.Collections.Generic.List[string]]::new()
+        $pwshSeen = [System.Collections.Generic.HashSet[string]]::new()
 
         foreach ($entry in (Get-VmToolchainFieldEntries -Vm $vm -FieldName 'javaDevKit')) {
             $version = [string]$entry.version
@@ -95,9 +100,16 @@ function ConvertTo-PerVmToolchainConfig {
             }
         }
 
+        foreach ($entry in (Get-VmToolchainFieldEntries -Vm $vm -FieldName 'powershell')) {
+            $version = [string]$entry.version
+            if ([string]::IsNullOrWhiteSpace($version)) { continue }
+            if ($pwshSeen.Add($version)) { $pwsh.Add($version) }
+        }
+
         # A VM with no toolchains at all is omitted; the playbook defaults an
         # absent host to "install nothing".
-        if ($jdk.Count -eq 0 -and $sdk.Count -eq 0 -and $tools.Count -eq 0) {
+        if ($jdk.Count -eq 0 -and $sdk.Count -eq 0 -and
+            $tools.Count -eq 0 -and $pwsh.Count -eq 0) {
             continue
         }
 
@@ -105,6 +117,7 @@ function ConvertTo-PerVmToolchainConfig {
             jdk_versions        = $jdk.ToArray()
             dotnet_sdk_versions = $sdk.ToArray()
             dotnet_tools_tools  = $tools.ToArray()
+            powershell_versions = $pwsh.ToArray()
         }
     }
 
@@ -117,8 +130,9 @@ function ConvertTo-PerVmToolchainConfig {
     entry objects, absorbing the scalar-or-list and null/[]/absent shapes.
 
 .DESCRIPTION
-    The config schema lets javaDevKit / dotnetSdk arrive as a single object OR
-    a one-element list, and any of the three fields may be null, [], or absent.
+    The config schema lets javaDevKit / dotnetSdk / powershell arrive as a
+    single object OR a one-element list, and any of the four fields may be
+    null, [], or absent.
     This collapses all of that to a plain array the caller iterates: a scalar
     becomes a one-element array, a list stays as-is, and null/[]/absent become
     an empty array. The ,@(...) wrap preserves array shape across the return so

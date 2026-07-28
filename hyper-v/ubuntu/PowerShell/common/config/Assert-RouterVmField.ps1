@@ -79,10 +79,10 @@
 #     point here rather than repeating it.
 #
 #   Rejected:
-#     - javaDevKit, dotnetSdk, dotnetTools - a router VM is intentionally
-#       minimal (nftables + dnsmasq only). Surfacing the rejection at
-#       schema-time keeps a stray toolchain entry from silently flowing
-#       through reconcile and installing a JDK on the gateway.
+#     - javaDevKit, dotnetSdk, dotnetTools, powershell - a router VM is
+#       intentionally minimal (nftables + dnsmasq only). Surfacing the
+#       rejection at schema-time keeps a stray toolchain entry from silently
+#       flowing through reconcile and installing a JDK on the gateway.
 # ---------------------------------------------------------------------------
 
 function Assert-RouterVmField {
@@ -168,7 +168,7 @@ function Assert-RouterVmField {
         }
     }
 
-    foreach ($field in @('javaDevKit', 'dotnetSdk', 'dotnetTools')) {
+    foreach ($field in @('javaDevKit', 'dotnetSdk', 'dotnetTools', 'powershell')) {
         if ($Vm.PSObject.Properties[$field]) {
             throw (
                 "${ctx} cannot declare '$field'. Router VMs are " +

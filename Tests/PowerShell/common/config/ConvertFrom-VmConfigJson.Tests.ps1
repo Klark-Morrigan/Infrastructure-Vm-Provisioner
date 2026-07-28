@@ -291,6 +291,38 @@ Describe 'ConvertFrom-VmConfigJson' {
     }
 
     # ------------------------------------------------------------------
+    Context 'Assert-PowerShellField wiring' {
+    # ------------------------------------------------------------------
+
+        It 'invokes Assert-PowerShellField once per VM' {
+            # Wiring-only check. Behaviour cases for the validator itself
+            # live in Assert-PowerShellField.Tests.ps1 - duplicating them
+            # here would couple the caller's tests to its callee's rules.
+            Mock Assert-PowerShellField {}
+            $json = "[$(New-ValidVmJson 'node-01'), $(New-ValidVmJson 'node-02')]"
+            @(ConvertFrom-VmConfigJson -Json $json)
+            Should -Invoke Assert-PowerShellField -Times 2 -Exactly
+        }
+
+        It 'propagates a throw from Assert-PowerShellField' {
+            Mock Assert-PowerShellField { throw "powershell.version is not a recognised granularity" }
+            { ConvertFrom-VmConfigJson -Json "[$(New-ValidVmJson)]" } |
+                Should -Throw -ExpectedMessage "*powershell*"
+        }
+
+        It 'passes a VM with a powershell entry end-to-end' {
+            # End-to-end through the real validator (no mock). PowerShell
+            # ships self-contained, so unlike dotnetTools it needs no
+            # companion field - a lone powershell entry must parse.
+            $core   = (New-ValidVmJson) -replace '\}\s*$', ''
+            $extras = ', "powershell": { "version": "7.6.4" }'
+            $result = @(ConvertFrom-VmConfigJson -Json "[$core$extras }]")
+            $result | Should -HaveCount 1
+            $result[0].powershell.version | Should -Be '7.6.4'
+        }
+    }
+
+    # ------------------------------------------------------------------
     Context 'Assert-VmFilesField wiring (Infrastructure.HyperV)' {
     # ------------------------------------------------------------------
 
