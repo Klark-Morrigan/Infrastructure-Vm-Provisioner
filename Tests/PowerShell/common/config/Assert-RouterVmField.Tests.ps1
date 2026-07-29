@@ -186,5 +186,13 @@ Describe 'Assert-RouterVmField' {
             { Assert-RouterVmField -Vm $vm } |
                 Should -Throw -ExpectedMessage "*dotnetTools*"
         }
+
+        It 'throws when powershell is present' {
+            $vm = New-RouterVm
+            $vm | Add-Member -MemberType NoteProperty -Name powershell `
+                  -Value ([PSCustomObject]@{ version = '7.6.4' })
+            { Assert-RouterVmField -Vm $vm } |
+                Should -Throw -ExpectedMessage "*powershell*"
+        }
     }
 }

@@ -14,6 +14,7 @@
 . "$PSScriptRoot\Assert-JavaDevKitField.ps1"
 . "$PSScriptRoot\Assert-DotnetSdkField.ps1"
 . "$PSScriptRoot\Assert-DotnetToolsField.ps1"
+. "$PSScriptRoot\Assert-PowerShellField.ps1"
 . "$PSScriptRoot\Assert-RouterVmField.ps1"
 . "$PSScriptRoot\Assert-WorkloadVmField.ps1"
 
@@ -137,6 +138,10 @@ function ConvertFrom-VmConfigJson {
         # dotnetSdk and only fires for genuine cross-field violations
         # rather than masking a malformed SDK declaration.
         Assert-DotnetToolsField -Vm $vm
+        # Independent of the .NET fields: PowerShell ships as a
+        # self-contained tarball, so it needs no SDK on the same VM and
+        # carries no cross-field rule.
+        Assert-PowerShellField -Vm $vm
         Assert-VmFilesField `
             -Vm                $vm `
             -AllowBulkEntries `

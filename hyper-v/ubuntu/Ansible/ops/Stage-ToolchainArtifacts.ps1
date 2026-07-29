@@ -15,9 +15,10 @@
       1. resolves the operator's loose pin against upstream into a concrete
          { resolved version, archive name, checksum, download URL } - reusing
          the reconciler's own pure resolvers so resolution stays one source
-         of truth (Resolve-AdoptiumRelease / Resolve-DotnetSdkRelease and, for
-         NuGet tools, the registration+catalog hash + ConvertFrom-NugetHash
-         Base64 from Invoke-DotnetToolAcquisition);
+         of truth (Resolve-AdoptiumRelease / Resolve-DotnetSdkRelease /
+         Resolve-PowerShellRelease and, for NuGet tools, the
+         registration+catalog hash + ConvertFrom-NugetHashBase64 from
+         Invoke-DotnetToolAcquisition);
       2. downloads the artifact from upstream and verifies its checksum,
          failing the whole staging run (nothing reaches any VM) on a mismatch;
       3. stages the verified artifact into the served directory under the EXACT
@@ -27,11 +28,14 @@
          so a re-run reuses the staged bytes instead of re-fetching; and
       5. writes a resolved-config document carrying the CONCRETE pins.
 
-    The concrete pins in (5) are the point of the pin: the roles re-resolve on
-    the target, so handing them the exact resolved version (e.g. "21.0.5+11"
-    rather than "21") is what stops the target picking a newer upstream build
-    than the one this step verified and staged. The wrapper forwards that
-    document to ansible-playbook as an --extra-vars override.
+    The concrete pins in (5) are the point of the pin: the jdk / dotnet_sdk
+    roles re-resolve on the target, so handing them the exact resolved version
+    (e.g. "21.0.5+11" rather than "21") is what stops the target picking a
+    newer upstream build than the one this step verified and staged. The
+    powershell role is stricter still - it composes its archive name from the
+    version and REJECTS a loose pin outright - so for that role the concrete
+    pin is not an optimisation but the only accepted input. The wrapper
+    forwards that document to ansible-playbook as an --extra-vars override.
 
     Structured as dot-sourceable functions with a run-guarded entry point so
     the resolve / download / verify boundary is unit-testable (Pester mocks the
@@ -52,15 +56,16 @@ param(
     # vmName (every host and every key optional):
     #   { "ubuntu-01": { "jdk_versions": ["21"],
     #                    "dotnet_sdk_versions": [{"channel":"10.0","version":"10.0"}],
-    #                    "dotnet_tools_tools": [{"id":"...","version":"5.4.4"}] } }
+    #                    "dotnet_tools_tools": [{"id":"...","version":"5.4.4"}],
+    #                    "powershell_versions": ["7.6"] } }
     [Parameter()]
     [string] $ToolchainsConfigPath,
 
     # Loose desired-state source B: read the per-VM VmProvisionerConfig-<Secret
     # Suffix> secret from the local VmProvisioner vault (the same secret the
     # bridge reads for its inventory, so desired-state and inventory share one
-    # SSOT), and aggregate every VM's javaDevKit / dotnetSdk / dotnetTools into
-    # the flat estate-wide superset the resolve/stage half below consumes.
+    # SSOT), and aggregate every VM's javaDevKit / dotnetSdk / dotnetTools /
+    # powershell into the per-host map the resolve/stage half below consumes.
     [Parameter()]
     [string] $SecretSuffix,
 
@@ -90,6 +95,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\..\PowerShell\up\jdk\Resolve-AdoptiumRelease.ps1"
 . "$PSScriptRoot\..\..\PowerShell\up\dotnet\Resolve-DotnetSdkRelease.ps1"
 . "$PSScriptRoot\..\..\PowerShell\up\dotnet\Invoke-DotnetToolAcquisition.ps1"
+. "$PSScriptRoot\..\..\PowerShell\up\powershell\Resolve-PowerShellRelease.ps1"
 
 # Desired-state now lives in the per-VM VmProvisionerConfig (the same secret the
 # bridge reads for its inventory), so the vault source reuses that vault's
@@ -125,7 +131,8 @@ function Get-ToolchainArrayField {
 # ---------------------------------------------------------------------------
 # Read-ToolchainDesiredState
 #   Resolve the loose desired-state as a per-host map { vmName: { jdk_versions,
-#   dotnet_sdk_versions, dotnet_tools_tools } } from whichever source the
+#   dotnet_sdk_versions, dotnet_tools_tools, powershell_versions } } from
+#   whichever source the
 #   caller named: a JSON file already in that shape (-ToolchainsConfigPath), or
 #   the per-VM VmProvisionerConfig vault projected to it (-SecretSuffix).
 #   Exactly one is required.
@@ -310,6 +317,7 @@ function Invoke-ToolchainStaging {
     $jdkCache  = @{}   # loose pin         -> concrete jdk version
     $sdkCache  = @{}   # "channel|version" -> { channel, concrete version }
     $toolCache = @{}   # "id|version"      -> { id, version }
+    $pwshCache = @{}   # loose pin         -> concrete PowerShell version
 
     # Per-host concrete map. The playbook looks each host up by
     # inventory_hostname; a host absent here installs nothing.
@@ -325,6 +333,7 @@ function Invoke-ToolchainStaging {
         $hostJdk   = @()
         $hostSdk   = @()
         $hostTools = @()
+        $hostPwsh  = @()
 
         foreach ($pin in (Get-ToolchainArrayField -Config $cfg -Name 'jdk_versions')) {
             $key = [string]$pin
@@ -390,11 +399,34 @@ function Invoke-ToolchainStaging {
             $hostTools += $toolCache[$key]
         }
 
+        # PowerShell. The concrete pin matters more here than for the other
+        # host-pushed toolchains: the powershell role COMPOSES its archive
+        # name from the version it is given and makes no upstream call, so a
+        # loose pin reaching the target would compose a name that does not
+        # exist. Resolving here is what turns '7.6' into the '7.6.4' the
+        # staged tarball is actually named after.
+        foreach ($pin in (Get-ToolchainArrayField -Config $cfg -Name 'powershell_versions')) {
+            $key = [string]$pin
+            if (-not $pwshCache.ContainsKey($key)) {
+                [Console]::Error.WriteLine("Resolving PowerShell '$key' ...")
+                $r = Resolve-PowerShellRelease -Version $key
+                Save-VerifiedArtifact `
+                    -Url             $r.DownloadUrl `
+                    -Destination     (Join-Path $StagingDirectory $r.ArchiveName) `
+                    -ExpectedHashHex $r.Sha256 `
+                    -Algorithm       'SHA256' `
+                    -ResolvedVersion $r.ResolvedVersion
+                $pwshCache[$key] = $r.ResolvedVersion
+            }
+            $hostPwsh += $pwshCache[$key]
+        }
+
         # @() casts keep single-element results as JSON arrays.
         $resolvedByHost[$vmName] = [pscustomobject]@{
             jdk_versions        = @($hostJdk)
             dotnet_sdk_versions = @($hostSdk)
             dotnet_tools_tools  = @($hostTools)
+            powershell_versions = @($hostPwsh)
         }
     }
 

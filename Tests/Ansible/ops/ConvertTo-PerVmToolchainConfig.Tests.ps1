@@ -12,6 +12,8 @@ BeforeAll {
     function New-Jdk  { param($v) [pscustomobject]@{ vendor = 'temurin'; version = $v } }
     function New-Sdk  { param($c, $v) [pscustomobject]@{ channel = $c; version = $v } }
     function New-Tool { param($id, $v) [pscustomobject]@{ id = $id; version = $v } }
+    # No vendor sub-field: Microsoft is the only publisher of PowerShell.
+    function New-Pwsh { param($v) [pscustomobject]@{ version = $v } }
 
     # Property names of a per-host map (the emitted vmNames). Pipe the property
     # collection rather than member-enumerating .Name, which throws under
@@ -33,7 +35,12 @@ Describe 'ConvertTo-PerVmToolchainConfig' {
         }
 
         It 'ConvertToPerVmToolchainConfig_TreatsNullAndEmptyAsNoToolchains' {
-            $vm = New-Vm -Name 'a' -Fields @{ javaDevKit = $null; dotnetSdk = @(); dotnetTools = @() }
+            $vm = New-Vm -Name 'a' -Fields @{
+                javaDevKit  = $null
+                dotnetSdk   = @()
+                dotnetTools = @()
+                powershell  = $null
+            }
             $result = ConvertTo-PerVmToolchainConfig -VmConfigs @($vm)
             @(Get-HostNames $result).Count | Should -Be 0
         }
@@ -98,9 +105,64 @@ Describe 'ConvertTo-PerVmToolchainConfig' {
         }
     }
 
+    Context 'powershell projection' {
+        It 'ConvertToPerVmToolchainConfig_ProjectsPowershellVersionBare' {
+            $result = ConvertTo-PerVmToolchainConfig -VmConfigs @(
+                (New-Vm -Name 'a' -Fields @{ powershell = (New-Pwsh '7.6.4') }))
+            $result.'a'.powershell_versions | Should -Be @('7.6.4')
+        }
+
+        It 'ConvertToPerVmToolchainConfig_NormalizesScalarAndOneListPowershellIdentically' {
+            $scalar = New-Vm -Name 'a' -Fields @{ powershell = (New-Pwsh '7.6.4') }
+            $list   = New-Vm -Name 'b' -Fields @{ powershell = @((New-Pwsh '7.6.4')) }
+            $r = ConvertTo-PerVmToolchainConfig -VmConfigs @($scalar, $list)
+            $r.'a'.powershell_versions | Should -Be $r.'b'.powershell_versions
+        }
+
+        # The omit-empty guard has to count powershell too. Before it did, a
+        # VM whose ONLY toolchain was PowerShell was dropped from the map and
+        # silently provisioned nothing.
+        It 'ConvertToPerVmToolchainConfig_EmitsVmWithOnlyPowershell' {
+            $result = ConvertTo-PerVmToolchainConfig -VmConfigs @(
+                (New-Vm -Name 'a' -Fields @{ powershell = (New-Pwsh '7.6.4') }))
+            @(Get-HostNames $result).Count | Should -Be 1
+            $result.'a'.powershell_versions | Should -Be @('7.6.4')
+        }
+
+        It 'ConvertToPerVmToolchainConfig_EmitsEmptyPowershellForVmsWithoutIt' {
+            $result = ConvertTo-PerVmToolchainConfig -VmConfigs @(
+                (New-Vm -Name 'a' -Fields @{ javaDevKit = (New-Jdk '21') }))
+            @($result.'a'.powershell_versions).Count | Should -Be 0
+        }
+
+        It 'ConvertToPerVmToolchainConfig_DedupesRepeatedPowershellPinsWithinAVm' {
+            $vm = New-Vm -Name 'a' -Fields @{
+                powershell = @((New-Pwsh '7.6.4'), (New-Pwsh '7.6.4'))
+            }
+            $result = ConvertTo-PerVmToolchainConfig -VmConfigs @($vm)
+            @($result.'a'.powershell_versions).Count | Should -Be 1
+        }
+
+        It 'ConvertToPerVmToolchainConfig_DoesNotBleedPowershellBetweenHosts' {
+            $vms = @(
+                (New-Vm -Name 'pwsh-only' -Fields @{ powershell = (New-Pwsh '7.6.4') }),
+                (New-Vm -Name 'jdk-only'  -Fields @{ javaDevKit = (New-Jdk '21') })
+            )
+            $result = ConvertTo-PerVmToolchainConfig -VmConfigs $vms
+            @($result.'pwsh-only'.jdk_versions).Count        | Should -Be 0
+            @($result.'jdk-only'.powershell_versions).Count  | Should -Be 0
+        }
+    }
+
     Context 'router exclusion' {
         It 'ConvertToPerVmToolchainConfig_SkipsRouterVms' {
             $router = New-Vm -Name 'router' -Fields @{ kind = 'router'; javaDevKit = (New-Jdk '21') }
+            $result = ConvertTo-PerVmToolchainConfig -VmConfigs @($router)
+            @(Get-HostNames $result).Count | Should -Be 0
+        }
+
+        It 'ConvertToPerVmToolchainConfig_SkipsRouterVmsDeclaringPowershell' {
+            $router = New-Vm -Name 'router' -Fields @{ kind = 'router'; powershell = (New-Pwsh '7.6.4') }
             $result = ConvertTo-PerVmToolchainConfig -VmConfigs @($router)
             @(Get-HostNames $result).Count | Should -Be 0
         }

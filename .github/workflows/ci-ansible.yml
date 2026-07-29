@@ -7,7 +7,7 @@
 # its single playbook
 # (hyper-v/ubuntu/Ansible/playbooks/provision-toolchains.yml) statically
 # import_roles the Common-Ansible substrate roles (jdk, dotnet_sdk,
-# dotnet_tools). Because those imports are static, ansible-lint's
+# dotnet_tools, powershell). Because those imports are static, ansible-lint's
 # syntax-check must resolve them, so this caller passes
 # composes-substrate-roles: true; the reusable workflow's substrate-
 # composer branch then puts the staged substrate roles/ on

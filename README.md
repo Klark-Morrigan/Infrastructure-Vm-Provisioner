@@ -14,6 +14,7 @@
   - [JDK list shape (multiple entries)](#jdk-list-shape-multiple-entries)
   - [Optional: install a .NET SDK](#optional-install-a-net-sdk)
   - [Optional: install .NET global tools](#optional-install-net-global-tools)
+  - [Optional: install PowerShell](#optional-install-powershell)
   - [Optional: copy files to the VM](#optional-copy-files-to-the-vm)
     - [Bulk entries](#bulk-entries)
   - [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables)
@@ -261,6 +262,7 @@ After first boot, connect via `ssh username@ipAddress`.
 | `javaDevKit`    | object? | Optional. Installs a JDK system-wide on first boot. Not supported on `kind: router`. See [Optional: install a JDK](#optional-install-a-jdk). |
 | `dotnetSdk`     | object? | Optional. Installs a .NET SDK system-wide on first boot. See [Optional: install a .NET SDK](#optional-install-a-net-sdk). |
 | `dotnetTools`   | array?  | Optional. Installs .NET global tools system-wide on first boot. Requires `dotnetSdk` on the same VM. See [Optional: install .NET global tools](#optional-install-net-global-tools). |
+| `powershell`    | object? | Optional. Installs PowerShell (`pwsh`) system-wide. Read **only by the Ansible toolchain flow**, not the PowerShell reconciler. Not supported on `kind: router`. See [Optional: install PowerShell](#optional-install-powershell). |
 | `files`         | array?  | Optional. Copies arbitrary host files onto the VM. See [Optional: copy files to the VM](#optional-copy-files-to-the-vm). |
 | `envVars`       | object? | Optional. Writes a managed block of system-wide environment variables into `/etc/environment`. See [Optional: set system-wide environment variables](#optional-set-system-wide-environment-variables). |
 | `toolchains`    | object? | Optional. Section-2/3 acquisition taxonomy block (`vmDownloaded.apt` packages, `vmDownloaded.batsLibs` bats libraries, `baseImage` daemons). Read **only by the Ansible toolchain flow**, not the PowerShell reconciler. Not supported on `kind: router`. See [The toolchains taxonomy block](#the-toolchains-taxonomy-block-sections-2-and-3). |
@@ -509,6 +511,72 @@ Unknown sub-fields are rejected at schema time to catch silent typos
 is allowed regardless of whether `dotnetSdk` is set — "no tools" is a
 coherent state on any VM, SDK or not.
 
+### Optional: install PowerShell
+
+Add a `powershell` object to any VM entry to install PowerShell (`pwsh`)
+system-wide from Microsoft's self-contained Linux release tarball.
+
+```jsonc
+{
+  "vmName": "ci-runner-01",
+  "...":    "...",
+  "powershell": { "version": "7.6" }
+}
+```
+
+| Sub-field | Type   | Required | Allowed values |
+|-----------|--------|----------|----------------|
+| `version` | string | yes      | `"7"`, `"7.6"`, or `"7.6.4"`. Must be a string — numeric JSON values are rejected, same rule and same reason as `javaDevKit.version`. Prereleases are not accepted. |
+
+There is no `vendor` sub-field: Microsoft is the only publisher of
+PowerShell, so the knob would be dead data rather than a future extension
+point. Unknown sub-fields are rejected at schema time to catch silent
+typos, the same strict-by-design posture the other toolchain fields take.
+
+`powershell` is also accepted as `null` or `[]` to **uninstall** any
+PowerShell the flow previously installed, and as a single-element list
+`[{ version }]` for symmetry with `javaDevKit` and `dotnetSdk`. v1
+installs one PowerShell per VM; a longer list is a hard error naming the
+VM.
+
+**Why a VM would want it.** The `ci-dotnet` reusable workflow's composite
+actions all declare `shell: pwsh`. A self-hosted runner without the
+interpreter fails at the first step that runs a shell with a bare
+`pwsh: command not found` — and none of that workflow's toolchain
+preflights can report anything better, because they are themselves
+PowerShell and cannot run either.
+
+**Ansible flow only.** Unlike `javaDevKit` / `dotnetSdk` / `dotnetTools`,
+this field is read only by the
+[Ansible toolchain flow](#toolchain-provisioning-via-ansible-common-ansible).
+The PowerShell reconciler has no matching provider, so a `powershell`
+entry is inert under `provision.ps1`'s built-in toolchain path. That path
+is not the live one — see
+[Toolchain engine](#toolchain-engine-selecting-the-live-path) — so this is
+a deliberate non-duplication rather than a gap: a second implementation of
+a toolchain nobody drives through the legacy engine would be dead code to
+maintain.
+
+**Loose pins resolve host-side.** `"7.6"` is resolved to a concrete
+`7.6.4` by the [staging step](#acquire-verify-stage-the-integrity-gate),
+which downloads that release's tarball, verifies it against the SHA-256
+the release's own `hashes.sha256` manifest publishes, and stages it under
+the exact name the role pulls by. The Common-Ansible `powershell` role
+composes its archive name from the version and **rejects a loose pin**, so
+unlike the JDK and SDK roles it does no upstream lookup of its own — the
+staging step's resolution is its only input, and its only integrity gate.
+
+**Native prerequisites are handled for you.** The tarball carries its own
+.NET runtime but not the platform's ICU libraries, without which `pwsh`
+will not start — and a stock Ubuntu 24.04 image has no ICU at all. The
+Common-Ansible `powershell` role installs them itself, so a `powershell`
+entry needs **no** companion
+[`toolchains.vmDownloaded.apt`](#the-toolchains-taxonomy-block-sections-2-and-3)
+line. It then runs the freshly installed `pwsh` and fails loudly if the
+interpreter will not start, which turns any prerequisite the role's
+package list missed — a distro bump renames it — into an actionable
+provisioning error rather than an unexplained CI break days later.
+
 ### Optional: copy files to the VM
 
 Add a `files` array to any VM entry to copy arbitrary host files onto the
@@ -743,8 +811,8 @@ and kernel-naming changes:
 - Re-running `provision.ps1` against an already-provisioned router VM
   takes the normal "existing VM" path — no destructive re-creation.
 
-**Restrictions.** Router VMs do not accept `javaDevKit`, `dotnetSdk`, or
-`dotnetTools` blocks. The router is intentionally minimal — its only
+**Restrictions.** Router VMs do not accept `javaDevKit`, `dotnetSdk`,
+`dotnetTools`, or `powershell` blocks. The router is intentionally minimal — its only
 software is `nftables` and `dnsmasq`. Surfacing the rejection at
 schema-time keeps a stray toolchain entry from silently flowing
 through reconcile and installing a JDK on the gateway.
@@ -1321,9 +1389,9 @@ file server). Integrity therefore lives in this consumer, in
 for each desired toolchain:
 
 1. resolves the operator's loose pin (e.g. `21`) against upstream (Adoptium for
-   the JDK, the .NET release feed for the SDK, NuGet for tools) into a concrete
-   build - reusing this repo's own reconciler resolvers so resolution stays one
-   source of truth;
+   the JDK, the .NET release feed for the SDK, NuGet for tools, the GitHub
+   releases API for PowerShell) into a concrete build - reusing this repo's own
+   reconciler resolvers so resolution stays one source of truth;
 2. downloads the artifact from upstream and **verifies its checksum**, failing
    the whole run (nothing reaches any VM) on a mismatch;
 3. stages the verified artifact under the exact archive name the role re-derives
@@ -1331,17 +1399,19 @@ for each desired toolchain:
 4. writes a per-artifact lockfile pin and a resolved-config document of the
    **concrete** versions.
 
-The concrete versions are the pin: the roles re-resolve on the target, so they
-are handed the exact resolved build (`21.0.5+11`, not `21`) as an
-`--extra-vars` override, which stops the target picking a newer upstream build
-than the one that was verified and staged.
+The concrete versions are the pin: the `jdk` / `dotnet_sdk` roles re-resolve on
+the target, so they are handed the exact resolved build (`21.0.5+11`, not `21`)
+as an `--extra-vars` override, which stops the target picking a newer upstream
+build than the one that was verified and staged. The `powershell` role is
+stricter - it composes its archive name from the version and rejects a loose
+pin outright - so there the concrete pin is not a safeguard but the only
+accepted input, and this step is the only place its bytes are ever checked.
 
 The desired toolchains are read from the per-VM `VmProvisionerConfig` secret -
 the same secret the bridge reads for its inventory, so desired-state and
 inventory share one source of truth. Each VM's `javaDevKit` / `dotnetSdk` /
-`dotnetTools` fields (the fields the reconciler documents above) are projected
-into a **per-host map** keyed by vmName, whose values are the role-variable
-shape the roles consume:
+`dotnetTools` / `powershell` fields are projected into a **per-host map** keyed
+by vmName, whose values are the role-variable shape the roles consume:
 
 ```json
 {
@@ -1350,7 +1420,8 @@ shape the roles consume:
       "jdk_versions": ["21.0.5+11"],
       "dotnet_sdk_versions": [{ "channel": "10.0", "version": "10.0.100" }],
       "dotnet_tools_tools": [{ "id": "dotnet-reportgenerator-globaltool",
-                               "version": "5.4.4" }]
+                               "version": "5.4.4" }],
+      "powershell_versions": ["7.6.4"]
     },
     "ubuntu-02-ci": { "jdk_versions": ["17.0.13+11"] }
   }
@@ -1572,6 +1643,8 @@ Infrastructure-VM-Provisioner/
 |     |  |  |  |- DotnetToolsProvider.Install-Version.ps1       # Reconciler op: stages .nupkg, dotnet tool install, /usr/local/bin symlinks, manifest
 |     |  |  |  |- DotnetToolsProvider.Uninstall-Version.ps1     # Reconciler op: ownership-bounded teardown of one tool install
 |     |  |  |  `- Get-DotnetToolsProvider.ps1              # Composes the tools ops into an IToolchainProvider; sets ParentProvider = 'dotnetSdk'
+|     |  |  |- powershell/
+|     |  |  |  `- Resolve-PowerShellRelease.ps1    # Resolves a pwsh version pin via the GitHub releases API and pins the SHA-256 from the release's hashes.sha256. No reconciler provider alongside it: the Ansible flow is the only consumer of the `powershell` field.
 |     |  |  |- acquire/
 |     |  |  |  `- Invoke-VmAcquisitions.ps1        # Per-VM host-side acquisition orchestrator; dispatches each per-software acquirer guarded by its opt-in field
 |     |  |  |- post/
@@ -1604,7 +1677,7 @@ Infrastructure-VM-Provisioner/
 |  |- shared/               # Unit tests for shared/ (setup-secrets)
 |  |- PowerShell/           # Mirrors the PowerShell reconciler slice
 |  |  |- common/            # Unit tests for common/ helpers (config, diag, network, power, ssh, ui)
-|  |  |- up/                # Unit tests for up/ (config, disk, jdk, dotnet, seed, network, post, reconciler, vm)
+|  |  |- up/                # Unit tests for up/ (config, disk, jdk, dotnet, powershell, seed, network, post, reconciler, vm)
 |  |  `- down/              # Unit tests for down/ (network, vm)
 |  `- Ansible/              # Mirrors the Ansible slice (Stage-ToolchainArtifacts)
 |- scripts/
