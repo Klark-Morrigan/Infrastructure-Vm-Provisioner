@@ -566,14 +566,16 @@ composes its archive name from the version and **rejects a loose pin**, so
 unlike the JDK and SDK roles it does no upstream lookup of its own — the
 staging step's resolution is its only input, and its only integrity gate.
 
-**Native prerequisites.** The tarball carries its own .NET runtime but
-still needs a few distro libraries, `libicu` above all. Those are ordinary
-apt content, so they belong in this VM's
+**Native prerequisites are handled for you.** The tarball carries its own
+.NET runtime but not the platform's ICU libraries, without which `pwsh`
+will not start — and a stock Ubuntu 24.04 image has no ICU at all. The
+Common-Ansible `powershell` role installs them itself, so a `powershell`
+entry needs **no** companion
 [`toolchains.vmDownloaded.apt`](#the-toolchains-taxonomy-block-sections-2-and-3)
-list. The role does not install them; it runs the freshly installed `pwsh`
-after the install and fails loudly if the interpreter will not start,
-which is what turns a missing library into an actionable provisioning
-error rather than an unexplained CI break days later.
+line. It then runs the freshly installed `pwsh` and fails loudly if the
+interpreter will not start, which turns any prerequisite the role's
+package list missed — a distro bump renames it — into an actionable
+provisioning error rather than an unexplained CI break days later.
 
 ### Optional: copy files to the VM
 
