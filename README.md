@@ -1191,6 +1191,24 @@ that bash probe cannot reach:
 - `ensure-vms-ready.ps1`, which calls the cmdlet directly. Without it
   that script could report every VM Ready — and exit 0 — while every
   flow depending on the relay was broken; and
+- `Stage-ToolchainArtifacts.ps1`, as a pre-check at the very top of
+  `Invoke-ToolchainStaging`.
+
+**Why staging pre-checks it.** Nothing staging does needs the relay — it
+is all host-side vault reads, upstream metadata calls, downloads and
+checksums. But it is the step that runs *first*, and the bridge's assert
+fires later, during dispatch. Without the pre-check a dead relay costs a
+fleet's worth of upstream round trips and artifact hashing before
+anything notices. The check lives there rather than in the bash wrapper
+because that script is already PowerShell holding an open vault session,
+so it adds no process hop and no second vault read — and it fails before
+the staging directory is even created.
+
+It is deliberately *not* fatal when it cannot run. A missing module floor
+warns and proceeds, since a dependency gap is no verdict on the relay and
+should not take provisioning down; an absent portproxy skips the probe
+entirely, since a direct/standalone estate lays no relay. Only a probe
+that ran and reported a fault stops the run.
 
 **Scope.** The probe targets the host-side listen endpoint rather than
 the router's own IP, deliberately: connecting straight to the router
