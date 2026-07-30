@@ -1184,6 +1184,14 @@ traverses the Windows Firewall that a host-side loopback probe cannot.
 That is the stronger check, it already covers the users / runners /
 toolchains flows alike, and nothing here duplicates it.
 
+What it serves is the host-side cases that run **no playbook**, where
+that bash probe cannot reach:
+
+- an operator at a prompt;
+- `ensure-vms-ready.ps1`, which calls the cmdlet directly. Without it
+  that script could report every VM Ready — and exit 0 — while every
+  flow depending on the relay was broken; and
+
 **Scope.** The probe targets the host-side listen endpoint rather than
 the router's own IP, deliberately: connecting straight to the router
 bypasses the relay and would report healthy while every WSL-side consumer

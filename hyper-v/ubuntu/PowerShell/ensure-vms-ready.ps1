@@ -40,6 +40,12 @@
       and per-VM timeouts are recorded and folded into a final aggregate;
       exit code 1 if any VM is not Ready, 0 otherwise. The script never
       throws past the orchestration loop.
+    - The controller -> router SSH relay is checked too, and a broken one
+      also exits 1. Every readiness probe above runs host-side, where the
+      router's Internal-switch IP is directly routable; the controller
+      reaches it from WSL through a host portproxy instead. Without this
+      check a fleet could report every VM Ready while every Ansible flow
+      failed as an opaque UNREACHABLE.
 
     RELATION TO start-vms.ps1
     - start-vms.ps1 is power-on only - the lighter path for an operator about
@@ -126,10 +132,15 @@ foreach ($f in $powerOn.Failed) {
 # ---------------------------------------------------------------------------
 
 $readiness = @()
+# Whether any environment routes through a router. Recorded here rather than
+# re-grouping later: the relay check below needs to know, and grouping twice
+# would call the same resolver twice for one answer.
+$anyRoutedEnv = $false
 
 foreach ($env in @(Group-VmsByEnvironment -VmDefs $vmDefs)) {
     $routers   = @($env.RouterVms)
     $workloads = @($env.WorkloadVms)
+    if ($routers.Count -gt 0) { $anyRoutedEnv = $true }
 
     # The jump host every workload in this environment tunnels through. An
     # environment with no router is standalone: workloads are probed
@@ -191,6 +202,45 @@ foreach ($env in @(Group-VmsByEnvironment -VmDefs $vmDefs)) {
 }
 
 # ---------------------------------------------------------------------------
+# 4b. Controller -> router SSH relay.
+#     Every check above runs HOST-side, where the router's Internal-switch
+#     IP is directly routable. The controller is not host-side: from WSL
+#     that subnet is unreachable through ICS NAT, so every Ansible flow
+#     tunnels through a host netsh portproxy instead. Nothing above touches
+#     that hop, which is why a fleet can report every VM Ready while every
+#     flow that uses it fails as an opaque UNREACHABLE.
+#
+#     Probed here, after the router readiness loop, so "the router is down"
+#     is already ruled out and a failure means the relay itself - the probe
+#     cannot tell those two apart on its own.
+#
+#     Skipped entirely when no environment has a router: a standalone fleet
+#     is reached directly and lays no relay, so there is nothing to check.
+# ---------------------------------------------------------------------------
+
+$relayOk     = $true
+$anyRouterUp = @($readiness | Where-Object { $_.Status -eq 'Ready' }).Count -gt 0
+
+if ($anyRoutedEnv -and $anyRouterUp) {
+    Write-Host ""
+    Write-Host "Checking controller -> router SSH relay ..." -ForegroundColor Cyan
+
+    $relay = Test-RouterSshRelay
+    if ($relay.Ok) {
+        Write-Host "  [OK] $($relay.Reason)" -ForegroundColor Green
+    }
+    else {
+        # Not folded into $readiness: it is not a VM, and counting it there
+        # would make "Ready: N of M" lie about the fleet. It gets its own
+        # line and its own term in the exit expression.
+        $relayOk = $false
+        Write-Host "  [FAIL] $($relay.Reason)" -ForegroundColor Red
+        Write-Host "  Repair: .\scripts\Test-HostNetworkPreflight.ps1 -AutoRepair" `
+            -ForegroundColor Yellow
+    }
+}
+
+# ---------------------------------------------------------------------------
 # 5. Per-VM lines + aggregate.
 #    Each Where-Object filter is wrapped in @(...) before .Count to survive
 #    the single-match scalar-unrolling trap under strict mode. "Unreachable
@@ -213,6 +263,10 @@ Write-Host ""
 Write-Host ("Ready: {0}, Unreachable: {1}, Power-on failed: {2}" `
     -f $ready, $unreachable, $powerFailed) -ForegroundColor Cyan
 
-# Exit 1 if any VM is not Ready - the single programmatic signal. Never
-# throw past the loop, so automation gets a clean code, not a stack trace.
-exit (($ready -eq $readiness.Count) ? 0 : 1)
+# Exit 1 if any VM is not Ready, OR if the relay every controller-side flow
+# depends on is broken - the single programmatic signal. A fleet whose VMs
+# are all up but whose relay is dead is not usable by the callers this
+# script exists to serve, so reporting 0 there would be the false green the
+# relay check was added to remove. Never throw past the loop, so automation
+# gets a clean code, not a stack trace.
+exit ((($ready -eq $readiness.Count) -and $relayOk) ? 0 : 1)
