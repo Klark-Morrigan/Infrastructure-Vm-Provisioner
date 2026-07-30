@@ -13,6 +13,13 @@ BeforeAll {
     # lists cover the call sites in Stage-ToolchainArtifacts.ps1 (LiteralPath +
     # pipeline input for Set-Content in particular) so a mock ParameterFilter
     # has the named variables to key off.
+    # Infrastructure.Network.Windows cmdlets the relay pre-check calls. Stubbed
+    # (not imported) so the suite stays free of the module and no probe touches
+    # a real socket; the module's own suite covers Test-RouterSshRelay.
+    function Import-Module          { param($Name, $MinimumVersion, $ErrorAction) }
+    function Get-NetshPortProxyRules { param() }
+    function Test-RouterSshRelay    { param($ListenAddress, $ListenPort, $TimeoutSeconds) }
+
     function Test-Path         { param($Path, $LiteralPath, $PathType) }
     function New-Item          { param($Path, $ItemType, [switch]$Force) }
     function Get-Content       { param($Path, $LiteralPath, [switch]$Raw) }
@@ -40,6 +47,17 @@ BeforeAll {
 }
 
 Describe 'Stage-ToolchainArtifacts' {
+
+    BeforeEach {
+        # Default the relay pre-check to its real "nothing to check" path for
+        # every case that is about staging itself: module import succeeds, no
+        # portproxy is configured, so it returns without probing. Mocking the
+        # DEPENDENCIES rather than Assert-RouterRelayForStaging itself is
+        # deliberate - Pester cannot un-mock a function inside a nested
+        # context, and the 'relay pre-check' context below needs the real one.
+        Mock Import-Module { }
+        Mock Get-NetshPortProxyRules { @() }
+    }
 
     Context 'Read-ToolchainDesiredState source selection' {
         It 'rejects supplying neither a config path nor a secret suffix' {
@@ -276,6 +294,97 @@ Describe 'Stage-ToolchainArtifacts' {
             # per host. api.github.com allows 60 unauthenticated calls an hour,
             # so this matters at fleet scale.
             Should -Invoke Resolve-PowerShellRelease -Times 1 -Exactly
+        }
+    }
+
+    Context 'relay pre-check (Assert-RouterRelayForStaging)' {
+        # The real Assert-RouterRelayForStaging runs in every case here; each
+        # test overrides the Describe-level dependency mocks to drive one of
+        # its branches.
+
+        # A configured relay that fails the probe must stop the run BEFORE the
+        # staging directory is created or any upstream call is made - the whole
+        # reason this check sits at the top rather than in the bash wrapper.
+        It 'throws before touching upstream when a configured relay is broken' {
+            Mock Get-NetshPortProxyRules {
+                @([pscustomobject]@{ ListenAddress = '0.0.0.0'; ListenPort = 2222
+                                     ConnectAddress = '192.168.137.11'; ConnectPort = 22 })
+            }
+            Mock Test-RouterSshRelay {
+                [pscustomobject]@{ Ok = $false; Stage = 'Banner'; Banner = ''
+                                   Reason = 'no SSH banner arrived' }
+            }
+            Mock Read-ToolchainDesiredState { [pscustomobject]@{} }
+            Mock New-Item {}
+            Mock Set-Content {}
+
+            { Invoke-ToolchainStaging -ConfigPath 'ignored-mocked' `
+                -StagingDirectory 'TestDrive:\staging' `
+                -ResolvedConfigOut 'TestDrive:
+esolved.json' } |
+                Should -Throw '*not usable*'
+
+            # Nothing was spent: no staging dir, no desired-state read.
+            Should -Not -Invoke New-Item
+            Should -Not -Invoke Read-ToolchainDesiredState
+        }
+
+        # A missing module floor is not a verdict on the relay. Failing here
+        # would let a dependency gap take toolchain provisioning down.
+        It 'warns and proceeds when the module floor is unavailable' {
+            Mock Import-Module { throw 'module not found' }
+            Mock Get-NetshPortProxyRules { throw 'should not be reached' }
+            Mock Read-ToolchainDesiredState { [pscustomobject]@{} }
+            Mock New-Item {}
+            Mock Set-Content {}
+
+            { Invoke-ToolchainStaging -ConfigPath 'ignored-mocked' `
+                -StagingDirectory 'TestDrive:\staging' `
+                -ResolvedConfigOut 'TestDrive:
+esolved.json' } | Should -Not -Throw
+
+            Should -Not -Invoke Get-NetshPortProxyRules
+            Should -Invoke Read-ToolchainDesiredState -Times 1
+        }
+
+        # No portproxy means a direct/standalone estate: nothing to verify, so
+        # the probe must not even run.
+        It 'skips the probe when no relay is configured' {
+            Mock Get-NetshPortProxyRules { @() }
+            Mock Test-RouterSshRelay { throw 'should not be probed' }
+            Mock Read-ToolchainDesiredState { [pscustomobject]@{} }
+            Mock New-Item {}
+            Mock Set-Content {}
+
+            { Invoke-ToolchainStaging -ConfigPath 'ignored-mocked' `
+                -StagingDirectory 'TestDrive:\staging' `
+                -ResolvedConfigOut 'TestDrive:
+esolved.json' } | Should -Not -Throw
+
+            Should -Not -Invoke Test-RouterSshRelay
+            Should -Invoke Read-ToolchainDesiredState -Times 1
+        }
+
+        It 'proceeds silently when a configured relay is healthy' {
+            Mock Get-NetshPortProxyRules {
+                @([pscustomobject]@{ ListenAddress = '0.0.0.0'; ListenPort = 2222
+                                     ConnectAddress = '192.168.137.11'; ConnectPort = 22 })
+            }
+            Mock Test-RouterSshRelay {
+                [pscustomobject]@{ Ok = $true; Stage = 'Banner'
+                                   Banner = 'SSH-2.0-OpenSSH_9.6p1'; Reason = 'healthy' }
+            }
+            Mock Read-ToolchainDesiredState { [pscustomobject]@{} }
+            Mock New-Item {}
+            Mock Set-Content {}
+
+            { Invoke-ToolchainStaging -ConfigPath 'ignored-mocked' `
+                -StagingDirectory 'TestDrive:\staging' `
+                -ResolvedConfigOut 'TestDrive:
+esolved.json' } | Should -Not -Throw
+
+            Should -Invoke Test-RouterSshRelay -Times 1 -Exactly
+            Should -Invoke Read-ToolchainDesiredState -Times 1
         }
     }
 }

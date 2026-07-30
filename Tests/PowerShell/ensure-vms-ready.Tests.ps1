@@ -84,10 +84,14 @@ BeforeAll {
     # the chosen exit code is captured from `& $shimPath` instead of killing
     # the test process. `$$` in the .NET regex replacement yields a literal
     # `$` in the output.
+    # The replacement must mirror EVERY term of the real exit expression,
+    # including $relayOk (the controller -> router relay check). A stale
+    # replacement here does not fail loudly - it silently drops a term and
+    # the suite then passes while the dropped condition is untested.
     $raw  = Get-Content -Raw -LiteralPath $script:realPath
     $shim = $raw -replace `
         '(?m)^exit\s+\(.*\)\s*$', `
-        '(($$ready -eq $$readiness.Count) ? 0 : 1)'
+        '((($$ready -eq $$readiness.Count) -and $$relayOk) ? 0 : 1)'
     Set-Content -LiteralPath (Join-Path $script:shimDir 'ensure-vms-ready.ps1') `
         -Value $shim -Encoding UTF8
     $script:shimPath = Join-Path $script:shimDir 'ensure-vms-ready.ps1'
@@ -106,6 +110,12 @@ BeforeAll {
             [datetime]    $Deadline,
             [scriptblock] $OnPoll
         )
+    }
+    # Supplied by Infrastructure.Network.Windows at runtime; stubbed so the
+    # relay check can be mocked without importing the module. Its own
+    # behaviour is covered in that module's Tests/Relay suite.
+    function Test-RouterSshRelay {
+        param([string] $ListenAddress, [int] $ListenPort, [int] $TimeoutSeconds)
     }
 
     $script:TestSuffix = 'Test'
@@ -150,6 +160,14 @@ Describe 'ensure-vms-ready.ps1 - orchestration' {
         }
         Mock Group-VmsByEnvironment   { @() }
         Mock Resolve-ExistingRouterIp { }
+        # Default: the relay is healthy, so the existing cases keep pinning
+        # VM readiness alone. The relay's own contexts override this.
+        Mock Test-RouterSshRelay {
+            [PSCustomObject]@{
+                Ok = $true; ListenAddress = '127.0.0.1'; ListenPort = 2222
+                Stage = 'Banner'; Banner = 'SSH-2.0-Test'; Reason = 'SSH relay healthy'
+            }
+        }
         # Default: every VM reachable. Records call order to the temp file so
         # router-first ordering can be asserted across the & $shimPath boundary.
         Mock Wait-VmSshAccessible {
@@ -533,6 +551,87 @@ Describe 'ensure-vms-ready.ps1 - orchestration' {
             { Invoke-EnsureVmsReady } | Should -Throw `
                 "Vault 'VmProvisioner' not found. Run setup-secrets.ps1 first."
             Should -Invoke Invoke-VmFleetPowerOn -Times 0 -Exactly
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context 'controller -> router SSH relay' {
+    # ------------------------------------------------------------------
+
+        # Every readiness probe above runs host-side, where the router's
+        # Internal-switch IP is directly routable. The controller reaches it
+        # from WSL through a host portproxy instead, so a fleet can be
+        # entirely Ready while every Ansible flow fails UNREACHABLE. These
+        # cases pin that the script no longer reports that as success.
+
+        BeforeEach {
+            Mock Read-VmProvisionerConfig {
+                ,@(
+                    [PSCustomObject]@{ vmName = 'router-prod' },
+                    [PSCustomObject]@{ vmName = 'wl-a' }
+                )
+            }
+            Mock Group-VmsByEnvironment {
+                [PSCustomObject]@{
+                    Name        = 'prod'
+                    RouterVms   = @([PSCustomObject]@{ vmName = 'router-prod' })
+                    WorkloadVms = @([PSCustomObject]@{ vmName = 'wl-a' })
+                }
+            }
+        }
+
+        It 'probes the relay once when the estate routes through a router' {
+            Invoke-EnsureVmsReady
+            Should -Invoke Test-RouterSshRelay -Times 1 -Exactly
+        }
+
+        It 'exits 0 when every VM is Ready and the relay is healthy' {
+            Invoke-EnsureVmsReady
+            $script:exitCode | Should -Be 0
+        }
+
+        # The regression this whole check exists to prevent: all VMs up, exit
+        # 0, and every flow that uses the relay broken.
+        It 'exits 1 when every VM is Ready but the relay is broken' {
+            Mock Test-RouterSshRelay {
+                [PSCustomObject]@{
+                    Ok = $false; ListenAddress = '127.0.0.1'; ListenPort = 2222
+                    Stage = 'Banner'; Banner = ''
+                    Reason = 'Connected but no SSH banner arrived within 5s.'
+                }
+            }
+
+            Invoke-EnsureVmsReady
+            $script:exitCode | Should -Be 1
+        }
+
+        It 'skips the probe on a standalone estate with no router' {
+            Mock Group-VmsByEnvironment {
+                [PSCustomObject]@{
+                    Name        = 'standalone'
+                    RouterVms   = @()
+                    WorkloadVms = @([PSCustomObject]@{ vmName = 'wl-a' })
+                }
+            }
+
+            Invoke-EnsureVmsReady
+
+            # No relay is laid on a direct-routing estate, so probing one
+            # would fail for a fleet that is entirely healthy.
+            Should -Invoke Test-RouterSshRelay -Times 0 -Exactly
+            $script:exitCode | Should -Be 0
+        }
+
+        # Probing before the router is up cannot distinguish "relay stale"
+        # from "router still booting", so a dead router suppresses it and the
+        # VM-readiness failure stands on its own.
+        It 'skips the probe when no router came up' {
+            Mock Wait-VmSshAccessible { $false }
+
+            Invoke-EnsureVmsReady
+
+            Should -Invoke Test-RouterSshRelay -Times 0 -Exactly
+            $script:exitCode | Should -Be 1
         }
     }
 }

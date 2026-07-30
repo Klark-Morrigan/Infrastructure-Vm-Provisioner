@@ -22,6 +22,7 @@
 - [provision.ps1](#provisionps1)
   - [Phase-timing report and cross-process export](#phase-timing-report-and-cross-process-export)
 - [Test-HostNetworkPreflight.ps1](#test-hostnetworkpreflightps1)
+- [Test-RouterAccess.ps1](#test-routeraccessps1)
 - [Get-VmRuntimeDiag.ps1](#get-vmruntimediagps1)
 - [start-vms.ps1](#start-vmsps1)
 - [ensure-vms-ready.ps1](#ensure-vms-readyps1)
@@ -1131,6 +1132,92 @@ provisioning run.
 | `-AutoRepair` | off | Opt INTO check 6/7 auto-repair. Default off for the manual entry point because an interactive operator may have other VMs alive that would lose their default route during an ICS toggle. The provisioner gate calls `Assert-HostNetworkPreflight` directly with auto-repair on (no live VMs at preflight time). |
 
 ---
+
+## Test-RouterAccess.ps1
+
+Read-only check that the controller can actually reach the router VM over
+the host SSH relay. Run it when an Ansible flow reports UNREACHABLE, or
+after any host networking change (ICS toggle, switch recreate, host
+reboot, Wi-Fi LAN change).
+
+```
+.\scripts\Test-RouterAccess.ps1
+```
+
+**Why this exists as a separate check.** Every flow that reaches a
+workload tunnels through the router as an SSH jump host, and from WSL
+that hop runs over a host-side `netsh portproxy`. The host-side network
+preflight checks the host's own networking — switch, vNIC, route,
+profile, ICS DNS — and none of those touch that hop, so a stale relay
+passes preflight as "host network preflight OK" while every controller
+flow fails. Until now the relay was only ever *repaired*, blind and
+unconditionally, by `Test-HostNetworkPreflight.ps1 -AutoRepair`; nothing
+could report that it had been broken.
+
+**What a failure means.** The result separates the two diagnoses:
+
+| Stage | Meaning | Fix |
+|---|---|---|
+| `Connect` | Nothing listening on the port — the portproxy is absent | Re-lay the relay |
+| `Banner` | Listening but not forwarding — the stale-generation signature (an ICS toggle strands iphlpsvc on the previous Internal-vSwitch network), *or* the router VM is down | Re-lay the relay; if that does not fix it, check the router is running |
+
+Repair is `.\scripts\Test-HostNetworkPreflight.ps1 -AutoRepair`.
+
+**Exit codes — three, not two**, so "the relay is broken" and "I could not
+look" are never confused; they call for entirely different actions:
+
+| Code | Meaning |
+|---|---|
+| `0` | Healthy |
+| `1` | The relay is **broken** — the probe ran and reported a fault |
+| `2` | The check **could not run** — the `Infrastructure.Network.Windows` floor is missing. Says nothing about the relay |
+
+Without the split, a missing module would report as a broken relay and
+send an operator off to repair host networking that was never at fault.
+
+**This does not gate any automated flow, on purpose.** Common-Ansible
+already asserts the same hop for every Ansible flow —
+`_run-playbook.sh` → `resolve_router` →
+`ops/virtual-machines/_assert-router-reachable.sh` — and does it
+WSL-side with the same `nc` + `ssh` the ProxyCommand uses, so it also
+traverses the Windows Firewall that a host-side loopback probe cannot.
+That is the stronger check, it already covers the users / runners /
+toolchains flows alike, and nothing here duplicates it.
+
+What it serves is the host-side cases that run **no playbook**, where
+that bash probe cannot reach:
+
+- an operator at a prompt;
+- `ensure-vms-ready.ps1`, which calls the cmdlet directly. Without it
+  that script could report every VM Ready — and exit 0 — while every
+  flow depending on the relay was broken; and
+- `Stage-ToolchainArtifacts.ps1`, as a pre-check at the very top of
+  `Invoke-ToolchainStaging`.
+
+**Why staging pre-checks it.** Nothing staging does needs the relay — it
+is all host-side vault reads, upstream metadata calls, downloads and
+checksums. But it is the step that runs *first*, and the bridge's assert
+fires later, during dispatch. Without the pre-check a dead relay costs a
+fleet's worth of upstream round trips and artifact hashing before
+anything notices. The check lives there rather than in the bash wrapper
+because that script is already PowerShell holding an open vault session,
+so it adds no process hop and no second vault read — and it fails before
+the staging directory is even created.
+
+It is deliberately *not* fatal when it cannot run. A missing module floor
+warns and proceeds, since a dependency gap is no verdict on the relay and
+should not take provisioning down; an absent portproxy skips the probe
+entirely, since a direct/standalone estate lays no relay. Only a probe
+that ran and reported a fault stops the run.
+
+**Scope.** The probe targets the host-side listen endpoint rather than
+the router's own IP, deliberately: connecting straight to the router
+bypasses the relay and would report healthy while every WSL-side consumer
+is broken. Being host-side loopback it does not traverse the Windows
+Firewall, so it covers the portproxy and its forwarding but not the
+firewall companion — a narrow gap, because that rule is scoped by remote
+address rather than by interface and so has nothing volatile to go stale
+against.
 
 ## Get-VmRuntimeDiag.ps1
 

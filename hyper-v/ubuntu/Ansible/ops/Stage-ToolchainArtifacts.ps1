@@ -289,6 +289,77 @@ function Resolve-NugetPackageHash {
 #   RESOLVED_CONFIG). Progress narration goes to stderr so stdout carries only
 #   the contract.
 # ---------------------------------------------------------------------------
+# Assert-RouterRelayForStaging
+#   Fails the staging run before it resolves or downloads anything when the
+#   controller -> router SSH relay is already known to be broken.
+#
+#   WHY HERE. Everything this script does is host-side - vault read, upstream
+#   metadata calls, downloads, checksums - so none of it needs the relay. The
+#   playbook that follows needs it for every host, and Common-Ansible's own
+#   WSL-side probe (ops/virtual-machines/_assert-router-reachable.sh, via
+#   _run-playbook.sh -> resolve_router) is the gate that catches it. But that
+#   fires inside dispatch, which is AFTER this script has already spent a
+#   fleet's worth of upstream round trips and hashing. Checking at the top of
+#   the one step that runs first, and that is already PowerShell holding an
+#   open vault session, costs no extra process hop and no extra vault read.
+#
+#   WHY THE PORTPROXY IS THE APPLICABILITY SIGNAL. A direct/standalone estate
+#   lays no relay, so there is nothing to verify; the presence of a portproxy
+#   entry is what says the jump topology is in use. Same "gated on the thing
+#   existing" shape the runner flow's docker assert uses. A routed estate whose
+#   relay was never laid at all is skipped here and caught by the bridge - a
+#   false negative that costs the staging run, never a wrong answer.
+#
+#   WHY A MISSING MODULE DOES NOT FAIL THE RUN. The floor
+#   (Infrastructure.Network.Windows 1.4.0) not being installed says nothing
+#   about the relay. Treating it as a fault would let a dependency gap take
+#   toolchain provisioning down - the tooling failing closed over itself
+#   rather than over the estate. It warns and proceeds; the bridge still gates
+#   the dispatch, so only the early exit is forfeited.
+#
+#   Narration goes to stderr because stdout carries this script's KEY=value
+#   contract.
+# ---------------------------------------------------------------------------
+function Assert-RouterRelayForStaging {
+    [CmdletBinding()]
+    param(
+        # Must match the port Set-RouterSshRelay laid; both default to 2222.
+        [Parameter()] [int] $ListenPort = 2222
+    )
+
+    try {
+        Import-Module Infrastructure.Network.Windows -MinimumVersion 1.4.0 `
+            -ErrorAction Stop
+    }
+    catch {
+        [Console]::Error.WriteLine(
+            "  WARN: cannot check the router SSH relay - " +
+            "Infrastructure.Network.Windows 1.4.0+ is unavailable. This is no " +
+            "verdict on the relay; staging proceeds and the bridge still " +
+            "asserts the hop before dispatch.")
+        return
+    }
+
+    $rules = @(Get-NetshPortProxyRules |
+        Where-Object { $_.ListenPort -eq $ListenPort })
+    if ($rules.Count -eq 0) {
+        [Console]::Error.WriteLine(
+            "  No SSH relay configured on port ${ListenPort}; this estate does " +
+            "not route through a router jump. Skipping the relay check.")
+        return
+    }
+
+    $relay = Test-RouterSshRelay -ListenPort $ListenPort
+    if (-not $relay.Ok) {
+        throw (
+            "Stage-ToolchainArtifacts: the controller -> router SSH relay is " +
+            "not usable, so every host would fail as UNREACHABLE after " +
+            "staging. Refusing to stage. $($relay.Reason)"
+        )
+    }
+    [Console]::Error.WriteLine("  Router SSH relay OK ($($relay.Banner)).")
+}
+
 function Invoke-ToolchainStaging {
     [CmdletBinding()]
     param(
@@ -297,6 +368,10 @@ function Invoke-ToolchainStaging {
         [Parameter()] [string] $StagingDirectory,
         [Parameter()] [string] $ResolvedConfigOut
     )
+
+    # First, before the staging dir exists and before any upstream call: the
+    # whole point is to fail without having spent anything.
+    Assert-RouterRelayForStaging
 
     if ([string]::IsNullOrWhiteSpace($StagingDirectory)) {
         $StagingDirectory =

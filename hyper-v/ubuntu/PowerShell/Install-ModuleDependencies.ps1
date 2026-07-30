@@ -139,7 +139,7 @@ Invoke-ModuleInstall -ModuleName 'Infrastructure.HyperV' -MinimumVersion '1.3.0'
 # proxy into a single named next-step instead of a manual checklist) and
 # the older 0.6.0 floor (Set-RouterSshPortProxyFirewall's reboot-stable
 # WSL-NAT-range scoping).
-Invoke-ModuleInstall -ModuleName 'Infrastructure.Network.Windows' -MinimumVersion '1.3.0'
+Invoke-ModuleInstall -ModuleName 'Infrastructure.Network.Windows' -MinimumVersion '1.4.0'
 
 # Infrastructure.Wsl provides Invoke-WslShell (used by
 # Test-WslRouterReachability) and Assert-Wsl2Ready / Assert-WslHasBash
