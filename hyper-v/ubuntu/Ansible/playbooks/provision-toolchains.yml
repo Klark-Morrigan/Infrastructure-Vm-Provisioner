@@ -6,6 +6,9 @@
 #   section 1 (host-pushed)   jdk -> dotnet_sdk -> dotnet_tools, powershell
 #   section 2 (vm-downloaded) toolchain_apt + toolchain_bats_libs
 #   section 3 (base-image)    docker
+# and closes with two reporting roles that install nothing: toolchain_report
+# (what is installed and what it owns) and artifact_report (what it was
+# installed from, and whether that is still on the VM).
 # This playbook and its wrapper are the consumer half of plan step 5.5; the
 # roles themselves are substrate (Common-Ansible roles/*) resolved from the
 # sibling checkout via ANSIBLE_ROLES_PATH.
@@ -170,3 +173,36 @@
         _host_base_image
         | selectattr('name', 'equalto', 'docker') | list | length > 0
       tags: docker
+
+    # Terminal, and deliberately last: every role above appends what it
+    # installed / left alone / removed - and the paths each version owns on
+    # the VM - to the play-wide toolchain_report_entries accumulator, and
+    # this renders it as one block per host. Without it a converged run
+    # prints only `skipping` lines, which say nothing about where the
+    # toolchains actually live.
+    #
+    # Tagged `always` so a targeted run (--tags jdk) still ends with a
+    # report, scoped to whatever actually ran.
+    - name: Report the toolchain reconciliation outcome
+      ansible.builtin.import_role:
+        name: toolchain_report
+      tags:
+        - toolchain_report
+        - always
+
+    # The acquisition-side companion: where each toolchain's artifact came
+    # from and whether that file - and the directory it was unpacked into -
+    # is still on the VM. Unlike the report above it PROBES rather than
+    # infers, which is what makes it useful on a converged run: the
+    # download code never executes then, so nothing about artifact
+    # residency can be derived from what the run did.
+    #
+    # This is the report to read first when a build fails ON a provisioned
+    # VM rather than during provisioning - it walks backwards from the
+    # failing binary to the tarball it came out of.
+    - name: Report the toolchain artifacts resident on each host
+      ansible.builtin.import_role:
+        name: artifact_report
+      tags:
+        - artifact_report
+        - always

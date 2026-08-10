@@ -33,6 +33,9 @@
   - [Acquire, verify, stage (the integrity gate)](#acquire-verify-stage-the-integrity-gate)
   - [The toolchains taxonomy block (sections 2 and 3)](#the-toolchains-taxonomy-block-sections-2-and-3)
   - [Running the flow](#running-the-flow)
+  - [Reading the run report](#reading-the-run-report)
+    - [What is installed (toolchain_report)](#what-is-installed-toolchain_report)
+    - [What it came from (artifact_report)](#what-it-came-from-artifact_report)
 - [CI](#ci)
 - [Repo structure](#repo-structure)
 
@@ -1443,9 +1446,12 @@ through Infrastructure-E2E.
 The flow lives under `hyper-v/ubuntu/Ansible/`:
 
 - `playbooks/provision-toolchains.yml` - composes the substrate roles against
-  every host in the fleet inventory, one per taxonomy section: `jdk` ->
-  `dotnet_sdk` -> `dotnet_tools` (section 1), `toolchain_apt` (section 2), and
-  `docker` (section 3, gated on a `docker` entry in the host's `baseImage`).
+  every host in the fleet inventory, grouped by taxonomy section: `jdk` ->
+  `dotnet_sdk` -> `dotnet_tools` -> `powershell` (section 1), `toolchain_apt` +
+  `toolchain_bats_libs` (section 2), and `docker` (section 3, gated on a
+  `docker` entry in the host's `baseImage`). It closes with two reporting
+  roles that install nothing - `toolchain_report` and `artifact_report` - see
+  [Reading the run report](#reading-the-run-report).
 - `ops/provision-toolchains.sh` - the operator entry point.
 - `ops/_stage-toolchain-artifacts.sh` + `ops/Stage-ToolchainArtifacts.ps1` -
   the acquire/verify/stage step (below).
@@ -1591,6 +1597,80 @@ SECRET_SUFFIX=Production ./provision-toolchains.sh
 # Forwarded args reach ansible-playbook unchanged, e.g.:
 SECRET_SUFFIX=Production ./provision-toolchains.sh --limit ubuntu-02-ci --check
 ```
+
+### Reading the run report
+
+The play ends with two report blocks per host, answering different questions.
+Read the first to see what the run did; read the second when something is
+broken on the VM afterwards.
+
+#### What is installed (toolchain_report)
+
+The substrate's `toolchain_report` role names every tool it reconciled, what
+happened to it, and the exact paths it owns on the VM:
+
+```text
+Toolchain report for ubuntu-02-ci -- 1 installed, 5 present, 0 removed
+section 1 - host-pushed (staged on the controller, pulled from the file server)
+  present   jdk 17.0.20+8
+      dir   /opt/jdk-17.0.20+8
+      link  /usr/local/bin/java -> /opt/jdk-17.0.20+8/bin/java
+      file  /etc/profile.d/jdk.sh
+  installed dotnet 10.0.100
+      dir   /opt/dotnet-10.0.100
+      link  /usr/local/bin/dotnet -> /opt/dotnet-10.0.100/dotnet
+section 2 - vm-downloaded (the VM fetches these itself)
+  present   shellcheck 0.9.0-1
+      (dpkg-managed - the package manager owns these paths)
+```
+
+Read the header first: `installed` counts what this run actually placed,
+`present` what was already converged, `removed` what it tore down. A run where
+everything is `present` moved no bytes - which is what the `changed=0` in the
+PLAY RECAP means, and what the per-task `skipping` lines are reporting.
+
+Symlinks are listed individually rather than counted, so the report answers
+"which `java` is on PATH" directly. Section-2 apt packages and the section-3
+Docker engine report no paths on purpose: dpkg, not this stack, owns their
+filesystem footprint.
+
+#### What it came from (artifact_report)
+
+The substrate's `artifact_report` role follows, naming where each toolchain's
+artifact was fetched from and whether that file - and the directory it was
+unpacked into - is still on the VM:
+
+```text
+Artifact report for ubuntu-02-ci -- 0 downloaded, 0 reused from cache, 4 not needed
+section 1 - host-pushed (fetched from the controller file server)
+  jdk 17.0.20+8  [transfer: none]
+      source    http://192.168.137.1:8080/OpenJDK17U-jdk_x64_linux_hotspot_17.0.20_8.tar.gz
+      artifact  /var/cache/common-ansible/toolchains/OpenJDK17U-jdk_x64_linux_hotspot_17.0.20_8.tar.gz
+                present, 195.3 MB, modified 2026-06-09 17:13
+      unpacked  /opt/jdk-17.0.20+8  present
+```
+
+This is the report to open when a build fails **on** a provisioned VM rather
+than during provisioning: it walks backwards from the failing binary to the
+tarball it came out of. Residency is probed on every run, not inferred from
+what the run did - which is exactly what makes it useful on a converged run,
+where the download code never executes at all.
+
+`transfer` records what this run did (`downloaded`, `reused-cache`, or `none`
+when nothing needed installing); residency is stated separately, so
+`transfer: none` next to a present artifact is the normal steady state.
+`MISSING` is uppercase because it is the one word worth scanning for - an
+install directory `MISSING` here while `toolchain_report` calls the tool
+`present` means the manifest claims paths that are gone, and every symlink
+into them dangles.
+
+The symptom-to-diagnosis table lives in the
+[role README](https://github.com/Klark-Morrigan/Common-Ansible/blob/master/roles/artifact_report/README.md).
+
+#### Both, always
+
+Neither report is a separate step - both are tagged `always`, so a targeted
+run (`--tags jdk`) still ends with them, scoped to whatever ran.
 
 ---
 
