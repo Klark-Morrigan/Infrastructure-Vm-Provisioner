@@ -49,7 +49,15 @@ param(
     # so the two engines are selected the same way the sibling repos select
     # theirs (create-users / register-runners vs their (Ansible) variants) -
     # by which command a scenario names, not by an ambient env var.
-    [switch] $SkipToolchains
+    [switch] $SkipToolchains,
+
+    # Skip the in-line PowerShell `files` transport in post-provisioning.
+    # Same engine-selection idea as -SkipToolchains above, applied to the
+    # second pair of interchangeable engines: the Ansible file path is a
+    # SEPARATE operator command (hyper-v/ubuntu/Ansible/ops/provision-files.sh),
+    # so a bare `provision` keeps copying files over the host file server
+    # exactly as before.
+    [switch] $SkipFiles
 )
 
 Set-StrictMode -Version Latest
@@ -174,6 +182,11 @@ $vmDefs = Read-VmProvisionerConfig -SecretSuffix $SecretSuffix
 
 if ($SkipToolchains) {
     Write-Host "Toolchains: skipped (install separately via provision-toolchains.sh)" `
+        -ForegroundColor Cyan
+}
+
+if ($SkipFiles) {
+    Write-Host "Files: skipped (copy separately via provision-files.sh)" `
         -ForegroundColor Cyan
 }
 
@@ -466,16 +479,20 @@ try {
 
     Invoke-WithPhaseTimer -Name 'Post-provisioning' -Action {
         foreach ($vm in $vmsToProcess) {
-            Invoke-VmPostProvisioning -Vm $vm -SkipToolchains:$SkipToolchains
+            Invoke-VmPostProvisioning -Vm $vm `
+                -SkipToolchains:$SkipToolchains `
+                -SkipFiles:$SkipFiles
         }
     }
 
-    # Toolchains are installed here, in step 9's per-VM reconciler, unless
-    # -SkipToolchains was passed. The Ansible alternative is a separate
-    # operator command (hyper-v/ubuntu/Ansible/ops/provision-toolchains.sh),
-    # run after this by the '(Ansible)' scenario - not orchestrated from here,
-    # so provision.ps1 stays a pure host-side PowerShell flow with no WSL
-    # shell-out, matching how the sibling repos keep their two engines apart.
+    # Toolchains are installed - and `files` entries transported - here, in
+    # step 9's post-provisioning, unless -SkipToolchains / -SkipFiles was
+    # passed. Each has an Ansible alternative that is a separate operator
+    # command (hyper-v/ubuntu/Ansible/ops/provision-toolchains.sh,
+    # ops/provision-files.sh), run after this by the '(Ansible)' scenario -
+    # not orchestrated from here, so provision.ps1 stays a pure host-side
+    # PowerShell flow with no WSL shell-out, matching how the sibling repos
+    # keep their two engines apart.
 
     Write-Host ""
     Write-Host "Provisioning complete." -ForegroundColor Green

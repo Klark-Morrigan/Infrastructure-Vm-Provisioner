@@ -1,0 +1,80 @@
+---
+# Operator-facing entry into the file provisioning flow - the operator-declared
+# `files` entries of each VM definition, copied onto every host the bash bridge
+# dropped into the vm_provisioner_hosts inventory group. Two substrate roles:
+# vm_files does the whole job (validate -> resolve -> transport -> record) and
+# files_report renders what it did.
+#
+# Peer to provision-toolchains.yml rather than a section of it. The two flows
+# share a substrate, an inventory vault and a bridge, but nothing else: this one
+# moves operator payloads, that one moves toolchains, and either is worth
+# running without paying for the other. Keeping them apart is also what lets
+# the PowerShell file engine stay live alongside this one - the engine that runs
+# is the command the operator invoked, not a flag inside a shared play.
+#
+# Nothing here needs the Windows-side file server the toolchain flow declares.
+# ansible.builtin.copy pushes bytes through the SSH connection the bridge has
+# already opened, so `host_file_server_base_url` goes unread on this path.
+#
+# Posture (hosts is the bridge's group, any_errors_fatal) mirrors
+# provision-toolchains.yml.
+#
+# gather_facts is off for the same reason it is off there, and the reasoning
+# holds independently: neither role reads a gathered fact - the transport is
+# ansible.builtin.copy against absolute paths from config, and bulk globs are
+# resolved controller-side with ansible.builtin.find. With zero consumers the
+# setup module is pure cost on a flow whose whole point is to be cheap enough
+# to re-run after editing one config entry.
+
+- name: Provision operator-declared files onto provisioned VMs
+  hosts: vm_provisioner_hosts
+  gather_facts: false
+  any_errors_fatal: false
+  vars:
+    # This host's desired-state: its slice of the play-wide dict the wrapper's
+    # resolve step (ops/_resolve-vm-files-config.sh) built by lifting each VM's
+    # `files` array out of VmProvisionerConfig and keying it by vmName - which
+    # is also the inventory_hostname the bridge keyed the host by. Same channel
+    # and selection shape provision-toolchains.yml uses for
+    # toolchains_resolved_by_host; play vars are templated per host, so
+    # inventory_hostname resolves to each host in turn.
+    #
+    # Read from THAT dict and never from `vm_provisioner_config.files`, even
+    # though the bridge surfaces the whole config and the raw arrays are right
+    # there. The raw entries still name their sources Windows-side
+    # (C:\jars\*.jar); only the resolved dict carries the /mnt form the WSL
+    # controller can actually open. Selecting the config directly would fail
+    # per-file, deep in the transport, on a path that looks correct in the
+    # config the operator wrote.
+    #
+    # The resolve step emits every VM carrying a vmName, so the default([])
+    # covers a host the bridge put in the group without a config entry rather
+    # than the ordinary "declares no files" case. Either way it installs
+    # nothing: vm_files is a no-op on an empty list.
+    vm_files_entries: >-
+      {{ (vm_files_by_host | default({}))[inventory_hostname] | default([]) }}
+  tasks:
+    # Validation, resolution, transport and report accumulation are all this
+    # role's, deliberately: an operator typo has to be rejected by the
+    # component that owns the `files` schema, before the first byte crosses
+    # the connection, rather than by a pre-pass here that would fork those
+    # rules.
+    - name: Transport the declared files onto the VM
+      ansible.builtin.import_role:
+        name: vm_files
+      tags: vm_files
+
+    # Terminal, and the reason the flow is worth watching: a bulk entry is one
+    # line of config that becomes an unknown number of files, and the PLAY
+    # output names them only as loop labels interleaved with everything else.
+    # This renders one block per host listing every file that landed, where it
+    # came from, and whether THIS run wrote it.
+    #
+    # Tagged `always` so a targeted run (--limit, --tags vm_files) still ends
+    # with a report, scoped to whatever actually ran.
+    - name: Report the files transported to each host
+      ansible.builtin.import_role:
+        name: files_report
+      tags:
+        - files_report
+        - always

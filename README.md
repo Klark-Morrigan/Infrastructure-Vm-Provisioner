@@ -36,6 +36,11 @@
   - [Reading the run report](#reading-the-run-report)
     - [What is installed (toolchain_report)](#what-is-installed-toolchain_report)
     - [What it came from (artifact_report)](#what-it-came-from-artifact_report)
+- [File provisioning via Ansible (Common-Ansible)](#file-provisioning-via-ansible-common-ansible)
+  - [File transport (the two chains)](#file-transport-the-two-chains)
+  - [Controller-side path translation](#controller-side-path-translation)
+  - [The playbook](#the-playbook)
+  - [Reading the files report](#reading-the-files-report)
 - [CI](#ci)
 - [Repo structure](#repo-structure)
 
@@ -73,16 +78,16 @@ PSGallery automatically on first run.
 .\hyper-v\ubuntu\shared\setup-secrets.ps1 -ConfigFile C:\private\vm-config.json
 
 # 2. Provision VMs (run as Administrator)
-.\hyper-v\ubuntu\PowerShell\provision.ps1
+.\hyper-v\ubuntu\PowerShell\provision.ps1 -SecretSuffix Production
 
 # 3. Bring VMs back up after a reboot (run as Administrator)
-.\hyper-v\ubuntu\PowerShell\start-vms.ps1
+.\hyper-v\ubuntu\PowerShell\start-vms.ps1 -SecretSuffix Production
 
 # 4. Bring the fleet back to ready after a host reboot (run as Administrator)
 .\hyper-v\ubuntu\PowerShell\ensure-vms-ready.ps1 -SecretSuffix Production
 
 # 5. Remove VMs when no longer needed (run as Administrator)
-.\hyper-v\ubuntu\PowerShell\deprovision.ps1
+.\hyper-v\ubuntu\PowerShell\deprovision.ps1 -SecretSuffix Production
 ```
 
 ---
@@ -612,6 +617,11 @@ reused by `Infrastructure-Vm-Users` for its own (user-owned) file copies.
 Re-runs overwrite the target file with the current host source —
 the user's intent is "this file should look like this".
 
+This in-line copy is one of two interchangeable transports for the same
+`files` array. `provision -SkipFiles` stands it down — that run then copies
+nothing, and the Ansible transport is a second command you run yourself. See
+[File transport](#file-transport-the-two-chains).
+
 **Ownership model in the provisioner**: every file copied by this step
 lands `root:root, 0644`. The provisioner runs *before* user creation, so
 no app users exist yet to chown to. Files needing a per-user owner belong
@@ -828,8 +838,21 @@ through reconcile and installing a JDK on the gateway.
 Run as Administrator after `setup-secrets.ps1` has stored the config.
 
 ```powershell
-.\hyper-v\ubuntu\PowerShell\provision.ps1
+.\hyper-v\ubuntu\PowerShell\provision.ps1 -SecretSuffix Production
 ```
+
+| Parameter | Notes |
+|---|---|
+| `-SecretSuffix` | **Required.** Names the lifecycle to read - the vault key is `VmProvisionerConfig-<Suffix>`. Operators pass `Production`; ephemeral environments (parallel workflows, E2E) pass their own label. Mandatory so a caller cannot fall through to a default and collide with another lifecycle's data. |
+| `-SkipToolchains` | Suppresses the in-line toolchain reconciler: this run installs nothing. See [Toolchain engine](#toolchain-engine-selecting-the-live-path). |
+| `-SkipFiles` | Suppresses the in-line `files` transport: this run copies nothing. See [File transport](#file-transport-the-two-chains). |
+
+Both switches are pure suppression - neither hands off to the Ansible
+counterpart, which is a second command you run yourself. A VM whose only
+opt-in field is suppressed opens no SSH session and no file server at all.
+Neither relaxes validation: a `files` entry naming a `source` that does not
+exist on the host still fails the whole run up front, under `-SkipFiles` as
+much as without it.
 
 Reads `VmProvisionerConfig` from the vault and for each VM definition:
 
@@ -974,6 +997,9 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
       dispatched in JSON order: single entries via `Copy-VmFiles`, bulk
       entries via `Copy-VmFilesByPattern`; see
       [Optional: copy files to the VM](#optional-copy-files-to-the-vm)).
+      Suppressed by `-SkipFiles`, which copies nothing and leaves the
+      entries to the Ansible transport if you go on to run it - see
+      [File transport](#file-transport-the-two-chains).
     - **`javaDevKit`** is now reconciler-owned (see the Reconciler
       subsection below) — the JDK provider extracts the prefetched
       Temurin tarball into `/opt/jdk-{vendor}-{resolvedVersion}/`,
@@ -993,7 +1019,9 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
     Each step is self-contained — no step consumes files left by another
     step. Adding a new step (e.g. Maven) is a one-function addition with
     one dispatch line in `Invoke-VmPostProvisioning`. Skipped silently
-    for VMs that have no opt-in fields. Idempotent on the VM side: the
+    for VMs that have no opt-in fields - or whose only opt-in fields are
+    the ones `-SkipFiles` / `-SkipToolchains` suppressed, since the skip
+    is decided before any transport is paid for. Idempotent on the VM side: the
     JDK install no-ops when its `release` file is already present, file
     copies overwrite with the current host source bytes, and the
     env-vars step skips the SSH write when the desired block already
@@ -1426,22 +1454,28 @@ egress.
 ### Toolchain engine (selecting the live path)
 
 Toolchains have two interchangeable engines, selected the same way the sibling
-repos (Vm-Users, GitHubRunners) select theirs - **by which command runs**, not
-an ambient env var. There is no default engine baked into a flag; a bare
-`provision` simply keeps its historical behaviour.
+repos (Vm-Users, GitHubRunners) select theirs - **by which chain of commands
+runs**, not an ambient env var. There is no default engine baked into a flag; a
+bare `provision` simply keeps its historical behaviour.
 
-| To use | Run |
+| Chain | Commands |
 | --- | --- |
 | PowerShell reconciler (in-line, per VM) | `provision` - installs toolchains during post-provisioning. This is what a bare `provision` does. |
-| Ansible flow (per host) | `provision -SkipToolchains`, then `provision-toolchains.sh`. The reconciler stays out of the way; the Ansible command installs each host's own toolchains. |
+| Ansible (per host) | `provision -SkipToolchains`, then `provision-toolchains.sh`. Two independent commands, run in that order. |
+
+`-SkipToolchains` means what it says: that run installs no toolchains. It does
+**not** hand off to Ansible - `provision.ps1` never invokes it - and nothing
+checks that you went on to run `provision-toolchains.sh`.
 
 Both read the same desired-state (`VmProvisionerConfig`), so the two chains are
-interchangeable. In the `.menu` launcher these are the `provision` /
-`provision (skip toolchains)` / `provision-toolchains (Ansible)` entries, and
-the end-to-end scenarios pair them: the `(custom PS)` chain runs
-`provision`; the `(Ansible)` chain runs `provision (skip toolchains)` then
-`provision-toolchains (Ansible)`. Live correctness of either path is verified
-through Infrastructure-E2E.
+interchangeable. The `.menu` launcher offers only the Ansible one: its Deploy
+section runs `provision (skip toolchains, skip files)` before
+`provision-toolchains`, and the `VM + users + runners` scenario chains them that
+way. The in-line reconciler survives only as the deprecated
+`provision (with in-line toolchains and files)` row in the Legacy section - a
+bare `provision.ps1`, so it fires the in-line file copy with it
+([File transport](#file-transport-the-two-chains)). Live correctness of either
+path is verified through Infrastructure-E2E.
 
 The flow lives under `hyper-v/ubuntu/Ansible/`:
 
@@ -1586,7 +1620,7 @@ narrowest owner.
 
 Requires a WSL controller - bootstrap it with
 [`ops/bootstrap-controller.sh`](hyper-v/ubuntu/Ansible/ops/bootstrap-controller.sh)
-(the `bootstrap-controller (Ansible)` menu entry), a thin shim that reuses the
+(the `bootstrap-controller (one-time)` menu entry), a thin shim that reuses the
 shared Common-Ansible controller - the local `VmProvisioner` vault populated
 (including each VM's toolchain fields), and the Common-Ansible sibling checkout
 present.
@@ -1671,6 +1705,200 @@ The symptom-to-diagnosis table lives in the
 
 Neither report is a separate step - both are tagged `always`, so a targeted
 run (`--tags jdk`) still ends with them, scoped to whatever ran.
+
+---
+
+## File provisioning via Ansible (Common-Ansible)
+
+A second Ansible flow, peer to the toolchain one, carrying the
+operator-declared [`files`](#optional-copy-files-to-the-vm) entries of each VM
+definition to the provisioned VMs through the substrate's `vm_files` and
+`files_report` roles. Same substrate, same
+[sibling checkout](#consuming-common-ansible), same `VmProvisionerConfig`
+desired-state - only the payload differs.
+
+`ops/provision-files.sh` is the operator entry point. Its `CA_*` contract is
+deliberately shorter than the toolchain wrapper's: the `VmProvisioner`
+inventory vault and `CA_CONSUMER_ROOT`, and **no host file server**.
+`ansible.builtin.copy` pushes bytes through the SSH connection the bridge has
+already opened, so this flow needs no Windows-side `HttpListener` - and the
+payloads never leave that channel, unlike the PowerShell engine, which
+publishes every `files` entry on an unauthenticated listener on the Hyper-V
+subnet for the duration of a run.
+
+### File transport (the two chains)
+
+Files have two interchangeable transports. Which one runs is a property of the
+**chain of commands you run**, not of any one flag - `provision.ps1` never
+invokes Ansible, so there is nothing for a flag to select between.
+
+| Chain | Commands |
+| --- | --- |
+| PowerShell (in-line, per VM) | `provision` - copies files during post-provisioning. This is what a bare `provision` does. |
+| Ansible (per host) | `provision -SkipFiles`, then `provision-files.sh`. Two independent commands, run in that order. |
+
+`-SkipFiles` means exactly what it says: that run transports no files. It does
+**not** hand off to Ansible, and nothing checks that you went on to run
+`provision-files.sh` - stopping after the first command leaves the files
+uncopied. The same is true of `-SkipToolchains`
+([Toolchain engine](#toolchain-engine-selecting-the-live-path)); the switches
+are independent, so all four combinations are valid, and
+`provision -SkipToolchains -SkipFiles` is the first half of the all-Ansible
+chain.
+
+A VM whose only opt-in fields are covered by the switches passed opens no SSH
+session and no file server at all - the skip is decided before any transport is
+paid for.
+
+The `.menu` launcher offers only the Ansible chain here too: `provision-files`
+sits between `provision (skip toolchains, skip files)` and
+`provision-toolchains`, both in the Deploy section and in the
+`VM + users + runners` scenario. The PowerShell transport keeps no entry of its
+own - it rides the deprecated Legacy row described under
+[Toolchain engine](#toolchain-engine-selecting-the-live-path).
+
+### Controller-side path translation
+
+`files` entries name their sources on the **Windows host that authored the
+config** (`C:\jars\*.jar`), but `ansible-playbook` reads them under the **WSL
+controller**, where the same file is `/mnt/c/jars/*.jar`. Nothing in the
+substrate bridge translates config-supplied paths, and that is the design: the
+reusable roles receive POSIX paths and stay free of drive letters, `/mnt`, and
+WSL, which is what makes them testable in a plain container. Only this repo
+knows the estate is Windows-hosted, so the conversion is the consumer's.
+
+A second, easily-missed translation rides alongside it. The wrapper runs in
+whatever shell launched it - Git Bash under the menu - but `ansible-playbook`
+always runs under the WSL controller, because the substrate bridge re-execs
+itself there and forwards its arguments **verbatim**. So the temp document the
+wrapper writes needs two spellings: the local one it writes and deletes, and
+the `/mnt` one the controller opens. Git Bash's `/tmp` *is* the Windows temp
+directory, so nothing is relocated - only respelled.
+
+Four pieces, all under `hyper-v/ubuntu/Ansible/ops/`:
+
+- `_to-wsl-path.sh` - the conversion itself (`_to_wsl_path`), the inverse of
+  Common-Automation's `_to_windows_path` that the pwsh.exe direction already
+  uses. Drive letters translate in either case and with either slash; an
+  already-POSIX or relative path passes through untouched; UNC
+  (`\\server\share`) and drive-relative (`C:file`) paths are **rejected**,
+  because neither has an honest `/mnt` equivalent and a guess would surface
+  later as an unrecognisable "file not found". The toolchain flow's staging
+  step shares it for the resolved-config path pwsh.exe hands back.
+- `_resolve-vm-files-config.sh` - a pure stdin -> stdout reshape that lifts
+  each VM's `files` array into one play-wide document keyed by `vmName` and
+  rewrites every `source` / `pattern` on the way. `target` / `targetDir` are
+  left alone: they are VM-side POSIX paths that never saw a drive letter.
+  Schema validation is **not** duplicated here - the `vm_files` role owns those
+  rules, so a malformed entry rides through untouched to be reported by the
+  component that knows them.
+- `_create-controller-tempfile.sh` - the two-spelling handoff
+  (`create_controller_tempfile` + `resolve_controller_path`). It classifies the
+  shell by `uname`, the same test the bridge uses for its own re-exec, and
+  converts through `cygpath -w` so it holds wherever the MSYS mount table puts
+  `/tmp`. **Not** keyed on `TEMP`: MSYS rewrites that to `/tmp` on entry, so it
+  reads as POSIX even under Git Bash. `_dispatch-playbook.sh` uses it too, for
+  the timing callback's rows file.
+- `provision-files.sh` - reads the inventory vault, pipes it through the
+  reshape, and forwards the result as a single `--extra-vars` document, in the
+  controller spelling. Same channel and shape the toolchain flow uses for its
+  resolved pins:
+
+```json
+{
+  "vm_files_by_host": {
+    "ubuntu-01-ci": [
+      { "source": "/mnt/c/payloads/app.jar", "target": "/opt/app/app.jar" },
+      { "pattern": "/mnt/c/jars/*.jar", "targetDir": "/opt/app/lib",
+        "recurse": true }
+    ],
+    "ubuntu-02-ci": []
+  }
+}
+```
+
+Every VM carrying a `vmName` appears, with an empty list when it declares no
+files, so the per-host lookup never has to tell "no entry" from "nothing to
+copy". A path the controller cannot reach fails the whole resolve, by name,
+before any VM is touched.
+
+### The playbook
+
+`playbooks/provision-files.yml` composes the two substrate roles against the
+bridge's `vm_provisioner_hosts` group: `vm_files` validates, resolves and
+transports; `files_report` renders what it did. It is a peer of
+`provision-toolchains.yml`, not a section of it - the two share a substrate, a
+vault and a bridge, but either is worth running without paying for the other,
+and keeping them apart is what lets the PowerShell file engine stay live
+alongside this one.
+
+Each host's desired-state is its slice of `vm_files_by_host`, selected by
+`inventory_hostname` exactly as the toolchain playbook selects out of
+`toolchains_resolved_by_host`. It reads that resolved dict and never
+`vm_provisioner_config.files`, even though the bridge surfaces the whole config:
+only the resolved copy carries the `/mnt` paths the controller can open.
+
+The report is tagged `always`, so a `--limit` or `--tags vm_files` run still
+ends with one, scoped to whatever ran. Facts are not gathered - neither role
+reads one.
+
+Prerequisites are the toolchain flow's, minus the file server:
+[see above](#running-the-flow).
+
+```bash
+# From hyper-v/ubuntu/Ansible/ops/, with SECRET_SUFFIX naming the lifecycle:
+SECRET_SUFFIX=Production ./provision-files.sh
+# Forwarded args reach ansible-playbook unchanged, e.g.:
+SECRET_SUFFIX=Production ./provision-files.sh --limit ubuntu-02-ci --check
+```
+
+### Reading the files report
+
+The play ends with one report block per host, from the substrate's
+`files_report` role. It answers the question the PLAY output cannot: a bulk
+entry is one line of config that becomes an unknown number of files, and the
+play names them only as loop labels interleaved with everything else.
+
+```text
+Files report for ubuntu-02-ci -- 2 copied, 4 unchanged
+section 1 - named files (one declared entry, one file)
+  copied    /etc/app/app.conf  root:root 0644
+      source  /mnt/c/estate/config/app.conf
+  unchanged /etc/app/logging.json  root:root 0644
+      source  /mnt/c/estate/config/logging.json
+section 2 - glob matched files (one declared entry, every file it named)
+  pattern /mnt/c/estate/jars/*.jar -- 3 landed
+    unchanged /opt/app/lib/engine-4.2.1.jar  root:root 0644
+        source  /mnt/c/estate/jars/engine-4.2.1.jar
+    unchanged /opt/app/lib/plugins-4.2.1.jar  root:root 0644
+        source  /mnt/c/estate/jars/plugins-4.2.1.jar
+    copied    /opt/app/lib/telemetry-1.0.0.jar  root:root 0644
+        source  /mnt/c/estate/jars/telemetry-1.0.0.jar
+```
+
+The two sections read differently, which is why they are sections. A named file
+is one line of config and one file, so it can be checked against the config by
+eye. A matched file cannot: the pattern above it is the only thing that says
+which line of config put it there, and the count beside it makes an expansion
+checkable at a glance - an operator who expected four JARs and reads `3 landed`
+has their answer without reading the rows.
+
+`copied` names exactly what this run wrote, `unchanged` what was already
+correct. That distinction is only available at the moment of the copy, so
+re-running the flow after editing one config entry tells you precisely what
+moved.
+
+The `source` paths are the translated `/mnt/c/...` form, not the `C:\...` the
+config carries - this report describes the run as the controller performed it.
+See [Controller-side path translation](#controller-side-path-translation) for
+why the two differ.
+
+Unlike the toolchain reports there is no residency probe, and the omission is
+deliberate: every declared file is reconciled on every run, so `copy` is
+authoritative about the file it just wrote. A `stat` per file would spend a
+round trip per JAR to restate what the transport already reported. If you need
+to know whether a file is still on the VM some time later, that is a question
+for the next run of this flow, not for this report.
 
 ---
 
@@ -1836,9 +2064,9 @@ Infrastructure-VM-Provisioner/
 |     |     |  `- teardown-network.ps1         # Per-env teardown: delegates legacy NetNat + host IP cleanup to Remove-LegacySingletonNat, then removes the Private switch when empty
 |     |     `- vm/
 |     |        `- remove-vm.ps1               # Stops, removes VM, deletes VHDX and config dir
-|     `- Ansible/           # Slice: on-VM toolchain push (Common-Ansible bridge)
-|        |- ops/            # Stage-ToolchainArtifacts.ps1 (reuses PowerShell/up resolvers), provision-toolchains.sh, imports/
-|        |- playbooks/      # provision-toolchains.yml
+|     `- Ansible/           # Slice: on-VM toolchain + file push (Common-Ansible bridge)
+|        |- ops/            # Stage-ToolchainArtifacts.ps1 (reuses PowerShell/up resolvers), provision-toolchains.sh, provision-files.sh, imports/
+|        |- playbooks/      # provision-toolchains.yml, provision-files.yml
 |        `- requirements.yml
 |- Tests/
 |  |- shared/               # Unit tests for shared/ (setup-secrets)
@@ -1846,7 +2074,7 @@ Infrastructure-VM-Provisioner/
 |  |  |- common/            # Unit tests for common/ helpers (config, diag, network, power, ssh, ui)
 |  |  |- up/                # Unit tests for up/ (config, disk, jdk, dotnet, powershell, seed, network, post, reconciler, vm)
 |  |  `- down/              # Unit tests for down/ (network, vm)
-|  `- Ansible/              # Mirrors the Ansible slice (Stage-ToolchainArtifacts)
+|  `- Ansible/              # Mirrors the Ansible slice (Stage-ToolchainArtifacts, ops/ bash helpers)
 |- scripts/
 |  |- Run-Tests.ps1                       # Unit-test runner (delegates to Common-PowerShell)
 |  |- Run-IntegrationTests.ps1            # Docker-host integration runner (delegates to Common-PowerShell)

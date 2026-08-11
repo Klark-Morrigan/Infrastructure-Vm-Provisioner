@@ -381,6 +381,18 @@ BeforeAll {
         $vm
     }
 
+    # Both opt-in fields at once, so a -SkipFiles / -SkipToolchains test can
+    # tell "this switch suppressed its own step" from "the VM short-circuited
+    # out before the transport opened". Composed from the two single-field
+    # fixtures rather than restating either literal, so a change to the files
+    # entry or the JDK block reaches this shape too.
+    function New-VmWithJdkAndFiles {
+        $vm = New-VmWithFiles
+        Add-Member -InputObject $vm -MemberType NoteProperty -Name 'javaDevKit' `
+            -Value (New-VmWithJdk).javaDevKit
+        $vm
+    }
+
     function New-VmWithBulkFile {
         $vm = New-PlainVm
         Add-Member -InputObject $vm -MemberType NoteProperty -Name 'files' -Value @(
@@ -1010,6 +1022,76 @@ Describe 'Invoke-VmPostProvisioning' {
             Invoke-VmPostProvisioning -Vm (New-VmWithEnvVars) -SkipToolchains
 
             $global:_PostProv_Calls['Set-EnvironmentVariables'].Count | Should -Be 1
+        }
+    }
+
+    # ------------------------------------------------------------------
+    Context '-SkipFiles (files copied by the separate Ansible command)' {
+    # ------------------------------------------------------------------
+        # Peer of the -SkipToolchains context above, for the second pair of
+        # interchangeable engines. With -SkipFiles the per-VM copy must not
+        # run here and a files-only VM must not open the transport (the
+        # separate provision-files.sh command copies them instead).
+        # javaDevKit / envVars / router work is unchanged.
+
+        It 'does NOT dispatch the files copy when -SkipFiles is set' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithJdkAndFiles) -SkipFiles
+
+            $global:_PostProv_Calls['Copy-VmFiles'].Count | Should -Be 0
+        }
+
+        It 'does NOT dispatch the bulk files copy when -SkipFiles is set' {
+            # The switch gates the dispatch as a whole, so both routing
+            # halves of Invoke-VmFilesDispatch stay unreached.
+            Invoke-VmPostProvisioning -Vm (New-VmWithBulkFile) -SkipFiles
+
+            $global:_PostProv_Calls['Copy-VmFilesByPattern'].Count | Should -Be 0
+        }
+
+        It 'opens no transport for a files-only VM when -SkipFiles is set' {
+            # files no longer justify the SSH + file-server cost - the Ansible
+            # command copies them, so a files-only VM is a no-op here.
+            Invoke-VmPostProvisioning -Vm (New-VmWithFiles) -SkipFiles
+
+            $global:_PostProv_Calls['Invoke-WithVmFileServer'].Count | Should -Be 0
+            $global:_PostProv_Calls['New-VmSshClient'].Count         | Should -Be 0
+        }
+
+        It 'still dispatches the reconciler when -SkipFiles is set' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithJdkAndFiles) -SkipFiles
+
+            $global:_PostProv_Calls['Invoke-ToolchainReconciliation'].Count | Should -Be 1
+        }
+
+        It 'still runs Assert-RouterReady for a router VM when -SkipFiles is set' {
+            Invoke-VmPostProvisioning -Vm (New-RouterVm) -SkipFiles
+
+            $global:_PostProv_Calls['Assert-RouterReady'].Count | Should -Be 1
+        }
+
+        It 'still dispatches Set-EnvironmentVariables when -SkipFiles is set' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithEnvVars) -SkipFiles
+
+            $global:_PostProv_Calls['Set-EnvironmentVariables'].Count | Should -Be 1
+        }
+
+        It 'dispatches the files copy when -SkipFiles is explicitly false' {
+            # provision.ps1 forwards -SkipFiles:$SkipFiles unconditionally, so
+            # the off case is a real call shape, not just parameter omission.
+            Invoke-VmPostProvisioning -Vm (New-VmWithFiles) -SkipFiles:$false
+
+            $global:_PostProv_Calls['Copy-VmFiles'].Count | Should -Be 1
+        }
+
+        It 'opens no transport at all when both -SkipFiles and -SkipToolchains are set' {
+            # The Ansible scenario's provision call: everything this VM
+            # declares is handled by the two standalone commands, so the
+            # orchestrator must short-circuit before paying for a session.
+            Invoke-VmPostProvisioning -Vm (New-VmWithJdkAndFiles) `
+                -SkipFiles -SkipToolchains
+
+            $global:_PostProv_Calls['Invoke-WithVmFileServer'].Count | Should -Be 0
+            $global:_PostProv_Calls['New-VmSshClient'].Count         | Should -Be 0
         }
     }
 }
