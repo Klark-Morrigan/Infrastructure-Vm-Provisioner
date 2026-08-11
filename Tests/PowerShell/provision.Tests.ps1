@@ -319,7 +319,7 @@ Describe 'provision.ps1 - post-provisioning wiring (Step 5)' {
     }
 }
 
-Describe 'provision.ps1 - toolchain engine selection (-SkipToolchains)' {
+Describe 'provision.ps1 - engine selection (-SkipToolchains / -SkipFiles)' {
 
     It 'declares a -SkipToolchains switch parameter' {
         # The engine is selected by a visible, per-invocation parameter (set by
@@ -333,6 +333,21 @@ Describe 'provision.ps1 - toolchain engine selection (-SkipToolchains)' {
             Where-Object { $_.GetCommandName() -eq 'Invoke-VmPostProvisioning' } |
             Select-Object -First 1
         $call.Extent.Text | Should -Match 'SkipToolchains'
+    }
+
+    It 'declares a -SkipFiles switch parameter' {
+        # Peer of -SkipToolchains for the second pair of engines: the file
+        # engine is selected by the same visible, per-invocation parameter
+        # mechanism, not an ambient env var.
+        $text = Get-Content -Path $script:provisionPath -Raw
+        $text | Should -Match '\[switch\]\s*\$SkipFiles'
+    }
+
+    It 'threads -SkipFiles into Invoke-VmPostProvisioning' {
+        $call = $script:commands |
+            Where-Object { $_.GetCommandName() -eq 'Invoke-VmPostProvisioning' } |
+            Select-Object -First 1
+        $call.Extent.Text | Should -Match 'SkipFiles'
     }
 
     It 'does not orchestrate the Ansible flow from PowerShell' {

@@ -37,6 +37,7 @@
     - [What is installed (toolchain_report)](#what-is-installed-toolchain_report)
     - [What it came from (artifact_report)](#what-it-came-from-artifact_report)
 - [File provisioning via Ansible (Common-Ansible)](#file-provisioning-via-ansible-common-ansible)
+  - [File transport (the two chains)](#file-transport-the-two-chains)
   - [Controller-side path translation](#controller-side-path-translation)
   - [The playbook](#the-playbook)
 - [CI](#ci)
@@ -614,6 +615,11 @@ backs the schema (`Assert-VmFilesField`) also lives there. Both are
 reused by `Infrastructure-Vm-Users` for its own (user-owned) file copies.
 Re-runs overwrite the target file with the current host source —
 the user's intent is "this file should look like this".
+
+This in-line copy is one of two interchangeable transports for the same
+`files` array. `provision -SkipFiles` stands it down — that run then copies
+nothing, and the Ansible transport is a second command you run yourself. See
+[File transport](#file-transport-the-two-chains).
 
 **Ownership model in the provisioner**: every file copied by this step
 lands `root:root, 0644`. The provisioner runs *before* user creation, so
@@ -1429,14 +1435,18 @@ egress.
 ### Toolchain engine (selecting the live path)
 
 Toolchains have two interchangeable engines, selected the same way the sibling
-repos (Vm-Users, GitHubRunners) select theirs - **by which command runs**, not
-an ambient env var. There is no default engine baked into a flag; a bare
-`provision` simply keeps its historical behaviour.
+repos (Vm-Users, GitHubRunners) select theirs - **by which chain of commands
+runs**, not an ambient env var. There is no default engine baked into a flag; a
+bare `provision` simply keeps its historical behaviour.
 
-| To use | Run |
+| Chain | Commands |
 | --- | --- |
 | PowerShell reconciler (in-line, per VM) | `provision` - installs toolchains during post-provisioning. This is what a bare `provision` does. |
-| Ansible flow (per host) | `provision -SkipToolchains`, then `provision-toolchains.sh`. The reconciler stays out of the way; the Ansible command installs each host's own toolchains. |
+| Ansible (per host) | `provision -SkipToolchains`, then `provision-toolchains.sh`. Two independent commands, run in that order. |
+
+`-SkipToolchains` means what it says: that run installs no toolchains. It does
+**not** hand off to Ansible - `provision.ps1` never invokes it - and nothing
+checks that you went on to run `provision-toolchains.sh`.
 
 Both read the same desired-state (`VmProvisionerConfig`), so the two chains are
 interchangeable. In the `.menu` launcher these are the `provision` /
@@ -1694,6 +1704,36 @@ already opened, so this flow needs no Windows-side `HttpListener` - and the
 payloads never leave that channel, unlike the PowerShell engine, which
 publishes every `files` entry on an unauthenticated listener on the Hyper-V
 subnet for the duration of a run.
+
+### File transport (the two chains)
+
+Files have two interchangeable transports. Which one runs is a property of the
+**chain of commands you run**, not of any one flag - `provision.ps1` never
+invokes Ansible, so there is nothing for a flag to select between.
+
+| Chain | Commands |
+| --- | --- |
+| PowerShell (in-line, per VM) | `provision` - copies files during post-provisioning. This is what a bare `provision` does. |
+| Ansible (per host) | `provision -SkipFiles`, then `provision-files.sh`. Two independent commands, run in that order. |
+
+`-SkipFiles` means exactly what it says: that run transports no files. It does
+**not** hand off to Ansible, and nothing checks that you went on to run
+`provision-files.sh` - stopping after the first command leaves the files
+uncopied. The same is true of `-SkipToolchains`
+([Toolchain engine](#toolchain-engine-selecting-the-live-path)); the switches
+are independent, so all four combinations are valid, and
+`provision -SkipToolchains -SkipFiles` is the first half of the all-Ansible
+chain.
+
+A VM whose only opt-in fields are covered by the switches passed opens no SSH
+session and no file server at all - the skip is decided before any transport is
+paid for.
+
+**Not yet wired into the menu.** The switch exists, but the `.menu` entry and
+the end-to-end scenario that would pair `provision -SkipFiles` with
+`provision-files.sh` are not in place, so the estate's live chain is still the
+PowerShell one described under
+[Optional: copy files to the VM](#optional-copy-files-to-the-vm).
 
 ### Controller-side path translation
 

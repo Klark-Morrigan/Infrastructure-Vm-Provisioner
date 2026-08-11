@@ -35,12 +35,25 @@ function Invoke-VmPostProvisioning {
         # toolchain-only VM opens no session, because the separate Ansible
         # command installs toolchains instead.
         [Parameter()]
-        [switch] $SkipToolchains
+        [switch] $SkipToolchains,
+
+        # Skip the per-VM PowerShell `files` transport. Off by default, so the
+        # dispatch runs and a files-only VM still opens the transport - the
+        # legacy behaviour. When set (provision.ps1 -SkipFiles, used by the
+        # Ansible scenario), the files dispatch below is skipped and a
+        # files-only VM opens no session, because the separate Ansible
+        # command copies the files instead.
+        [Parameter()]
+        [switch] $SkipFiles
     )
 
     # Decide which steps apply before opening any transport. If nothing
     # applies, exit silently - no file server, no SSH, no log noise.
-    $hasFiles   = $Vm.PSObject.Properties['files'] -and
+    # -SkipFiles folds in here rather than gating the dispatch separately:
+    # the dispatch below is already guarded by $hasFiles, so one flag drives
+    # both "does this VM warrant a session" and "does the copy run".
+    $hasFiles   = (-not $SkipFiles) -and
+                  $Vm.PSObject.Properties['files'] -and
                   @($Vm.files).Count -gt 0
     # javaDevKit opens the transport only when the reconciler will run (not
     # -SkipToolchains): presence of the field is enough to warrant the SSH cost
