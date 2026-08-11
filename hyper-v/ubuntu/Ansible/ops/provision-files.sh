@@ -75,11 +75,8 @@ export CA_CONSUMER_ROOT
 # the bridge reads: translation has to happen before dispatch, and a second
 # read is one pwsh round-trip against a step that then runs unattended for
 # minutes.
-# Two forms of the same file. The local one is what this shell writes to and
-# removes; the /mnt one is what ansible-playbook opens, because the bridge
-# re-execs into WSL when launched from Git Bash and forwards args verbatim.
-# Same pairing the toolchain flow makes with RESOLVED_CONFIG /
-# RESOLVED_CONFIG_WSL - see _create-controller-tempfile.sh for the mechanism.
+# Local form to write and remove, controller form to hand the playbook; see
+# _create-controller-tempfile.sh for why they differ.
 files_vars="$(create_controller_tempfile vm-files-vars)"
 # shellcheck disable=SC2310  # predicate in `if`; the failure is handled here
 if ! files_vars_ctl="$(resolve_controller_path "${files_vars}")"; then

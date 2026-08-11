@@ -46,14 +46,12 @@ dispatch_playbook() {
         # span closes, so the tree shows `run playbook -> Gathering Facts /
         # <role> -> task / ...` instead of one flat bar.
         #
-        # Writer and reader sit on opposite sides of a possible WSL re-exec:
-        # the callback runs inside ansible-playbook (always the controller),
-        # while the graft below runs here (Git Bash when the menu launched the
-        # flow). So the file is minted somewhere both can reach and the
-        # callback is handed the /mnt form, exactly as the file flow pairs its
-        # extra-vars document. A plain mktemp would name a Git Bash /tmp entry
-        # the callback cannot open, and the tree would silently lose every
-        # child row.
+        # Writer and reader straddle the bridge's possible WSL re-exec: the
+        # callback runs inside ansible-playbook (always the controller), the
+        # graft below runs here. Hence the two forms - see
+        # _create-controller-tempfile.sh. Getting this wrong is silent: the
+        # graft is a no-op when the callback wrote nothing, so the tree would
+        # just lose every child row.
         tasks_rows="$(create_controller_tempfile timing-tasks)"
         # shellcheck disable=SC2310  # predicate in `if`; the failure is handled here
         if ! tasks_rows_ctl="$(resolve_controller_path "${tasks_rows}")"; then

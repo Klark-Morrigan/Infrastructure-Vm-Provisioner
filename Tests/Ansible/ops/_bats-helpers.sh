@@ -50,6 +50,24 @@ log_err()  { _log_emit ERROR x "$*"; }
 STUB
 }
 
+# The second cross-repo helper an ops/ wrapper sources (via imports/_timing.sh):
+# Common-Automation's scripts/timing.sh. Only wrappers pull it in, so it is a
+# separate installer rather than part of the stub above. Every verb is a no-op
+# and timing_enabled is false, which is what an untimed operator run sees - the
+# behaviour a wrapper test wants held still while it asserts something else.
+_bats_install_timing_stub() {
+    local root="$1"
+    mkdir -p "${root}/scripts"
+    cat >"${root}/scripts/timing.sh" <<'STUB'
+#!/usr/bin/env bash
+timing_init()                 { :; }
+timing_span_begin()           { :; }
+timing_span_end()             { :; }
+timing_graft_children_from()  { :; }
+timing_enabled()              { return 1; }
+STUB
+}
+
 _bats_init_temp() {
     _bats_resolve_bash
     TEST_TMP="$(mktemp -d -t "${1}.XXXXXX")"
@@ -57,6 +75,7 @@ _bats_init_temp() {
     COMMON_AUTOMATION_ROOT="${TEST_TMP}/Common-Automation"
     export COMMON_AUTOMATION_ROOT
     _bats_install_common_automation_stub "${COMMON_AUTOMATION_ROOT}"
+    _bats_install_timing_stub "${COMMON_AUTOMATION_ROOT}"
 }
 
 _bats_cleanup_temp() {

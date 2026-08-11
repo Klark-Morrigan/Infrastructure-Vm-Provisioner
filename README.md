@@ -1766,7 +1766,15 @@ reusable roles receive POSIX paths and stay free of drive letters, `/mnt`, and
 WSL, which is what makes them testable in a plain container. Only this repo
 knows the estate is Windows-hosted, so the conversion is the consumer's.
 
-Three pieces, all under `hyper-v/ubuntu/Ansible/ops/`:
+A second, easily-missed translation rides alongside it. The wrapper runs in
+whatever shell launched it - Git Bash under the menu - but `ansible-playbook`
+always runs under the WSL controller, because the substrate bridge re-execs
+itself there and forwards its arguments **verbatim**. So the temp document the
+wrapper writes needs two spellings: the local one it writes and deletes, and
+the `/mnt` one the controller opens. Git Bash's `/tmp` *is* the Windows temp
+directory, so nothing is relocated - only respelled.
+
+Four pieces, all under `hyper-v/ubuntu/Ansible/ops/`:
 
 - `_to-wsl-path.sh` - the conversion itself (`_to_wsl_path`), the inverse of
   Common-Automation's `_to_windows_path` that the pwsh.exe direction already
@@ -1783,9 +1791,17 @@ Three pieces, all under `hyper-v/ubuntu/Ansible/ops/`:
   Schema validation is **not** duplicated here - the `vm_files` role owns those
   rules, so a malformed entry rides through untouched to be reported by the
   component that knows them.
+- `_create-controller-tempfile.sh` - the two-spelling handoff
+  (`create_controller_tempfile` + `resolve_controller_path`). It classifies the
+  shell by `uname`, the same test the bridge uses for its own re-exec, and
+  converts through `cygpath -w` so it holds wherever the MSYS mount table puts
+  `/tmp`. **Not** keyed on `TEMP`: MSYS rewrites that to `/tmp` on entry, so it
+  reads as POSIX even under Git Bash. `_dispatch-playbook.sh` uses it too, for
+  the timing callback's rows file.
 - `provision-files.sh` - reads the inventory vault, pipes it through the
-  reshape, and forwards the result as a single `--extra-vars` document. Same
-  channel and shape the toolchain flow uses for its resolved pins:
+  reshape, and forwards the result as a single `--extra-vars` document, in the
+  controller spelling. Same channel and shape the toolchain flow uses for its
+  resolved pins:
 
 ```json
 {
