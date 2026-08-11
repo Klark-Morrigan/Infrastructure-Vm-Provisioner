@@ -21,6 +21,12 @@
 # back into each wrapper to silence it.
 # shellcheck disable=SC2154
 
+# The rows file below has to be readable from BOTH this shell and the WSL
+# controller the bridge may re-exec into, so the tail owns the handoff helpers
+# rather than relying on its callers to have sourced them.
+# shellcheck source=hyper-v/ubuntu/Ansible/ops/_create-controller-tempfile.sh
+source "${BASH_SOURCE[0]%/*}/_create-controller-tempfile.sh"
+
 # dispatch_playbook <playbook-path-relative-to-CA_CONSUMER_ROOT> [args...]
 #
 # Returns the playbook's exit code. Deliberately not `exec` - the caller may
@@ -30,6 +36,7 @@
 dispatch_playbook() {
     local playbook_cmd=("${common_ansible_root}/ops/_run-playbook.sh" "$@")
     local tasks_rows
+    local tasks_rows_ctl
     local playbook_rc=0
 
     # shellcheck disable=SC2310  # predicate in `if`; set -e intentionally relaxed
@@ -37,11 +44,24 @@ dispatch_playbook() {
         # Point the timing_tree callback (the bridge enables it when this var
         # is set) at a temp rows file, run, then graft the rows in before the
         # span closes, so the tree shows `run playbook -> Gathering Facts /
-        # <role> -> task / ...` instead of one flat bar. The file lives on the
-        # WSL fs (mktemp), shared directly between the callback (inside
-        # ansible-playbook) and this reader - no /mnt/c, no WSLENV.
-        tasks_rows="$(mktemp)"
-        export TIMING_TASKS_OUTPUT_PATH="${tasks_rows}"
+        # <role> -> task / ...` instead of one flat bar.
+        #
+        # Writer and reader sit on opposite sides of a possible WSL re-exec:
+        # the callback runs inside ansible-playbook (always the controller),
+        # while the graft below runs here (Git Bash when the menu launched the
+        # flow). So the file is minted somewhere both can reach and the
+        # callback is handed the /mnt form, exactly as the file flow pairs its
+        # extra-vars document. A plain mktemp would name a Git Bash /tmp entry
+        # the callback cannot open, and the tree would silently lose every
+        # child row.
+        tasks_rows="$(create_controller_tempfile timing-tasks)"
+        # shellcheck disable=SC2310  # predicate in `if`; the failure is handled here
+        if ! tasks_rows_ctl="$(resolve_controller_path "${tasks_rows}")"; then
+            rm -f "${tasks_rows}"
+            log_err "cannot express ${tasks_rows} for the WSL controller (cause above)"
+            return 1
+        fi
+        export TIMING_TASKS_OUTPUT_PATH="${tasks_rows_ctl}"
         timing_span_begin "run playbook"
         "${playbook_cmd[@]}" || playbook_rc=$?
         # Graft before closing the span (a no-op if the callback wrote nothing,

@@ -52,6 +52,10 @@ source "${script_dir}/imports/_log.sh"
 source "${script_dir}/imports/_common-ansible-root.sh"
 # shellcheck source=hyper-v/ubuntu/Ansible/ops/imports/_timing.sh
 source "${script_dir}/imports/_timing.sh"
+# Pulls in _to-wsl-path.sh transitively - this flow only needs the two
+# controller-handoff verbs, not the raw translator.
+# shellcheck source=hyper-v/ubuntu/Ansible/ops/_create-controller-tempfile.sh
+source "${script_dir}/_create-controller-tempfile.sh"
 # shellcheck source=hyper-v/ubuntu/Ansible/ops/_dispatch-playbook.sh
 source "${script_dir}/_dispatch-playbook.sh"
 
@@ -71,8 +75,18 @@ export CA_CONSUMER_ROOT
 # the bridge reads: translation has to happen before dispatch, and a second
 # read is one pwsh round-trip against a step that then runs unattended for
 # minutes.
-files_vars="$(mktemp)"
-chmod 600 "${files_vars}"
+# Two forms of the same file. The local one is what this shell writes to and
+# removes; the /mnt one is what ansible-playbook opens, because the bridge
+# re-execs into WSL when launched from Git Bash and forwards args verbatim.
+# Same pairing the toolchain flow makes with RESOLVED_CONFIG /
+# RESOLVED_CONFIG_WSL - see _create-controller-tempfile.sh for the mechanism.
+files_vars="$(create_controller_tempfile vm-files-vars)"
+# shellcheck disable=SC2310  # predicate in `if`; the failure is handled here
+if ! files_vars_ctl="$(resolve_controller_path "${files_vars}")"; then
+    rm -f "${files_vars}"
+    log_err "cannot express ${files_vars} for the WSL controller (cause above)"
+    exit 1
+fi
 
 log_info "Resolving file entries (vault read + controller path translation) ..."
 timing_span_begin "resolve file entries"
@@ -90,7 +104,7 @@ dispatch_rc=0
 # shellcheck disable=SC2310  # rc captured on purpose so the temp file is removed either way
 dispatch_playbook \
     playbooks/provision-files.yml \
-    --extra-vars "@${files_vars}" \
+    --extra-vars "@${files_vars_ctl}" \
     "$@" || dispatch_rc=$?
 rm -f "${files_vars}"
 exit "${dispatch_rc}"
