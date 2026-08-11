@@ -383,12 +383,13 @@ BeforeAll {
 
     # Both opt-in fields at once, so a -SkipFiles / -SkipToolchains test can
     # tell "this switch suppressed its own step" from "the VM short-circuited
-    # out before the transport opened".
+    # out before the transport opened". Composed from the two single-field
+    # fixtures rather than restating either literal, so a change to the files
+    # entry or the JDK block reaches this shape too.
     function New-VmWithJdkAndFiles {
-        $vm = New-VmWithJdk
-        Add-Member -InputObject $vm -MemberType NoteProperty -Name 'files' -Value @(
-            [PSCustomObject]@{ source = 'C:\src\a'; target = '/opt/a' }
-        )
+        $vm = New-VmWithFiles
+        Add-Member -InputObject $vm -MemberType NoteProperty -Name 'javaDevKit' `
+            -Value (New-VmWithJdk).javaDevKit
         $vm
     }
 

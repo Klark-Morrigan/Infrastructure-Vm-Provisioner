@@ -77,16 +77,16 @@ PSGallery automatically on first run.
 .\hyper-v\ubuntu\shared\setup-secrets.ps1 -ConfigFile C:\private\vm-config.json
 
 # 2. Provision VMs (run as Administrator)
-.\hyper-v\ubuntu\PowerShell\provision.ps1
+.\hyper-v\ubuntu\PowerShell\provision.ps1 -SecretSuffix Production
 
 # 3. Bring VMs back up after a reboot (run as Administrator)
-.\hyper-v\ubuntu\PowerShell\start-vms.ps1
+.\hyper-v\ubuntu\PowerShell\start-vms.ps1 -SecretSuffix Production
 
 # 4. Bring the fleet back to ready after a host reboot (run as Administrator)
 .\hyper-v\ubuntu\PowerShell\ensure-vms-ready.ps1 -SecretSuffix Production
 
 # 5. Remove VMs when no longer needed (run as Administrator)
-.\hyper-v\ubuntu\PowerShell\deprovision.ps1
+.\hyper-v\ubuntu\PowerShell\deprovision.ps1 -SecretSuffix Production
 ```
 
 ---
@@ -837,8 +837,21 @@ through reconcile and installing a JDK on the gateway.
 Run as Administrator after `setup-secrets.ps1` has stored the config.
 
 ```powershell
-.\hyper-v\ubuntu\PowerShell\provision.ps1
+.\hyper-v\ubuntu\PowerShell\provision.ps1 -SecretSuffix Production
 ```
+
+| Parameter | Notes |
+|---|---|
+| `-SecretSuffix` | **Required.** Names the lifecycle to read - the vault key is `VmProvisionerConfig-<Suffix>`. Operators pass `Production`; ephemeral environments (parallel workflows, E2E) pass their own label. Mandatory so a caller cannot fall through to a default and collide with another lifecycle's data. |
+| `-SkipToolchains` | Suppresses the in-line toolchain reconciler: this run installs nothing. See [Toolchain engine](#toolchain-engine-selecting-the-live-path). |
+| `-SkipFiles` | Suppresses the in-line `files` transport: this run copies nothing. See [File transport](#file-transport-the-two-chains). |
+
+Both switches are pure suppression - neither hands off to the Ansible
+counterpart, which is a second command you run yourself. A VM whose only
+opt-in field is suppressed opens no SSH session and no file server at all.
+Neither relaxes validation: a `files` entry naming a `source` that does not
+exist on the host still fails the whole run up front, under `-SkipFiles` as
+much as without it.
 
 Reads `VmProvisionerConfig` from the vault and for each VM definition:
 
@@ -983,6 +996,9 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
       dispatched in JSON order: single entries via `Copy-VmFiles`, bulk
       entries via `Copy-VmFilesByPattern`; see
       [Optional: copy files to the VM](#optional-copy-files-to-the-vm)).
+      Suppressed by `-SkipFiles`, which copies nothing and leaves the
+      entries to the Ansible transport if you go on to run it - see
+      [File transport](#file-transport-the-two-chains).
     - **`javaDevKit`** is now reconciler-owned (see the Reconciler
       subsection below) — the JDK provider extracts the prefetched
       Temurin tarball into `/opt/jdk-{vendor}-{resolvedVersion}/`,
@@ -1002,7 +1018,9 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
     Each step is self-contained — no step consumes files left by another
     step. Adding a new step (e.g. Maven) is a one-function addition with
     one dispatch line in `Invoke-VmPostProvisioning`. Skipped silently
-    for VMs that have no opt-in fields. Idempotent on the VM side: the
+    for VMs that have no opt-in fields - or whose only opt-in fields are
+    the ones `-SkipFiles` / `-SkipToolchains` suppressed, since the skip
+    is decided before any transport is paid for. Idempotent on the VM side: the
     JDK install no-ops when its `release` file is already present, file
     copies overwrite with the current host source bytes, and the
     env-vars step skips the SSH write when the desired block already
