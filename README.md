@@ -40,6 +40,7 @@
   - [File transport (the two chains)](#file-transport-the-two-chains)
   - [Controller-side path translation](#controller-side-path-translation)
   - [The playbook](#the-playbook)
+  - [Reading the files report](#reading-the-files-report)
 - [CI](#ci)
 - [Repo structure](#repo-structure)
 
@@ -1850,6 +1851,54 @@ SECRET_SUFFIX=Production ./provision-files.sh
 # Forwarded args reach ansible-playbook unchanged, e.g.:
 SECRET_SUFFIX=Production ./provision-files.sh --limit ubuntu-02-ci --check
 ```
+
+### Reading the files report
+
+The play ends with one report block per host, from the substrate's
+`files_report` role. It answers the question the PLAY output cannot: a bulk
+entry is one line of config that becomes an unknown number of files, and the
+play names them only as loop labels interleaved with everything else.
+
+```text
+Files report for ubuntu-02-ci -- 2 copied, 4 unchanged
+section 1 - named files (one declared entry, one file)
+  copied    /etc/app/app.conf  root:root 0644
+      source  /mnt/c/estate/config/app.conf
+  unchanged /etc/app/logging.json  root:root 0644
+      source  /mnt/c/estate/config/logging.json
+section 2 - glob matched files (one declared entry, every file it named)
+  pattern /mnt/c/estate/jars/*.jar -- 3 landed
+    unchanged /opt/app/lib/engine-4.2.1.jar  root:root 0644
+        source  /mnt/c/estate/jars/engine-4.2.1.jar
+    unchanged /opt/app/lib/plugins-4.2.1.jar  root:root 0644
+        source  /mnt/c/estate/jars/plugins-4.2.1.jar
+    copied    /opt/app/lib/telemetry-1.0.0.jar  root:root 0644
+        source  /mnt/c/estate/jars/telemetry-1.0.0.jar
+```
+
+The two sections read differently, which is why they are sections. A named file
+is one line of config and one file, so it can be checked against the config by
+eye. A matched file cannot: the pattern above it is the only thing that says
+which line of config put it there, and the count beside it makes an expansion
+checkable at a glance - an operator who expected four JARs and reads `3 landed`
+has their answer without reading the rows.
+
+`copied` names exactly what this run wrote, `unchanged` what was already
+correct. That distinction is only available at the moment of the copy, so
+re-running the flow after editing one config entry tells you precisely what
+moved.
+
+The `source` paths are the translated `/mnt/c/...` form, not the `C:\...` the
+config carries - this report describes the run as the controller performed it.
+See [Controller-side path translation](#controller-side-path-translation) for
+why the two differ.
+
+Unlike the toolchain reports there is no residency probe, and the omission is
+deliberate: every declared file is reconciled on every run, so `copy` is
+authoritative about the file it just wrote. A `stat` per file would spend a
+round trip per JAR to restate what the transport already reported. If you need
+to know whether a file is still on the VM some time later, that is a question
+for the next run of this flow, not for this report.
 
 ---
 
