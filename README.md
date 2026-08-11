@@ -41,6 +41,10 @@
   - [Controller-side path translation](#controller-side-path-translation)
   - [The playbook](#the-playbook)
   - [Reading the files report](#reading-the-files-report)
+- [Environment variable provisioning via Ansible (Common-Ansible)](#environment-variable-provisioning-via-ansible-common-ansible)
+  - [Which engine runs (there is no switch here)](#which-engine-runs-there-is-no-switch-here)
+  - [The playbook and its one owned rule](#the-playbook-and-its-one-owned-rule)
+  - [Reading the environment variables report](#reading-the-environment-variables-report)
 - [CI](#ci)
 - [Repo structure](#repo-structure)
 
@@ -677,8 +681,15 @@ and target-collision pre-flight errors raised before any SSH I/O).
 Add an `envVars` object to any VM entry to write a sentinel-delimited
 managed block of `NAME="VALUE"` lines into `/etc/environment`. Unlike
 `/etc/profile.d/*.sh` snippets (sourced only by login shells), this file
-is read by `pam_env` for every login — including the non-login shells
-spawned by systemd-managed services.
+is read by `pam_env` for **every** login session, interactive or not.
+
+It is **not** read by systemd system services. `pam_env` is a PAM module,
+and a systemd unit starts outside PAM entirely, so a declaration here
+reaches an SSH session and misses the daemon running beside it - the two
+disagree, and only one of them is what CI runs under. A service that
+needs these variables has to be given them explicitly, by an
+`EnvironmentFile=-/etc/environment` drop-in owned by whatever provisions
+that unit.
 
 ```jsonc
 {
@@ -715,6 +726,13 @@ The transport is delegated to `Infrastructure.HyperV`'s
 [`Set-VmEnvironmentVariables`](https://github.com/Klark-Morrigan/Infrastructure-HyperV/blob/master/Infrastructure.HyperV/Public/EnvVars/Set-VmEnvironmentVariables.ps1) —
 see its notes for the exact managed-block, atomic-write, and
 skip-unchanged semantics.
+
+An Ansible engine writes the same block from the same config, and it is
+the one to reach for when re-applying an edit without a full
+`provision.ps1` run:
+[Environment variable provisioning via Ansible](#environment-variable-provisioning-via-ansible-common-ansible).
+The two are byte-compatible on the same host, and - unlike `files` and
+toolchains - there is no skip switch selecting between them.
 
 ### Router VM (kind: router)
 
@@ -1902,6 +1920,130 @@ for the next run of this flow, not for this report.
 
 ---
 
+## Environment variable provisioning via Ansible (Common-Ansible)
+
+A third Ansible flow, peer to the file one, carrying the operator-declared
+[`envVars`](#optional-set-system-wide-environment-variables) object of each VM
+definition into `/etc/environment` on the provisioned VMs through the
+substrate's `vm_env_vars` and `env_vars_report` roles. Same substrate, same
+[sibling checkout](#consuming-common-ansible), same `VmProvisionerConfig`
+desired-state - only the payload differs. The two flows are the two halves of
+what an operator declared for a VM: one moves the payload, this one moves the
+variables that let the VM find it.
+
+`ops/provision-env.sh` is the operator entry point, and it is the shortest
+wrapper in the repo - contract plus dispatch, nothing else:
+
+```bash
+# From hyper-v/ubuntu/Ansible/ops/, with SECRET_SUFFIX naming the lifecycle:
+SECRET_SUFFIX=Production ./provision-env.sh
+# Forwarded args reach ansible-playbook unchanged, e.g.:
+SECRET_SUFFIX=Production ./provision-env.sh --limit ubuntu-02-ci --check
+```
+
+There is no resolve step here, and that absence is the one place this flow is
+genuinely simpler than the file one. `files` entries name their sources on the
+Windows host that authored the config, so someone has to reshape the config and
+rewrite every path to its `/mnt` form before the WSL controller can open them
+([Controller-side path translation](#controller-side-path-translation)).
+`envVars` values are VM-side POSIX strings that never saw a drive letter, so the
+desired-state is already inside the whole-config document the bridge surfaces on
+every dispatch (`vm_provisioner_config`) and the playbook selects straight off
+it. That drops a resolve script, its path translation, its temp document and its
+bats suite from this flow's surface - and with them the two-spelling handoff bug
+the file flow shipped twice.
+
+Prerequisites are the toolchain flow's, minus the file server:
+[see above](#running-the-flow). Like the file flow it declares no
+`CA_NEEDS_HOST_FILE_SERVER` - there is no payload to serve at all.
+
+### Which engine runs (there is no switch here)
+
+Unlike files and toolchains, environment variables have **no engine-selecting
+switch**. `provision.ps1` has `-SkipFiles` and `-SkipToolchains`; it has no
+`-SkipEnvVars`, and its post-provisioning step reconciles the managed block on
+every run in which the VM declares `envVars`. So the two engines are not
+alternatives an operator picks between - they are a provisioning-time engine and
+a re-run engine:
+
+| Engine | When it runs | What it is for |
+| --- | --- | --- |
+| PowerShell (`Set-VmEnvironmentVariables`) | in-line, during any `provision` of a VM declaring `envVars` | getting the block onto a VM as it is built |
+| Ansible (`provision-env.sh`) | whenever you run it | re-applying after a config edit, without a full `provision` |
+
+Running both is safe, and by design: the two write **byte-identical** managed
+blocks (`# BEGIN <blockName>` / `# END <blockName>` sentinels, `NAME="value"`
+lines with `\` and `"` escaped), so each finds and replaces the other's block
+rather than appending a second one. The only visible difference is position -
+the PowerShell transport re-appends the block at end of file, `blockinfile`
+replaces it where it stands - so a host handed back and forth just sees its
+block migrate to the end once.
+
+### The playbook and its one owned rule
+
+`playbooks/provision-env.yml` composes the two substrate roles against the
+bridge's `vm_provisioner_hosts` group: `vm_env_vars` validates, renders and
+reconciles; `env_vars_report` renders what it did. Each host's desired-state is
+its own config entry's `envVars` object, selected by `inventory_hostname`
+exactly as `provision-toolchains.yml` selects its taxonomy block. The report is
+tagged `always`, so a `--limit` or `--tags vm_env_vars` run still ends with one,
+scoped to whatever ran. Facts are not gathered - neither role reads one.
+
+The play carries exactly one rule of its own, and it is worth knowing why it is
+not in the role. `Assert-VmEnvVarsField` validates the `envVars` object *whole*,
+and part of what it validates is the object's own shape: a JSON object, with
+sub-fields exactly `blockName` and `entries`, both required. `vm_env_vars` takes
+those two as **separate vars** and never sees the wrapper, so those three rules
+have no home in the role - giving them one would mean the role taking the object
+instead of the two vars, forking its input contract away from `vm_files`. The
+selection in the play is where the wrapper is last visible, so the check sits
+immediately after it.
+
+What it buys is a loud failure instead of a silent wrong one. `entrys` for
+`entries` would otherwise select nothing, hand the role an empty entry list
+beside a perfectly valid block name, and produce a run that reports success
+while **retracting** the very block it was asked to write - an empty `entries`
+array being the operator's explicit "remove this block" intent. The assert names
+the host and the offending sub-fields; it is tagged `always` because a targeted
+`--tags vm_env_vars` run is exactly when someone is iterating on this config.
+
+A host that declares no `envVars` at all skips the rule and no-ops the role -
+that is the ordinary case.
+
+### Reading the environment variables report
+
+The play ends with one report block per host, from the substrate's
+`env_vars_report` role. It answers what the PLAY output cannot, and what `ls`
+cannot either: a variable is observable only from inside a process that
+inherited it.
+
+```text
+Environment variables report for ubuntu-02-ci -- 2 written, 1 unchanged
+  block app-runtime -- 1 declared in /etc/environment
+    unchanged APP_HOME='/opt/app'
+  block ci-jars -- 2 declared in /etc/environment
+    written   STARSECTOR_HOME='/opt/ci-jars/starsector'
+    written   CI_JARS_OPTS='a "quoted" \ backslash'
+```
+
+Rows are grouped by managed block because that is the unit an operator acts on:
+a host may carry several consumers' blocks in one file, and the block name is
+what says which declaration to go and edit. Values are printed as **declared**,
+in single quotes the file's own `NAME="value"` lines never use - so the escaping
+is never mistaken for part of the value, and surrounding whitespace stays
+visible.
+
+`written` means this run put the block in place; `unchanged` means the host was
+already carrying it. Status is a property of the **block**, not of the variable:
+the block is reconciled as a unit in one atomic move, so every row of a group
+carries the same value. There is no per-variable change detection to be had, and
+the report does not pretend otherwise.
+
+Full field-by-field documentation lives in the
+[role README](https://github.com/Klark-Morrigan/Common-Ansible/blob/master/roles/env_vars_report/README.md).
+
+---
+
 ## CI
 
 CI runs on pull requests targeting `master` via `.github/workflows/ci.yml`,
@@ -2064,9 +2206,9 @@ Infrastructure-VM-Provisioner/
 |     |     |  `- teardown-network.ps1         # Per-env teardown: delegates legacy NetNat + host IP cleanup to Remove-LegacySingletonNat, then removes the Private switch when empty
 |     |     `- vm/
 |     |        `- remove-vm.ps1               # Stops, removes VM, deletes VHDX and config dir
-|     `- Ansible/           # Slice: on-VM toolchain + file push (Common-Ansible bridge)
-|        |- ops/            # Stage-ToolchainArtifacts.ps1 (reuses PowerShell/up resolvers), provision-toolchains.sh, provision-files.sh, imports/
-|        |- playbooks/      # provision-toolchains.yml, provision-files.yml
+|     `- Ansible/           # Slice: on-VM toolchain + file + env var push (Common-Ansible bridge)
+|        |- ops/            # Stage-ToolchainArtifacts.ps1 (reuses PowerShell/up resolvers), provision-toolchains.sh, provision-files.sh, provision-env.sh, imports/
+|        |- playbooks/      # provision-toolchains.yml, provision-files.yml, provision-env.yml
 |        `- requirements.yml
 |- Tests/
 |  |- shared/               # Unit tests for shared/ (setup-secrets)
