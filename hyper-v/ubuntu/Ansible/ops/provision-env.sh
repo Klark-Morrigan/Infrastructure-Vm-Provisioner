@@ -34,40 +34,16 @@
 
 set -euo pipefail
 
-# SECRET_SUFFIX selects the lifecycle whose secrets this run reads (e.g.
-# Production). Required by the bridge, which reads the inventory vault (and
-# with it this flow's desired-state) under that suffix; validated here so the
-# failure is one clear message rather than an opaque empty-suffix error deeper
-# in.
-if [[ -z "${SECRET_SUFFIX:-}" ]]; then
-    echo "SECRET_SUFFIX must be set (e.g. Production or the caller's lifecycle label)" >&2
-    exit 2
-fi
-
+# SECRET_SUFFIX validation, CA_CONSUMER_ROOT, the four sourced helpers, the
+# timing emitter and the shared CA_* contract - see _flow-preamble.sh.
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# This repo's Ansible-slice root (ops/ -> Ansible/): the consumer root the
-# bridge resolves the playbook from.
-CA_CONSUMER_ROOT="$(cd "${script_dir}/.." && pwd)"
+flow_name="provision-env"
+# shellcheck source=hyper-v/ubuntu/Ansible/ops/_flow-preamble.sh
+source "${script_dir}/_flow-preamble.sh"
 
-# shellcheck source=hyper-v/ubuntu/Ansible/ops/imports/_log.sh
-source "${script_dir}/imports/_log.sh"
-# shellcheck source=hyper-v/ubuntu/Ansible/ops/imports/_common-ansible-root.sh
-source "${script_dir}/imports/_common-ansible-root.sh"
-# shellcheck source=hyper-v/ubuntu/Ansible/ops/imports/_timing.sh
-source "${script_dir}/imports/_timing.sh"
-# shellcheck source=hyper-v/ubuntu/Ansible/ops/_dispatch-playbook.sh
-source "${script_dir}/_dispatch-playbook.sh"
-
-# Arm the timing emitter (a no-op unless TIMING_TREE_OUTPUT_PATH is set) so the
-# E2E orchestrator can graft this flow's dispatch under its provisioning part.
-# Neutral opt-in; the flow does not name its consumer.
-timing_init "provision-env"
-
-export CA_INVENTORY_VAULT=VmProvisioner
-export CA_CONSUMER_ROOT
-
-# Last statement, so the playbook's exit code is this script's. Nothing is held
-# open across the dispatch (the files wrapper captures the code only because it
-# has a temp document to remove either way), and the timing emitter flushes
-# from its own EXIT trap regardless of how this returns.
+# Nothing stands between the preamble and the dispatch, which is the whole
+# shape of this flow. Last statement, so the playbook's exit code is this
+# script's: nothing is held open across the dispatch (the files wrapper
+# captures the code only because it has a temp document to remove either way),
+# and the timing emitter flushes from its own EXIT trap regardless.
 dispatch_playbook playbooks/provision-env.yml "$@"

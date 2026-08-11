@@ -32,42 +32,22 @@
 
 set -euo pipefail
 
-# SECRET_SUFFIX selects the lifecycle whose secrets this run reads (e.g.
-# Production). Required both by the desired-state read below (which vault
-# secret) and by the bridge; validate it here so the failure is one clear
-# message rather than an opaque empty-suffix error deeper in.
-if [[ -z "${SECRET_SUFFIX:-}" ]]; then
-    echo "SECRET_SUFFIX must be set (e.g. Production or the caller's lifecycle label)" >&2
-    exit 2
-fi
-
+# SECRET_SUFFIX validation, CA_CONSUMER_ROOT, the four sourced helpers, the
+# timing emitter and the shared CA_* contract - see _flow-preamble.sh. The
+# emitter it arms installs its own EXIT trap, which is why the temp file below
+# is removed explicitly rather than by a second (trap-replacing) handler.
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# This repo's Ansible-slice root (ops/ -> Ansible/): the consumer root the
-# bridge resolves the playbook from.
-CA_CONSUMER_ROOT="$(cd "${script_dir}/.." && pwd)"
+flow_name="provision-files"
+# shellcheck source=hyper-v/ubuntu/Ansible/ops/_flow-preamble.sh
+source "${script_dir}/_flow-preamble.sh"
 
-# shellcheck source=hyper-v/ubuntu/Ansible/ops/imports/_log.sh
-source "${script_dir}/imports/_log.sh"
-# shellcheck source=hyper-v/ubuntu/Ansible/ops/imports/_common-ansible-root.sh
-source "${script_dir}/imports/_common-ansible-root.sh"
-# shellcheck source=hyper-v/ubuntu/Ansible/ops/imports/_timing.sh
-source "${script_dir}/imports/_timing.sh"
-# Pulls in _to-wsl-path.sh transitively - this flow only needs the two
-# controller-handoff verbs, not the raw translator.
+# Stated as a direct dependency even though the preamble already pulls it in
+# through _dispatch-playbook.sh: this flow calls the handoff verbs itself, and
+# a dependency held only through someone else's transitive one disappears the
+# day the middle file stops needing it. Pulls in _to-wsl-path.sh in turn - this
+# flow needs the two handoff verbs, not the raw translator.
 # shellcheck source=hyper-v/ubuntu/Ansible/ops/_create-controller-tempfile.sh
 source "${script_dir}/_create-controller-tempfile.sh"
-# shellcheck source=hyper-v/ubuntu/Ansible/ops/_dispatch-playbook.sh
-source "${script_dir}/_dispatch-playbook.sh"
-
-# Arm the timing emitter (a no-op unless TIMING_TREE_OUTPUT_PATH is set) so the
-# E2E orchestrator can graft this flow's resolve / dispatch sub-steps under its
-# provisioning part. Neutral opt-in; the flow does not name its consumer.
-# Installs its own EXIT trap, which is why the temp file below is removed
-# explicitly rather than by a second (trap-replacing) handler of ours.
-timing_init "provision-files"
-
-export CA_INVENTORY_VAULT=VmProvisioner
-export CA_CONSUMER_ROOT
 
 # The per-host `files` entries ride as a single play-wide --extra-vars document
 # (vm_files_by_host), the same channel and shape the toolchain flow uses for its
