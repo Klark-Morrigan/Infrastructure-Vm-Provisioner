@@ -38,6 +38,7 @@
     - [What it came from (artifact_report)](#what-it-came-from-artifact_report)
 - [File provisioning via Ansible (Common-Ansible)](#file-provisioning-via-ansible-common-ansible)
   - [Controller-side path translation](#controller-side-path-translation)
+  - [The playbook](#the-playbook)
 - [CI](#ci)
 - [Repo structure](#repo-structure)
 
@@ -1678,9 +1679,9 @@ run (`--tags jdk`) still ends with them, scoped to whatever ran.
 
 ## File provisioning via Ansible (Common-Ansible)
 
-A second Ansible flow, peer to the toolchain one, that copies the
+A second Ansible flow, peer to the toolchain one, carrying the
 operator-declared [`files`](#optional-copy-files-to-the-vm) entries of each VM
-definition onto the provisioned VMs using the substrate's `vm_files` and
+definition to the provisioned VMs through the substrate's `vm_files` and
 `files_report` roles. Same substrate, same
 [sibling checkout](#consuming-common-ansible), same `VmProvisionerConfig`
 desired-state - only the payload differs.
@@ -1742,6 +1743,36 @@ Every VM carrying a `vmName` appears, with an empty list when it declares no
 files, so the per-host lookup never has to tell "no entry" from "nothing to
 copy". A path the controller cannot reach fails the whole resolve, by name,
 before any VM is touched.
+
+### The playbook
+
+`playbooks/provision-files.yml` composes the two substrate roles against the
+bridge's `vm_provisioner_hosts` group: `vm_files` validates, resolves and
+transports; `files_report` renders what it did. It is a peer of
+`provision-toolchains.yml`, not a section of it - the two share a substrate, a
+vault and a bridge, but either is worth running without paying for the other,
+and keeping them apart is what lets the PowerShell file engine stay live
+alongside this one.
+
+Each host's desired-state is its slice of `vm_files_by_host`, selected by
+`inventory_hostname` exactly as the toolchain playbook selects out of
+`toolchains_resolved_by_host`. It reads that resolved dict and never
+`vm_provisioner_config.files`, even though the bridge surfaces the whole config:
+only the resolved copy carries the `/mnt` paths the controller can open.
+
+The report is tagged `always`, so a `--limit` or `--tags vm_files` run still
+ends with one, scoped to whatever ran. Facts are not gathered - neither role
+reads one.
+
+Prerequisites are the toolchain flow's, minus the file server:
+[see above](#running-the-flow).
+
+```bash
+# From hyper-v/ubuntu/Ansible/ops/, with SECRET_SUFFIX naming the lifecycle:
+SECRET_SUFFIX=Production ./provision-files.sh
+# Forwarded args reach ansible-playbook unchanged, e.g.:
+SECRET_SUFFIX=Production ./provision-files.sh --limit ubuntu-02-ci --check
+```
 
 ---
 
@@ -1909,7 +1940,7 @@ Infrastructure-VM-Provisioner/
 |     |        `- remove-vm.ps1               # Stops, removes VM, deletes VHDX and config dir
 |     `- Ansible/           # Slice: on-VM toolchain + file push (Common-Ansible bridge)
 |        |- ops/            # Stage-ToolchainArtifacts.ps1 (reuses PowerShell/up resolvers), provision-toolchains.sh, provision-files.sh, imports/
-|        |- playbooks/      # provision-toolchains.yml
+|        |- playbooks/      # provision-toolchains.yml, provision-files.yml
 |        `- requirements.yml
 |- Tests/
 |  |- shared/               # Unit tests for shared/ (setup-secrets)
