@@ -52,9 +52,11 @@ STUB
 
 # The second cross-repo helper an ops/ wrapper sources (via imports/_timing.sh):
 # Common-Automation's scripts/timing.sh. Only wrappers pull it in, so it is a
-# separate installer rather than part of the stub above. Every verb is a no-op
-# and timing_enabled is false, which is what an untimed operator run sees - the
-# behaviour a wrapper test wants held still while it asserts something else.
+# separate installer rather than part of the stub above. The span verbs are
+# no-ops, but timing_enabled reproduces the REAL predicate - true exactly when
+# TIMING_TREE_OUTPUT_PATH is set. Hardcoding it false would be simpler and
+# would also make the timed branch of dispatch_playbook (where the rows file is
+# minted and handed to the callback) unreachable from every test.
 _bats_install_timing_stub() {
     local root="$1"
     mkdir -p "${root}/scripts"
@@ -64,8 +66,31 @@ timing_init()                 { :; }
 timing_span_begin()           { :; }
 timing_span_end()             { :; }
 timing_graft_children_from()  { :; }
-timing_enabled()              { return 1; }
+timing_enabled()              { [[ -n "${TIMING_TREE_OUTPUT_PATH:-}" ]]; }
 STUB
+}
+
+# Impersonate a Git Bash launch for code that branches on the shell it runs in
+# (the controller-handoff helpers, and every wrapper that reaches them). Lives
+# here because three bats files need the identical pair, and the whole point of
+# this file is that a shared fixture has one definition.
+#
+# uname reports MINGW; cygpath maps a POSIX path onto the Windows temp
+# directory the real one would report, spelled with backslashes. Callers that
+# want a DIFFERENT cygpath (a UNC path, or none at all, to exercise the
+# rejection paths) install this and then overwrite or delete the cygpath stub.
+_bats_install_mingw_stubs() {
+    local stub_dir="$1"
+    mkdir -p "${stub_dir}"
+    cat >"${stub_dir}/uname" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "-s" ]]; then echo "MINGW64_NT-10.0-26200"; else exec /usr/bin/uname "$@"; fi
+STUB
+    cat >"${stub_dir}/cygpath" <<'STUB'
+#!/usr/bin/env bash
+printf 'C:\\Users\\tester\\AppData\\Local\\Temp%s\n' "${2#/tmp}" | tr '/' '\\'
+STUB
+    chmod +x "${stub_dir}/uname" "${stub_dir}/cygpath"
 }
 
 _bats_init_temp() {

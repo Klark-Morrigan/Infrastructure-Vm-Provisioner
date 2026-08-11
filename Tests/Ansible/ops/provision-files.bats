@@ -59,17 +59,9 @@ teardown() {
 }
 
 # Impersonate Git Bash: the menu's launcher, and the only side where the two
-# path forms differ. Same stubbing the handoff helper's own suite uses.
+# path forms differ. Shared fixture - the handoff helper's own suite uses it too.
 install_mingw_stubs() {
-    cat >"${TEST_TMP}/stubs/uname" <<'STUB'
-#!/usr/bin/env bash
-if [[ "$1" == "-s" ]]; then echo "MINGW64_NT-10.0-26200"; else exec /usr/bin/uname "$@"; fi
-STUB
-    cat >"${TEST_TMP}/stubs/cygpath" <<'STUB'
-#!/usr/bin/env bash
-printf 'C:\\Users\\tester\\AppData\\Local\\Temp%s\n' "${2#/tmp}" | tr '/' '\\'
-STUB
-    chmod +x "${TEST_TMP}/stubs/uname" "${TEST_TMP}/stubs/cygpath"
+    _bats_install_mingw_stubs "${TEST_TMP}/stubs"
 }
 
 # The recorder writes one argv element per line, so the document is the line
@@ -205,4 +197,71 @@ STUB
     grep -q -- '--check'       "${TEST_TMP}/playbook-args"
     grep -q -- '--limit'       "${TEST_TMP}/playbook-args"
     grep -q -- 'ubuntu-01-ci'  "${TEST_TMP}/playbook-args"
+}
+
+# ---------------------------------------------------------------------------
+# The timed branch of the shared dispatch tail (_dispatch-playbook.sh)
+#
+# When E2E arms timing, dispatch_playbook mints a second temp file for the
+# timing_tree callback's per-task rows and hands its path over in
+# TIMING_TASKS_OUTPUT_PATH. That path crosses the same WSL re-exec as the
+# extra-vars document and had the same defect, so it needs the same assertion.
+#
+# Nothing reached this branch before: the shared timing stub reproduces the
+# real predicate (enabled exactly when TIMING_TREE_OUTPUT_PATH is set), so
+# these are the only cases that execute it at all.
+# ---------------------------------------------------------------------------
+
+# Record the callback's target instead of the argv.
+install_timing_recorder() {
+    cat >"${TEST_TMP}/Common-Ansible/ops/_run-playbook.sh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\${TIMING_TASKS_OUTPUT_PATH:-UNSET}" > "${TEST_TMP}/timing-target"
+exit 0
+STUB
+    chmod +x "${TEST_TMP}/Common-Ansible/ops/_run-playbook.sh"
+}
+
+@test "timing armed under Git Bash hands the callback the controller path" {
+    # The rows file is written by the callback (inside ansible-playbook, always
+    # the controller) and read back here, so a local-dialect path silently
+    # yields a tree with no task rows.
+    install_mingw_stubs
+    install_timing_recorder
+    run env PATH="${TEST_TMP}/stubs:${PATH}" TIMING_TREE_OUTPUT_PATH="${TEST_TMP}/tree.json" \
+        "${BASH_BIN}" "${TEST_TMP}/ops/provision-files.sh"
+    [ "${status}" -eq 0 ]
+
+    target="$(cat "${TEST_TMP}/timing-target")"
+    [[ "${target}" == "/mnt/c/Users/tester/AppData/Local/Temp/timing-tasks."* ]]
+    [[ "${target}" != "/tmp/"* ]]
+}
+
+@test "timing armed on the controller leaves the rows path alone" {
+    install_timing_recorder
+    run env TIMING_TREE_OUTPUT_PATH="${TEST_TMP}/tree.json" \
+        "${BASH_BIN}" "${TEST_TMP}/ops/provision-files.sh"
+    [ "${status}" -eq 0 ]
+
+    target="$(cat "${TEST_TMP}/timing-target")"
+    [[ "${target}" == "/tmp/timing-tasks."* ]]
+    [[ "${target}" != "/mnt/"* ]]
+}
+
+@test "timing unarmed sets no rows target at all" {
+    # An uninstrumented operator run must pay nothing: no temp file, and the
+    # substrate's callback stays disabled because the var is unset.
+    install_timing_recorder
+    run "${BASH_BIN}" "${TEST_TMP}/ops/provision-files.sh"
+    [ "${status}" -eq 0 ]
+    [ "$(cat "${TEST_TMP}/timing-target")" = "UNSET" ]
+}
+
+@test "the timing rows file is removed after the run" {
+    install_timing_recorder
+    run env TIMING_TREE_OUTPUT_PATH="${TEST_TMP}/tree.json" \
+        "${BASH_BIN}" "${TEST_TMP}/ops/provision-files.sh"
+    [ "${status}" -eq 0 ]
+    leftovers="$(find /tmp -maxdepth 1 -name 'timing-tasks.*' -print 2>/dev/null || true)"
+    [ -z "${leftovers}" ]
 }

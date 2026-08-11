@@ -27,22 +27,10 @@ teardown() {
     _bats_cleanup_temp
 }
 
-# Stand up a Git Bash impersonation: uname reports MINGW and cygpath maps a
-# POSIX path onto the Windows temp dir the real one would report. Prepending
-# the stub dir to PATH is how the substrate's own bridge suite fakes the same
-# launch, so both repos exercise the Windows branch the same way.
+# Git Bash impersonation comes from the shared fixtures; prepending the stub
+# dir to PATH is what puts it in front of the real tools.
 install_mingw_stubs() {
-    cat >"${TEST_TMP}/stubs/uname" <<'STUB'
-#!/usr/bin/env bash
-if [[ "$1" == "-s" ]]; then echo "MINGW64_NT-10.0-26200"; else exec /usr/bin/uname "$@"; fi
-STUB
-    cat >"${TEST_TMP}/stubs/cygpath" <<'STUB'
-#!/usr/bin/env bash
-# Real cygpath -w resolves an MSYS path through the mount table; the mapping
-# that matters here is /tmp -> the Windows temp dir, spelled with backslashes.
-printf 'C:\\Users\\tester\\AppData\\Local\\Temp%s\n' "${2#/tmp}" | tr '/' '\\'
-STUB
-    chmod +x "${TEST_TMP}/stubs/uname" "${TEST_TMP}/stubs/cygpath"
+    _bats_install_mingw_stubs "${TEST_TMP}/stubs"
 }
 
 @test "sourcing defines both handoff verbs" {
@@ -140,11 +128,8 @@ STUB
 @test "a missing cygpath fails loudly rather than returning a bad path" {
     # Without cygpath there is no honest translation, and silently handing back
     # the POSIX path is exactly the original defect.
-    cat >"${TEST_TMP}/stubs/uname" <<'STUB'
-#!/usr/bin/env bash
-if [[ "$1" == "-s" ]]; then echo "MINGW64_NT-10.0-26200"; else exec /usr/bin/uname "$@"; fi
-STUB
-    chmod +x "${TEST_TMP}/stubs/uname"
+    install_mingw_stubs
+    rm -f "${TEST_TMP}/stubs/cygpath"
     # A PATH with the stub uname but no cygpath anywhere on it.
     run env PATH="${TEST_TMP}/stubs:/usr/bin:/bin" "${BASH_BIN}" -c '
         source "$1"
@@ -157,15 +142,11 @@ STUB
 @test "an untranslatable Windows path is rejected, not guessed" {
     # cygpath can hand back a UNC path for a network-mounted temp dir; that
     # has no /mnt equivalent, so the failure must surface here.
-    cat >"${TEST_TMP}/stubs/uname" <<'STUB'
-#!/usr/bin/env bash
-if [[ "$1" == "-s" ]]; then echo "MINGW64_NT-10.0-26200"; else exec /usr/bin/uname "$@"; fi
-STUB
+    install_mingw_stubs
     cat >"${TEST_TMP}/stubs/cygpath" <<'STUB'
 #!/usr/bin/env bash
 printf '\\\\fileserver\\share\\vm-files-vars.abc123\n'
 STUB
-    chmod +x "${TEST_TMP}/stubs/uname" "${TEST_TMP}/stubs/cygpath"
     run env PATH="${TEST_TMP}/stubs:${PATH}" "${BASH_BIN}" -c '
         source "$1"
         resolve_controller_path /tmp/vm-files-vars.abc123
