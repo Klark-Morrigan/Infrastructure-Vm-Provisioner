@@ -16,8 +16,8 @@
 # ansible.builtin.copy pushes bytes through the SSH connection the bridge has
 # already opened, so `host_file_server_base_url` goes unread on this path.
 #
-# Shared posture (why hosts is the bridge's group, why role order lives in the
-# play rather than in role meta deps) mirrors provision-toolchains.yml.
+# Posture (hosts is the bridge's group, any_errors_fatal) mirrors
+# provision-toolchains.yml.
 #
 # gather_facts is off for the same reason it is off there, and the reasoning
 # holds independently: neither role reads a gathered fact - the transport is
