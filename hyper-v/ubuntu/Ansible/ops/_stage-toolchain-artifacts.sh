@@ -35,6 +35,10 @@ source "${BASH_SOURCE[0]%/*}/imports/_log.sh"
 # into the Windows form pwsh.exe needs.
 # shellcheck source=hyper-v/ubuntu/Ansible/ops/imports/_to-windows-path.sh
 source "${BASH_SOURCE[0]%/*}/imports/_to-windows-path.sh"
+# _to_wsl_path is the other direction, for the path that comes back out of
+# pwsh.exe and is then read by ansible-playbook under the WSL controller.
+# shellcheck source=hyper-v/ubuntu/Ansible/ops/_to-wsl-path.sh
+source "${BASH_SOURCE[0]%/*}/_to-wsl-path.sh"
 # Generic unknown-flag handler lives in the substrate; reach it through the
 # 3.1 sibling-checkout resolver rather than duplicating it here.
 # shellcheck source=hyper-v/ubuntu/Ansible/ops/imports/_common-ansible-root.sh
@@ -91,12 +95,13 @@ fi
 
 # The resolved-config path comes back Windows-form (Stage-ToolchainArtifacts
 # runs under pwsh.exe). ansible-playbook reads it under the WSL controller, so
-# translate C:\... -> /mnt/c/... : every backslash to a slash (the [\\] class
-# keeps the backslash a plain literal for shellcheck), then the drive letter to
-# a lowercased /mnt mount (\L is GNU sed, which Git Bash ships). The staging dir
+# translate C:\... -> /mnt/c/... through the shared helper. The staging dir
 # stays Windows-form - the listener pwsh.exe wants exactly that.
-resolved_wsl="$(printf '%s' "${resolved_win}" \
-    | sed -E 's#[\\]#/#g; s#^([A-Za-z]):/#/mnt/\L\1/#')"
+# shellcheck disable=SC2310  # predicate in `if`; the failure is handled below
+if ! resolved_wsl="$(_to_wsl_path "${resolved_win}")"; then
+    log_err "staging returned a resolved-config path the WSL controller cannot read: ${resolved_win}"
+    exit 1
+fi
 
 log_info "Toolchain artifacts staged: ${staging_dir}"
 
