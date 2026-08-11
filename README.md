@@ -1467,12 +1467,14 @@ bare `provision` simply keeps its historical behaviour.
 checks that you went on to run `provision-toolchains.sh`.
 
 Both read the same desired-state (`VmProvisionerConfig`), so the two chains are
-interchangeable. In the `.menu` launcher these are the `provision` /
-`provision (skip toolchains)` / `provision-toolchains (Ansible)` entries, and
-the end-to-end scenarios pair them: the `(custom PS)` chain runs
-`provision`; the `(Ansible)` chain runs `provision (skip toolchains)` then
-`provision-toolchains (Ansible)`. Live correctness of either path is verified
-through Infrastructure-E2E.
+interchangeable. The `.menu` launcher offers only the Ansible one: its Deploy
+section runs `provision (skip toolchains, skip files)` before
+`provision-toolchains`, and the `VM + users + runners` scenario chains them that
+way. The in-line reconciler survives only as the deprecated
+`provision (with in-line toolchains and files)` row in the Legacy section - a
+bare `provision.ps1`, so it fires the in-line file copy with it
+([File transport](#file-transport-the-two-chains)). Live correctness of either
+path is verified through Infrastructure-E2E.
 
 The flow lives under `hyper-v/ubuntu/Ansible/`:
 
@@ -1617,7 +1619,7 @@ narrowest owner.
 
 Requires a WSL controller - bootstrap it with
 [`ops/bootstrap-controller.sh`](hyper-v/ubuntu/Ansible/ops/bootstrap-controller.sh)
-(the `bootstrap-controller (Ansible)` menu entry), a thin shim that reuses the
+(the `bootstrap-controller (one-time)` menu entry), a thin shim that reuses the
 shared Common-Ansible controller - the local `VmProvisioner` vault populated
 (including each VM's toolchain fields), and the Common-Ansible sibling checkout
 present.
@@ -1747,11 +1749,12 @@ A VM whose only opt-in fields are covered by the switches passed opens no SSH
 session and no file server at all - the skip is decided before any transport is
 paid for.
 
-**Not yet wired into the menu.** The switch exists, but the `.menu` entry and
-the end-to-end scenario that would pair `provision -SkipFiles` with
-`provision-files.sh` are not in place, so the estate's live chain is still the
-PowerShell one described under
-[Optional: copy files to the VM](#optional-copy-files-to-the-vm).
+The `.menu` launcher offers only the Ansible chain here too: `provision-files`
+sits between `provision (skip toolchains, skip files)` and
+`provision-toolchains`, both in the Deploy section and in the
+`VM + users + runners` scenario. The PowerShell transport keeps no entry of its
+own - it rides the deprecated Legacy row described under
+[Toolchain engine](#toolchain-engine-selecting-the-live-path).
 
 ### Controller-side path translation
 
