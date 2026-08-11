@@ -73,8 +73,6 @@
          if _host_env_vars is mapping else [] }}
     _env_vars_unknown_sub_fields: >-
       {{ _env_vars_declared_sub_fields | difference(['blockName', 'entries']) }}
-    _env_vars_missing_sub_fields: >-
-      {{ ['blockName', 'entries'] | difference(_env_vars_declared_sub_fields) }}
   tasks:
     # The one rule this play has to own. Assert-VmEnvVarsField validates the
     # `envVars` object WHOLE, and part of what it validates is the object's own
@@ -103,14 +101,16 @@
           - _env_vars_unknown_sub_fields | length == 0
           - "'blockName' in _host_env_vars"
           - "'entries' in _host_env_vars"
+        # Declared plus unknown is enough to place any of the three faults:
+        # the allowed set is stated in the same sentence, so a missing
+        # sub-field is what the reader does not see listed. A third
+        # `missing:` field would restate that and make the line longer.
         fail_msg: >-
           envVars declared for host '{{ inventory_hostname }}' must be a JSON
           object with sub-fields exactly 'blockName' and 'entries'. Declared:
           {{ _env_vars_declared_sub_fields | join(', ')
              | default('(not an object)', true) }}; unknown:
           {{ _env_vars_unknown_sub_fields | join(', ')
-             | default('(none)', true) }}; missing:
-          {{ _env_vars_missing_sub_fields | join(', ')
              | default('(none)', true) }}.
       when: _host_env_vars | length > 0
       tags:
