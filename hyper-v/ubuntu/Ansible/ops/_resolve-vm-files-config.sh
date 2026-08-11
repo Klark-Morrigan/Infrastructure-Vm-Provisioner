@@ -50,7 +50,13 @@ fi
 # The vault payload is an array of VM definitions; anything else means the
 # wrong secret was read, which is worth naming here rather than letting the
 # reshape below silently produce an empty dict.
-config_type="$(printf '%s' "${input}" | jq -r 'type')"
+#
+# CR stripped here for the same reason as in the collection below (Windows
+# jq.exe writes CRLF). MSYS bash happens to drop a trailing CR from `$(...)`
+# on its own, so this is currently belt-and-braces there - but relying on that
+# quirk means the comparison is correct only under the shell that provides it,
+# which is precisely the kind of hidden dependency this file already got wrong.
+config_type="$(printf '%s' "${input}" | jq -r 'type' | tr -d '\r')"
 if [[ "${config_type}" != "array" ]]; then
     log_err "provisioner config must be a JSON array of VM definitions (got ${config_type})"
     exit 1
@@ -65,6 +71,15 @@ fi
 #    Non-string source/pattern values are skipped: they are schema violations
 #    the role reports far better than this script could, and they must reach it
 #    unchanged to be reported at all.
+#
+#    `tr -d '\r'` is load-bearing, not hygiene. Under Git Bash - the shell the
+#    operator menu launches this flow in - `jq` resolves to the WINDOWS jq.exe,
+#    which terminates lines with CRLF. `mapfile -t` strips only the newline, so
+#    every collected path would keep a trailing CR, the lookup map below would
+#    be keyed by "<path>\r", and step 2's lookup - which uses the clean JSON
+#    string - would miss every one of them. The failure is silent: paths ride
+#    through untranslated and surface much later as a role assertion about a
+#    Windows path, or as a copy of a file the controller cannot open.
 # ---------------------------------------------------------------------------
 # shellcheck disable=SC2312  # jq cannot fail here - the document was validated above
 mapfile -t controller_paths < <(printf '%s' "${input}" | jq -r '
@@ -74,7 +89,7 @@ mapfile -t controller_paths < <(printf '%s' "${input}" | jq -r '
     | select(type == "object")
     | (.source? // .pattern? // empty)
     | select(type == "string")
-' | sort -u)
+' | tr -d '\r' | sort -u)
 
 path_map='{}'
 if [[ "${#controller_paths[@]}" -gt 0 ]]; then
@@ -85,7 +100,7 @@ if [[ "${#controller_paths[@]}" -gt 0 ]]; then
             exit 1
         fi
         path_map="$(jq -c --arg k "${windows_path}" --arg v "${posix_path}" \
-            '. + {($k): $v}' <<<"${path_map}")"
+            '. + {($k): $v}' <<<"${path_map}" | tr -d '\r')"
     done
 fi
 

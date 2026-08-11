@@ -167,3 +167,71 @@ emitted() {
     [[ "${output}" != *"s3cret"* ]]
     [[ "${output}" != *"toolchains"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# Windows jq (the Git Bash launch)
+#
+# Under the operator menu this script runs in Git Bash, where `jq` resolves to
+# the WINDOWS jq.exe and every line it writes ends CRLF. That shipped as a
+# silent translation failure: `mapfile -t` strips only the newline, so the
+# lookup map was keyed by "<path>\r" while step 2 looked up the clean JSON
+# string, and every path rode through in its Windows form to fail much later
+# inside the vm_files role.
+#
+# bats runs on the controller, where jq writes LF, so nothing above can see it.
+# The stub below makes the Windows behaviour reproducible here.
+# ---------------------------------------------------------------------------
+
+install_crlf_jq_stub() {
+    local real_jq
+    real_jq="$(command -v jq)"
+    mkdir -p "${TEST_TMP}/stubs"
+    # pipefail so a real jq failure still propagates through the sed - without
+    # it the stub would mask every parse error and the guards above would pass
+    # for the wrong reason.
+    cat >"${TEST_TMP}/stubs/jq" <<STUB
+#!/usr/bin/env bash
+set -o pipefail
+"${real_jq}" "\$@" | sed -e 's/\$/\r/'
+STUB
+    chmod +x "${TEST_TMP}/stubs/jq"
+}
+
+@test "translates a bulk pattern even when jq writes CRLF (Windows jq)" {
+    install_crlf_jq_stub
+    run env PATH="${TEST_TMP}/stubs:${PATH}" "${BASH_BIN}" -c 'printf "%s" "$2" | "$1"' _ "${SCRIPT}" \
+        '[{"vmName":"ubuntu-02-ci","files":[{"pattern":"C:\\jars\\*.jar","targetDir":"/opt/app/lib"}]}]'
+    [ "${status}" -eq 0 ]
+    got="$(printf '%s' "${output}" | tr -d '\r' | jq -r '.vm_files_by_host["ubuntu-02-ci"][0].pattern')"
+    [ "${got}" = "/mnt/c/jars/*.jar" ]
+}
+
+@test "translates a single-form source even when jq writes CRLF" {
+    install_crlf_jq_stub
+    run env PATH="${TEST_TMP}/stubs:${PATH}" "${BASH_BIN}" -c 'printf "%s" "$2" | "$1"' _ "${SCRIPT}" \
+        '[{"vmName":"ubuntu-01-ci","files":[{"source":"C:\\payloads\\app.jar","target":"/opt/app/app.jar"}]}]'
+    [ "${status}" -eq 0 ]
+    got="$(printf '%s' "${output}" | tr -d '\r' | jq -r '.vm_files_by_host["ubuntu-01-ci"][0].source')"
+    [ "${got}" = "/mnt/c/payloads/app.jar" ]
+}
+
+@test "still rejects a non-array config when jq writes CRLF" {
+    # The type guard compares a jq capture against a literal, so it is exposed
+    # to the same CR. MSYS bash strips it from $(...) but the controller's bash
+    # does not, so the script must not depend on either.
+    install_crlf_jq_stub
+    run env PATH="${TEST_TMP}/stubs:${PATH}" "${BASH_BIN}" -c 'printf "%s" "$2" | "$1"' _ "${SCRIPT}" \
+        '{"vmName":"ubuntu-01-ci"}'
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"must be a JSON array"* ]]
+}
+
+@test "accepts a valid array config when jq writes CRLF" {
+    # Guards the inverse of the case above: a CR riding on the type capture
+    # would reject a perfectly good config with "got array".
+    install_crlf_jq_stub
+    run env PATH="${TEST_TMP}/stubs:${PATH}" "${BASH_BIN}" -c 'printf "%s" "$2" | "$1"' _ "${SCRIPT}" \
+        '[{"vmName":"ubuntu-01-ci","files":[]}]'
+    [ "${status}" -eq 0 ]
+    [[ "${output}" != *"must be a JSON array"* ]]
+}
