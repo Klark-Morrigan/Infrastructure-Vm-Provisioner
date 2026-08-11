@@ -20,7 +20,7 @@ jobs:
     with:
       flow-spec: >-
         {
-          "usersFlow":"ansible"
+          "usersFlow":"ansible",
           "runnersFlow":"ansible",
           "toolchainsFlow":"ansible",
           "filesFlow":"ansible"
