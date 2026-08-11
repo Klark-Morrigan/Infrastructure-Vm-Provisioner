@@ -1941,17 +1941,12 @@ SECRET_SUFFIX=Production ./provision-env.sh
 SECRET_SUFFIX=Production ./provision-env.sh --limit ubuntu-02-ci --check
 ```
 
-There is no resolve step here, and that absence is the one place this flow is
-genuinely simpler than the file one. `files` entries name their sources on the
-Windows host that authored the config, so someone has to reshape the config and
-rewrite every path to its `/mnt` form before the WSL controller can open them
-([Controller-side path translation](#controller-side-path-translation)).
-`envVars` values are VM-side POSIX strings that never saw a drive letter, so the
-desired-state is already inside the whole-config document the bridge surfaces on
-every dispatch (`vm_provisioner_config`) and the playbook selects straight off
-it. That drops a resolve script, its path translation, its temp document and its
-bats suite from this flow's surface - and with them the two-spelling handoff bug
-the file flow shipped twice.
+Operationally what that buys you is a flow with nothing to go wrong before the
+dispatch: no vault read of its own, no reshape step, no temp document. It is
+cheap to re-run after editing one entry, and there is no half-finished state it
+can leave behind if you interrupt it. The reason it gets away with that - and
+the reason the file flow cannot - is in the wrapper's own header
+(`ops/provision-env.sh`), next to the code it explains.
 
 Prerequisites are the toolchain flow's, minus the file server:
 [see above](#running-the-flow). Like the file flow it declares no
@@ -2104,6 +2099,13 @@ shared Common-Ansible controller venv and puts the substrate roles on
 `ANSIBLE_ROLES_PATH` (so `jdk` / `dotnet_sdk` / `dotnet_tools` resolve) - so a
 sibling checkout at `..\Common-Ansible` with a bootstrapped `.venv` is
 required for that step (it auto-skips with a `::notice::` if absent).
+
+The bats suites under `Tests/Ansible/playbooks/` need that same shared venv,
+because they run the real playbooks through `ansible-playbook` against a
+fixture fleet (local connection, substrate roles stubbed) to exercise the rules
+the plays own rather than delegate. They **skip** when the sibling checkout is
+absent, which is what CI sees - so those cases are a local pre-push gate, not a
+merge gate. Run them before pushing a playbook change.
 `.gitattributes` pins `*.sh` to LF and `*.bat` to CRLF - Linux CI runners
 reject CRLF shebangs.
 
@@ -2216,7 +2218,9 @@ Infrastructure-VM-Provisioner/
 |  |  |- common/            # Unit tests for common/ helpers (config, diag, network, power, ssh, ui)
 |  |  |- up/                # Unit tests for up/ (config, disk, jdk, dotnet, powershell, seed, network, post, reconciler, vm)
 |  |  `- down/              # Unit tests for down/ (network, vm)
-|  `- Ansible/              # Mirrors the Ansible slice (Stage-ToolchainArtifacts, ops/ bash helpers)
+|  `- Ansible/              # Mirrors the Ansible slice
+|     |- ops/               # Stage-ToolchainArtifacts, ops/ bash helpers
+|     `- playbooks/         # The playbooks' own rules, run against a fixture fleet with the substrate roles stubbed
 |- scripts/
 |  |- Run-Tests.ps1                       # Unit-test runner (delegates to Common-PowerShell)
 |  |- Run-IntegrationTests.ps1            # Docker-host integration runner (delegates to Common-PowerShell)

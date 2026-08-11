@@ -43,14 +43,9 @@
     # raising on the missing attribute - the idiom the toolchain play uses for
     # the same reason.
     #
-    # No resolve step stands between config and role here, and this is the one
-    # place the env flow is genuinely simpler than the files flow. That one
-    # reads a pre-resolved dict because its raw entries name their sources
-    # Windows-side (C:\jars\*.jar) and need /mnt rewriting before the WSL
-    # controller can open them. `envVars` values are VM-side POSIX strings that
-    # never saw a drive letter, so the config the bridge surfaces is already
-    # the desired state - which drops a resolve script, its path translation
-    # and its bats suite from this flow's surface.
+    # Note this reads the config the bridge surfaces DIRECTLY, where
+    # provision-files.yml reads a wrapper-resolved dict instead. That is not an
+    # oversight on either side; ops/provision-env.sh's header carries the why.
     _host_env_vars: "{{ _host_config.envVars | default({}) }}"
     # The two role inputs, unwrapped. vm_env_vars takes them as separate vars
     # (it never sees the wrapper), which is what keeps its input contract
