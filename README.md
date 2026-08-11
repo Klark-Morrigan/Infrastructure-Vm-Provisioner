@@ -36,6 +36,8 @@
   - [Reading the run report](#reading-the-run-report)
     - [What is installed (toolchain_report)](#what-is-installed-toolchain_report)
     - [What it came from (artifact_report)](#what-it-came-from-artifact_report)
+- [File provisioning via Ansible (Common-Ansible)](#file-provisioning-via-ansible-common-ansible)
+  - [Controller-side path translation](#controller-side-path-translation)
 - [CI](#ci)
 - [Repo structure](#repo-structure)
 
@@ -1674,6 +1676,75 @@ run (`--tags jdk`) still ends with them, scoped to whatever ran.
 
 ---
 
+## File provisioning via Ansible (Common-Ansible)
+
+A second Ansible flow, peer to the toolchain one, that copies the
+operator-declared [`files`](#optional-copy-files-to-the-vm) entries of each VM
+definition onto the provisioned VMs using the substrate's `vm_files` and
+`files_report` roles. Same substrate, same
+[sibling checkout](#consuming-common-ansible), same `VmProvisionerConfig`
+desired-state - only the payload differs.
+
+`ops/provision-files.sh` is the operator entry point. Its `CA_*` contract is
+deliberately shorter than the toolchain wrapper's: the `VmProvisioner`
+inventory vault and `CA_CONSUMER_ROOT`, and **no host file server**.
+`ansible.builtin.copy` pushes bytes through the SSH connection the bridge has
+already opened, so this flow needs no Windows-side `HttpListener` - and the
+payloads never leave that channel, unlike the PowerShell engine, which
+publishes every `files` entry on an unauthenticated listener on the Hyper-V
+subnet for the duration of a run.
+
+### Controller-side path translation
+
+`files` entries name their sources on the **Windows host that authored the
+config** (`C:\jars\*.jar`), but `ansible-playbook` reads them under the **WSL
+controller**, where the same file is `/mnt/c/jars/*.jar`. Nothing in the
+substrate bridge translates config-supplied paths, and that is the design: the
+reusable roles receive POSIX paths and stay free of drive letters, `/mnt`, and
+WSL, which is what makes them testable in a plain container. Only this repo
+knows the estate is Windows-hosted, so the conversion is the consumer's.
+
+Three pieces, all under `hyper-v/ubuntu/Ansible/ops/`:
+
+- `_to-wsl-path.sh` - the conversion itself (`_to_wsl_path`), the inverse of
+  Common-Automation's `_to_windows_path` that the pwsh.exe direction already
+  uses. Drive letters translate in either case and with either slash; an
+  already-POSIX or relative path passes through untouched; UNC
+  (`\\server\share`) and drive-relative (`C:file`) paths are **rejected**,
+  because neither has an honest `/mnt` equivalent and a guess would surface
+  later as an unrecognisable "file not found". The toolchain flow's staging
+  step shares it for the resolved-config path pwsh.exe hands back.
+- `_resolve-vm-files-config.sh` - a pure stdin -> stdout reshape that lifts
+  each VM's `files` array into one play-wide document keyed by `vmName` and
+  rewrites every `source` / `pattern` on the way. `target` / `targetDir` are
+  left alone: they are VM-side POSIX paths that never saw a drive letter.
+  Schema validation is **not** duplicated here - the `vm_files` role owns those
+  rules, so a malformed entry rides through untouched to be reported by the
+  component that knows them.
+- `provision-files.sh` - reads the inventory vault, pipes it through the
+  reshape, and forwards the result as a single `--extra-vars` document. Same
+  channel and shape the toolchain flow uses for its resolved pins:
+
+```json
+{
+  "vm_files_by_host": {
+    "ubuntu-01-ci": [
+      { "source": "/mnt/c/payloads/app.jar", "target": "/opt/app/app.jar" },
+      { "pattern": "/mnt/c/jars/*.jar", "targetDir": "/opt/app/lib",
+        "recurse": true }
+    ],
+    "ubuntu-02-ci": []
+  }
+}
+```
+
+Every VM carrying a `vmName` appears, with an empty list when it declares no
+files, so the per-host lookup never has to tell "no entry" from "nothing to
+copy". A path the controller cannot reach fails the whole resolve, by name,
+before any VM is touched.
+
+---
+
 ## CI
 
 CI runs on pull requests targeting `master` via `.github/workflows/ci.yml`,
@@ -1836,8 +1907,8 @@ Infrastructure-VM-Provisioner/
 |     |     |  `- teardown-network.ps1         # Per-env teardown: delegates legacy NetNat + host IP cleanup to Remove-LegacySingletonNat, then removes the Private switch when empty
 |     |     `- vm/
 |     |        `- remove-vm.ps1               # Stops, removes VM, deletes VHDX and config dir
-|     `- Ansible/           # Slice: on-VM toolchain push (Common-Ansible bridge)
-|        |- ops/            # Stage-ToolchainArtifacts.ps1 (reuses PowerShell/up resolvers), provision-toolchains.sh, imports/
+|     `- Ansible/           # Slice: on-VM toolchain + file push (Common-Ansible bridge)
+|        |- ops/            # Stage-ToolchainArtifacts.ps1 (reuses PowerShell/up resolvers), provision-toolchains.sh, provision-files.sh, imports/
 |        |- playbooks/      # provision-toolchains.yml
 |        `- requirements.yml
 |- Tests/
@@ -1846,7 +1917,7 @@ Infrastructure-VM-Provisioner/
 |  |  |- common/            # Unit tests for common/ helpers (config, diag, network, power, ssh, ui)
 |  |  |- up/                # Unit tests for up/ (config, disk, jdk, dotnet, powershell, seed, network, post, reconciler, vm)
 |  |  `- down/              # Unit tests for down/ (network, vm)
-|  `- Ansible/              # Mirrors the Ansible slice (Stage-ToolchainArtifacts)
+|  `- Ansible/              # Mirrors the Ansible slice (Stage-ToolchainArtifacts, ops/ bash helpers)
 |- scripts/
 |  |- Run-Tests.ps1                       # Unit-test runner (delegates to Common-PowerShell)
 |  |- Run-IntegrationTests.ps1            # Docker-host integration runner (delegates to Common-PowerShell)
