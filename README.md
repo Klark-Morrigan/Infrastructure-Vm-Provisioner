@@ -26,6 +26,7 @@
 - [Get-VmRuntimeDiag.ps1](#get-vmruntimediagps1)
 - [start-vms.ps1](#start-vmsps1)
 - [ensure-vms-ready.ps1](#ensure-vms-readyps1)
+- [set-env-vars.ps1](#set-env-varsps1)
 - [deprovision.ps1](#deprovisionps1)
 - [Toolchain provisioning via Ansible (Common-Ansible)](#toolchain-provisioning-via-ansible-common-ansible)
   - [Toolchain engine (selecting the live path)](#toolchain-engine-selecting-the-live-path)
@@ -1398,6 +1399,41 @@ when you (or automation) need the fleet actually reachable over SSH.
 
 ---
 
+## set-env-vars.ps1
+
+Run as Administrator to reconcile the operator-declared `envVars` managed
+block onto an already-provisioned fleet, without a full provision.
+
+```powershell
+.\hyper-v\ubuntu\PowerShell\set-env-vars.ps1 -SecretSuffix Production
+
+# One VM only - the counterpart of provision-env.sh's --limit
+.\hyper-v\ubuntu\PowerShell\set-env-vars.ps1 -SecretSuffix Production -VmName ubuntu-02-ci
+```
+
+This is the PowerShell env engine as a standalone command, the peer of
+[`ops/provision-env.sh`](#environment-variable-provisioning-via-ansible-common-ansible).
+Until it existed the PowerShell engine could only be reached as a step inside
+`provision.ps1`, so re-applying one edited block meant paying for a whole
+provision run to reach it. It calls the same `Set-EnvironmentVariables` step
+`provision.ps1` dispatches, so the two paths cannot drift.
+
+**What it deliberately does not do** - no host-network phase (the fleet is
+already up, and toggling ICS to write a text file would risk the very
+connectivity the write needs), no cloud-init wait, no file server. It does keep
+the router jump: a workload sits on a private switch the host has no route
+into, so its session is tunnelled through its environment's router exactly as
+post-provisioning tunnels its own.
+
+**Selection** is by field presence, so a VM declaring `entries: []` is still
+visited - that is the "remove the managed block" intent, not an absence. A
+`-VmName` that matches nothing is an error rather than a silent no-op.
+
+Idempotent: the transport skips the SSH write when the desired block already
+matches the file, so a converged fleet reports every VM unchanged. One
+unreachable VM does not strand the rest; the run exits 1 with the failures
+named.
+
 ## deprovision.ps1
 
 Run as Administrator to remove VMs that were created by `provision.ps1`.
@@ -2129,6 +2165,7 @@ Infrastructure-VM-Provisioner/
 |     |- PowerShell/        # Slice: host-driven PowerShell reconciler (provision/deprovision)
 |     |  |- provision.ps1       # Entry point - orchestrates all provisioning steps
 |     |  |- start-vms.ps1       # Entry point - brings provisioned VMs back to Running
+|     |  |- set-env-vars.ps1    # Entry point - the PowerShell env engine standalone; reconciles the declared envVars block without a full provision (peer of ops/provision-env.sh)
 |     |  |- deprovision.ps1     # Entry point - reverses provision.ps1
 |     |  |- common/
 |     |  |  |- config/
