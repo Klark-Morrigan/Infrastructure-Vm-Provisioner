@@ -189,6 +189,25 @@ Describe 'set-env-vars.ps1' {
                 -ParameterFilter { $Vm.vmName -eq 'vm-b' }
         }
 
+        It 'names the requested VMs when they exist but declare no envVars' {
+            # The VM is in the config, so the unmatched-name check passes and
+            # the run is a legitimate no-op - but reporting it as "no VM
+            # declares envVars" would describe the fleet rather than the
+            # request, and hide the config typo the operator came to find.
+            Mock Read-VmProvisionerConfig { @( (New-TestVm -Name 'plain') ) }
+            # $global:, not $script: - the mock body runs while `& $shimPath` is
+            # on the call stack, where $script: resolves to the shimmed script's
+            # scope rather than this file's.
+            $global:_SetEnvVars_Said = [System.Collections.Generic.List[string]]::new()
+            Mock Write-Host { $global:_SetEnvVars_Said.Add([string]$Object) }
+
+            & $script:shimPath -SecretSuffix 'Test' -VmName 'plain' | Out-Null
+
+            ($global:_SetEnvVars_Said -join ' ') |
+                Should -BeLike '*None of plain declares envVars*'
+            Should -Invoke New-VmSshClientWithJump -Exactly -Times 0
+        }
+
         It 'throws on a VM name that is not in the config' {
             # A targeted run that silently matched nothing would report
             # success for work it never did - the same class of failure the

@@ -132,7 +132,18 @@ if ($VmName) {
 }
 
 if ($targets.Count -eq 0) {
-    Write-Host "No VM declares envVars - nothing to do." -ForegroundColor Cyan
+    # Distinguished, because the two cases mean different things to the
+    # operator. "No VM declares envVars" is a statement about the fleet and is
+    # the ordinary answer on an estate that uses none. Under -VmName it would
+    # be a lie of omission: the named VMs exist (the check above proved it),
+    # they simply declare nothing - and an operator who expected otherwise has
+    # a config typo to find, not an empty estate.
+    $scope = if ($VmName) {
+        "None of $($VmName -join ', ') declares envVars"
+    } else {
+        'No VM declares envVars'
+    }
+    Write-Host "$scope - nothing to do." -ForegroundColor Cyan
     exit 0
 }
 
