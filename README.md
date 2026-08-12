@@ -43,7 +43,7 @@
   - [The playbook](#the-playbook)
   - [Reading the files report](#reading-the-files-report)
 - [Environment variable provisioning via Ansible (Common-Ansible)](#environment-variable-provisioning-via-ansible-common-ansible)
-  - [Which engine runs (there is no switch here)](#which-engine-runs-there-is-no-switch-here)
+  - [Which engine runs](#which-engine-runs)
   - [The playbook and its one owned rule](#the-playbook-and-its-one-owned-rule)
   - [Reading the environment variables report](#reading-the-environment-variables-report)
 - [CI](#ci)
@@ -91,7 +91,10 @@ PSGallery automatically on first run.
 # 4. Bring the fleet back to ready after a host reboot (run as Administrator)
 .\hyper-v\ubuntu\PowerShell\ensure-vms-ready.ps1 -SecretSuffix Production
 
-# 5. Remove VMs when no longer needed (run as Administrator)
+# 5. Re-apply the declared envVars block without a full provision (as Administrator)
+.\hyper-v\ubuntu\PowerShell\set-env-vars.ps1 -SecretSuffix Production
+
+# 6. Remove VMs when no longer needed (run as Administrator)
 .\hyper-v\ubuntu\PowerShell\deprovision.ps1 -SecretSuffix Production
 ```
 
@@ -865,8 +868,9 @@ Run as Administrator after `setup-secrets.ps1` has stored the config.
 | `-SecretSuffix` | **Required.** Names the lifecycle to read - the vault key is `VmProvisionerConfig-<Suffix>`. Operators pass `Production`; ephemeral environments (parallel workflows, E2E) pass their own label. Mandatory so a caller cannot fall through to a default and collide with another lifecycle's data. |
 | `-SkipToolchains` | Suppresses the in-line toolchain reconciler: this run installs nothing. See [Toolchain engine](#toolchain-engine-selecting-the-live-path). |
 | `-SkipFiles` | Suppresses the in-line `files` transport: this run copies nothing. See [File transport](#file-transport-the-two-chains). |
+| `-SkipEnvVars` | Suppresses the in-line `envVars` transport: this run writes no managed block, and retracts none either. See [Which engine runs](#which-engine-runs). |
 
-Both switches are pure suppression - neither hands off to the Ansible
+All three switches are pure suppression - none hands off to the Ansible
 counterpart, which is a second command you run yourself. A VM whose only
 opt-in field is suppressed opens no SSH session and no file server at all.
 Neither relaxes validation: a `files` entry naming a `source` that does not
@@ -1039,7 +1043,8 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
     step. Adding a new step (e.g. Maven) is a one-function addition with
     one dispatch line in `Invoke-VmPostProvisioning`. Skipped silently
     for VMs that have no opt-in fields - or whose only opt-in fields are
-    the ones `-SkipFiles` / `-SkipToolchains` suppressed, since the skip
+    the ones `-SkipFiles` / `-SkipToolchains` / `-SkipEnvVars` suppressed,
+    since the skip
     is decided before any transport is paid for. Idempotent on the VM side: the
     JDK install no-ops when its `release` file is already present, file
     copies overwrite with the current host source bytes, and the
@@ -1795,10 +1800,11 @@ invokes Ansible, so there is nothing for a flag to select between.
 **not** hand off to Ansible, and nothing checks that you went on to run
 `provision-files.sh` - stopping after the first command leaves the files
 uncopied. The same is true of `-SkipToolchains`
-([Toolchain engine](#toolchain-engine-selecting-the-live-path)); the switches
-are independent, so all four combinations are valid, and
-`provision -SkipToolchains -SkipFiles` is the first half of the all-Ansible
-chain.
+([Toolchain engine](#toolchain-engine-selecting-the-live-path)) and
+`-SkipEnvVars` ([Which engine runs](#which-engine-runs)); the switches are
+independent, so every combination is valid, and
+`provision -SkipToolchains -SkipFiles -SkipEnvVars` is the first half of the
+all-Ansible chain.
 
 A VM whose only opt-in fields are covered by the switches passed opens no SSH
 session and no file server at all - the skip is decided before any transport is
@@ -1988,19 +1994,26 @@ Prerequisites are the toolchain flow's, minus the file server:
 [see above](#running-the-flow). Like the file flow it declares no
 `CA_NEEDS_HOST_FILE_SERVER` - there is no payload to serve at all.
 
-### Which engine runs (there is no switch here)
+### Which engine runs
 
-Unlike files and toolchains, environment variables have **no engine-selecting
-switch**. `provision.ps1` has `-SkipFiles` and `-SkipToolchains`; it has no
-`-SkipEnvVars`, and its post-provisioning step reconciles the managed block on
-every run in which the VM declares `envVars`. So the two engines are not
-alternatives an operator picks between - they are a provisioning-time engine and
-a re-run engine:
+Environment variables are selected the same way files and toolchains are, by a
+visible per-invocation switch: `provision.ps1 -SkipEnvVars` stands the in-line
+transport down, and the separate `provision-env.sh` command reconciles the
+managed block instead. A bare `provision` keeps writing it during
+post-provisioning exactly as before, so the switch changes nothing for an
+operator who does not pass it.
+
+The switch also hands over the **retraction** intent, not just the write: an
+`entries: []` declaration means "remove the managed block", and executing that
+in-line would retract a block the Ansible run is about to be asked to write.
+
+Because the two engines write the same block rather than different artefacts,
+they are usable as alternatives *and* in sequence:
 
 | Engine | When it runs | What it is for |
 | --- | --- | --- |
-| PowerShell (`Set-VmEnvironmentVariables`) | in-line, during any `provision` of a VM declaring `envVars` | getting the block onto a VM as it is built |
-| Ansible (`provision-env.sh`) | whenever you run it | re-applying after a config edit, without a full `provision` |
+| PowerShell (`Set-VmEnvironmentVariables`) | in-line during any `provision` of a VM declaring `envVars` unless `-SkipEnvVars`, or on demand via [`set-env-vars.ps1`](#set-env-varsps1) | getting the block onto a VM as it is built, and re-applying it without a full provision |
+| Ansible (`provision-env.sh`) | whenever you run it | re-applying after a config edit, without a full `provision`; the whole job under `-SkipEnvVars` |
 
 Running both is safe, and by design: the two write **byte-identical** managed
 blocks (`# BEGIN <blockName>` / `# END <blockName>` sentinels, `NAME="value"`

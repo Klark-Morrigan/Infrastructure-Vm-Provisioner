@@ -1094,4 +1094,87 @@ Describe 'Invoke-VmPostProvisioning' {
             $global:_PostProv_Calls['New-VmSshClient'].Count         | Should -Be 0
         }
     }
+
+    Context '-SkipEnvVars (managed block reconciled by the separate Ansible command)' {
+    # ------------------------------------------------------------------
+        # Peer of the two contexts above, for the third pair of
+        # interchangeable engines. With -SkipEnvVars the per-VM reconcile
+        # must not run here and an envVars-only VM must not open the
+        # transport (the separate provision-env.sh command writes the
+        # managed block instead). files / javaDevKit / router work is
+        # unchanged.
+
+        It 'does NOT dispatch Set-EnvironmentVariables when -SkipEnvVars is set' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithEnvVars) -SkipEnvVars
+
+            $global:_PostProv_Calls['Set-EnvironmentVariables'].Count | Should -Be 0
+        }
+
+        It 'does NOT dispatch the retraction intent when -SkipEnvVars is set' {
+            # `entries: []` is the operator's "remove the managed block"
+            # intent, and it routes through the transport like any other
+            # declaration. The switch hands that intent over to the other
+            # engine too - executing it here would retract a block the
+            # Ansible run is about to be asked to write.
+            Invoke-VmPostProvisioning -Vm (New-VmWithEmptyEnvVarsEntries) -SkipEnvVars
+
+            $global:_PostProv_Calls['Set-EnvironmentVariables'].Count | Should -Be 0
+        }
+
+        It 'opens no transport for an envVars-only VM when -SkipEnvVars is set' {
+            # envVars no longer justify the SSH + file-server cost - the
+            # Ansible command reconciles the block, so an envVars-only VM is
+            # a no-op here.
+            Invoke-VmPostProvisioning -Vm (New-VmWithEnvVars) -SkipEnvVars
+
+            $global:_PostProv_Calls['Invoke-WithVmFileServer'].Count | Should -Be 0
+            $global:_PostProv_Calls['New-VmSshClient'].Count         | Should -Be 0
+        }
+
+        It 'still dispatches the files copy when -SkipEnvVars is set' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithFiles) -SkipEnvVars
+
+            $global:_PostProv_Calls['Copy-VmFiles'].Count | Should -Be 1
+        }
+
+        It 'still dispatches the reconciler when -SkipEnvVars is set' {
+            Invoke-VmPostProvisioning -Vm (New-VmWithJdk) -SkipEnvVars
+
+            $global:_PostProv_Calls['Invoke-ToolchainReconciliation'].Count | Should -Be 1
+        }
+
+        It 'still runs Assert-RouterReady for a router VM when -SkipEnvVars is set' {
+            Invoke-VmPostProvisioning -Vm (New-RouterVm) -SkipEnvVars
+
+            $global:_PostProv_Calls['Assert-RouterReady'].Count | Should -Be 1
+        }
+
+        It 'dispatches Set-EnvironmentVariables when -SkipEnvVars is explicitly false' {
+            # provision.ps1 forwards -SkipEnvVars:$SkipEnvVars unconditionally,
+            # so the off case is a real call shape, not just omission.
+            Invoke-VmPostProvisioning -Vm (New-VmWithEnvVars) -SkipEnvVars:$false
+
+            $global:_PostProv_Calls['Set-EnvironmentVariables'].Count | Should -Be 1
+        }
+
+        It 'opens no transport at all when all three skip switches are set' {
+            # The full Ansible scenario's provision call: every declared
+            # field is handled by a standalone command, so the orchestrator
+            # short-circuits before paying for a session.
+            $vm = New-VmWithJdkAndFiles
+            Add-Member -InputObject $vm -MemberType NoteProperty -Name 'envVars' -Value (
+                [PSCustomObject]@{
+                    blockName = 'ci-01-app'
+                    entries   = @(
+                        [PSCustomObject]@{ name = 'FOO_HOME'; value = '/opt/foo' }
+                    )
+                }
+            )
+
+            Invoke-VmPostProvisioning -Vm $vm -SkipFiles -SkipToolchains -SkipEnvVars
+
+            $global:_PostProv_Calls['Invoke-WithVmFileServer'].Count | Should -Be 0
+            $global:_PostProv_Calls['New-VmSshClient'].Count         | Should -Be 0
+        }
+    }
 }

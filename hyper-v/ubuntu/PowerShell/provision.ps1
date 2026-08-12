@@ -57,7 +57,19 @@ param(
     # SEPARATE operator command (hyper-v/ubuntu/Ansible/ops/provision-files.sh),
     # so a bare `provision` keeps copying files over the host file server
     # exactly as before.
-    [switch] $SkipFiles
+    [switch] $SkipFiles,
+
+    # Skip the in-line PowerShell `envVars` transport in post-provisioning.
+    # Third and last pair of interchangeable engines, selected the same way
+    # as the two above: the Ansible env path is a SEPARATE operator command
+    # (hyper-v/ubuntu/Ansible/ops/provision-env.sh), so a bare `provision`
+    # keeps reconciling the managed block over SSH exactly as before.
+    #
+    # The two engines write the SAME sentinel-delimited block and each
+    # replaces the other's rather than appending a second one, so skipping
+    # here hands the block over cleanly rather than splitting ownership of
+    # it - which is what lets a host be driven by either engine.
+    [switch] $SkipEnvVars
 )
 
 Set-StrictMode -Version Latest
@@ -187,6 +199,11 @@ if ($SkipToolchains) {
 
 if ($SkipFiles) {
     Write-Host "Files: skipped (copy separately via provision-files.sh)" `
+        -ForegroundColor Cyan
+}
+
+if ($SkipEnvVars) {
+    Write-Host "Environment variables: skipped (apply separately via provision-env.sh)" `
         -ForegroundColor Cyan
 }
 
@@ -481,15 +498,18 @@ try {
         foreach ($vm in $vmsToProcess) {
             Invoke-VmPostProvisioning -Vm $vm `
                 -SkipToolchains:$SkipToolchains `
-                -SkipFiles:$SkipFiles
+                -SkipFiles:$SkipFiles `
+                -SkipEnvVars:$SkipEnvVars
         }
     }
 
-    # Toolchains are installed - and `files` entries transported - here, in
-    # step 9's post-provisioning, unless -SkipToolchains / -SkipFiles was
-    # passed. Each has an Ansible alternative that is a separate operator
+    # Toolchains are installed - `files` entries transported, and the
+    # `envVars` managed block reconciled - here, in step 9's
+    # post-provisioning, unless -SkipToolchains / -SkipFiles / -SkipEnvVars
+    # was passed. Each has an Ansible alternative that is a separate operator
     # command (hyper-v/ubuntu/Ansible/ops/provision-toolchains.sh,
-    # ops/provision-files.sh), run after this by the '(Ansible)' scenario -
+    # ops/provision-files.sh, ops/provision-env.sh), run after this by the
+    # '(Ansible)' scenario -
     # not orchestrated from here, so provision.ps1 stays a pure host-side
     # PowerShell flow with no WSL shell-out, matching how the sibling repos
     # keep their two engines apart.

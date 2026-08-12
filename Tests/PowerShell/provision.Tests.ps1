@@ -319,7 +319,7 @@ Describe 'provision.ps1 - post-provisioning wiring (Step 5)' {
     }
 }
 
-Describe 'provision.ps1 - engine selection (-SkipToolchains / -SkipFiles)' {
+Describe 'provision.ps1 - engine selection (-SkipToolchains / -SkipFiles / -SkipEnvVars)' {
 
     It 'declares a -SkipToolchains switch parameter' {
         # The engine is selected by a visible, per-invocation parameter (set by
@@ -348,6 +348,22 @@ Describe 'provision.ps1 - engine selection (-SkipToolchains / -SkipFiles)' {
             Where-Object { $_.GetCommandName() -eq 'Invoke-VmPostProvisioning' } |
             Select-Object -First 1
         $call.Extent.Text | Should -Match 'SkipFiles'
+    }
+
+    It 'declares a -SkipEnvVars switch parameter' {
+        # Peer of the two above for the third pair of engines. Without it the
+        # Ansible env flow can only ever re-reconcile a block the in-line
+        # transport already wrote, so nothing would ever observe that engine
+        # authoring one.
+        $text = Get-Content -Path $script:provisionPath -Raw
+        $text | Should -Match '\[switch\]\s*\$SkipEnvVars'
+    }
+
+    It 'threads -SkipEnvVars into Invoke-VmPostProvisioning' {
+        $call = $script:commands |
+            Where-Object { $_.GetCommandName() -eq 'Invoke-VmPostProvisioning' } |
+            Select-Object -First 1
+        $call.Extent.Text | Should -Match 'SkipEnvVars'
     }
 
     It 'does not orchestrate the Ansible flow from PowerShell' {

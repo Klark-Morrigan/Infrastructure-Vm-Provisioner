@@ -44,7 +44,16 @@ function Invoke-VmPostProvisioning {
         # files-only VM opens no session, because the separate Ansible
         # command copies the files instead.
         [Parameter()]
-        [switch] $SkipFiles
+        [switch] $SkipFiles,
+
+        # Skip the per-VM PowerShell `envVars` transport. Off by default, so
+        # the dispatch runs and an envVars-only VM still opens the transport -
+        # the legacy behaviour. When set (provision.ps1 -SkipEnvVars, used by
+        # the Ansible scenario), the envVars dispatch below is skipped and an
+        # envVars-only VM opens no session, because the separate Ansible
+        # command reconciles the managed block instead.
+        [Parameter()]
+        [switch] $SkipEnvVars
     )
 
     # Decide which steps apply before opening any transport. If nothing
@@ -66,8 +75,11 @@ function Invoke-VmPostProvisioning {
                   [bool]$Vm.PSObject.Properties['javaDevKit']
     # Gate on field presence (not entries.Count): `entries: []` is the
     # operator's explicit "remove the managed block" intent, so it must
-    # still route through to the transport.
-    $hasEnvVars = $Vm.PSObject.Properties['envVars']
+    # still route through to the transport. -SkipEnvVars folds in the same
+    # way -SkipFiles does above - one flag drives both "does this VM warrant
+    # a session" and "does the reconcile run".
+    $hasEnvVars = (-not $SkipEnvVars) -and
+                  $Vm.PSObject.Properties['envVars']
     # Router VMs MUST run post-provisioning even with no opt-in fields:
     # Assert-RouterReady (below) is the fail-fast gate for the router's
     # forwarding / service / NAT-rule / priv0 state, and the cloud-init
