@@ -9,20 +9,31 @@ on:
 jobs:
   e2e:
     uses: Klark-Morrigan/Infrastructure-E2E/.github/workflows/e2e.yml@master
-    # Exercise this repo's own two Ansible paths on every PR, since it owns
-    # both: toolchainsFlow=ansible drives provision -SkipToolchains + the
-    # standalone provision-toolchains.sh, and filesFlow=ansible drives
-    # provision -SkipFiles + provision-files.sh, the way this repo now
-    # installs toolchains and transports files. users/runners stay on their
-    # ansible defaults. Every ansible layer needs WslDistro in the E2EConfig
-    # vault. This pin does not cover the in-line PowerShell file transport -
-    # set filesFlow to 'custom-powershell' for that.
+    # Exercise this repo's own three Ansible paths on every PR, since it owns
+    # all of them: toolchainsFlow=ansible drives provision -SkipToolchains +
+    # the standalone provision-toolchains.sh, filesFlow=ansible drives
+    # provision -SkipFiles + provision-files.sh, and envVarsFlow=ansible
+    # drives provision -SkipEnvVars + provision-env.sh - the way this repo now
+    # installs toolchains, transports files and reconciles the envVars managed
+    # block. users/runners stay on their ansible defaults. Every ansible layer
+    # needs WslDistro in the E2EConfig vault.
+    #
+    # The env axis carries one thing the other two do not: phase 2 hands the
+    # block from the engine that wrote it to the other one and re-asserts, so
+    # a PR that broke either engine's marker handling fails here rather than
+    # on the first host driven by both.
+    #
+    # This pin does not cover the in-line PowerShell paths - set filesFlow or
+    # envVarsFlow to 'custom-powershell' for those (the env one then runs
+    # provision.ps1's transport in-line, with set-env-vars.ps1 as its
+    # standalone peer).
     with:
       flow-spec: >-
         {
           "usersFlow":"ansible",
           "runnersFlow":"ansible",
           "toolchainsFlow":"ansible",
-          "filesFlow":"ansible"
+          "filesFlow":"ansible",
+          "envVarsFlow":"ansible"
         }
     secrets: inherit

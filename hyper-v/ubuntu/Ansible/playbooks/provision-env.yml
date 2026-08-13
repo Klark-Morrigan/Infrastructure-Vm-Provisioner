@@ -1,0 +1,139 @@
+---
+# Operator-facing entry into the environment variable provisioning flow - the
+# operator-declared `envVars` object of each VM definition, reconciled into
+# /etc/environment on every host the bash bridge dropped into the
+# vm_provisioner_hosts inventory group. Two substrate roles: vm_env_vars does
+# the whole job (validate -> render -> reconcile -> record) and env_vars_report
+# renders what it did.
+#
+# Peer to provision-files.yml rather than a section of it, and shaped like it
+# for the same reason: the two carry the two halves of what an operator
+# declared for a VM - that one moves the payload, this one moves the variables
+# that let the VM find it - and either is worth running without paying for the
+# other. Keeping them apart is also what lets the PowerShell env engine
+# (Infrastructure.HyperV's Set-VmEnvironmentVariables, invoked in-line by
+# provision.ps1) stay live alongside this one: the engine that runs is the
+# command the operator invoked, not a flag inside a shared play.
+#
+# Posture (hosts is the bridge's group, any_errors_fatal) mirrors
+# provision-files.yml. gather_facts is off for the same reason it is off there,
+# and the reasoning holds independently: neither role reads a gathered fact -
+# the reconcile is ansible.builtin.blockinfile against an absolute path from
+# the role's own vars, and the report renders an accumulator the role filled.
+#
+# Nothing here needs the Windows-side file server the toolchain flow declares:
+# the whole payload is a handful of NAME="value" lines carried in the
+# extra-vars the bridge already builds.
+
+- name: Provision operator-declared environment variables onto provisioned VMs
+  hosts: vm_provisioner_hosts
+  gather_facts: false
+  any_errors_fatal: false
+  vars:
+    # This host's own config entry, selected out of the whole-config array by
+    # matching vmName to the inventory_hostname the bridge keyed the host by -
+    # the same selection provision-toolchains.yml makes for its taxonomy block.
+    # A host the bridge put in the group without a config entry yields {}.
+    _host_config: >-
+      {{ (vm_provisioner_config | default([]))
+         | selectattr('vmName', 'equalto', inventory_hostname)
+         | first | default({}) }}
+    # Its raw `envVars` object. Read off the entry rather than via
+    # map(attribute=) so a VM lacking the key defaults cleanly instead of
+    # raising on the missing attribute - the idiom the toolchain play uses for
+    # the same reason.
+    #
+    # Note this reads the config the bridge surfaces DIRECTLY, where
+    # provision-files.yml reads a wrapper-resolved dict instead. That is not an
+    # oversight on either side; ops/provision-env.sh's header carries the why.
+    _host_env_vars: "{{ _host_config.envVars | default({}) }}"
+    # The two role inputs, unwrapped. vm_env_vars takes them as separate vars
+    # (it never sees the wrapper), which is what keeps its input contract
+    # identical in shape to vm_files'.
+    #
+    # Both defaults matter and they are not the same default: an absent
+    # `envVars` gives an empty block name AND an empty entry list, which is the
+    # role's no-op. A declared block name with an empty `entries` array is the
+    # retraction intent - remove the managed block - so the two cannot be
+    # collapsed into one "nothing declared" test.
+    vm_env_vars_block_name: "{{ _host_env_vars.blockName | default('') }}"
+    vm_env_vars_entries: "{{ _host_env_vars.entries | default([]) }}"
+    # Diagnostic inputs for the assert below, hoisted out of its fail_msg
+    # because `assert` renders fail_msg on EVERY run, passing or not: calling
+    # .keys() inline would abort a perfectly good run on the very shape the
+    # assert exists to reject (an `envVars` that is a string or a list). The
+    # `is mapping` guard is therefore load-bearing, not defensive.
+    _env_vars_declared_sub_fields: >-
+      {{ (_host_env_vars.keys() | list | sort)
+         if _host_env_vars is mapping else [] }}
+    _env_vars_unknown_sub_fields: >-
+      {{ _env_vars_declared_sub_fields | difference(['blockName', 'entries']) }}
+  tasks:
+    # The one rule this play has to own. Assert-VmEnvVarsField validates the
+    # `envVars` object WHOLE, and part of what it validates is the object's own
+    # shape: a JSON object, sub-fields exactly `blockName` and `entries`, both
+    # required. vm_env_vars takes those two as separate vars and never sees the
+    # wrapper, so those three rules have no home in the role - and giving them
+    # one would mean the role taking the object instead of the two vars, which
+    # would fork its input contract away from vm_files.
+    #
+    # The selection above is where the wrapper is last visible, so the check
+    # goes here, immediately after it. Without it a typo is silent in the worst
+    # possible way: `entrys` for `entries` selects nothing, hands the role an
+    # empty entry list beside a valid block name, and produces a run that
+    # reports success while RETRACTING the very block it was asked to write.
+    #
+    # `when` is what keeps a host that declares no envVars at all legal - that
+    # is the ordinary case, and the role is a no-op on it.
+    #
+    # Tagged `always` because a targeted run (--tags vm_env_vars) is exactly
+    # when an operator is iterating on this config, and skipping the rule there
+    # would hide the typo at the moment it is most likely to exist.
+    - name: Assert this host's envVars object declares only known sub-fields
+      ansible.builtin.assert:
+        that:
+          - _host_env_vars is mapping
+          - _env_vars_unknown_sub_fields | length == 0
+          - "'blockName' in _host_env_vars"
+          - "'entries' in _host_env_vars"
+        # Declared plus unknown is enough to place any of the three faults:
+        # the allowed set is stated in the same sentence, so a missing
+        # sub-field is what the reader does not see listed. A third
+        # `missing:` field would restate that and make the line longer.
+        fail_msg: >-
+          envVars declared for host '{{ inventory_hostname }}' must be a JSON
+          object with sub-fields exactly 'blockName' and 'entries'. Declared:
+          {{ _env_vars_declared_sub_fields | join(', ')
+             | default('(not an object)', true) }}; unknown:
+          {{ _env_vars_unknown_sub_fields | join(', ')
+             | default('(none)', true) }}.
+      when: _host_env_vars | length > 0
+      tags:
+        - vm_env_vars
+        - always
+
+    # Validation of the block name and of every entry, the reconcile itself and
+    # the report accumulation are all this role's, deliberately: an operator
+    # typo has to be rejected by the component that owns the `envVars` schema,
+    # before /etc/environment is touched, rather than by a pre-pass here that
+    # would fork those rules.
+    - name: Reconcile the declared environment variables on the VM
+      ansible.builtin.import_role:
+        name: vm_env_vars
+      tags: vm_env_vars
+
+    # Terminal, and the reason the flow is worth watching: a variable is
+    # invisible in a way a transported file is not. A file can be confirmed
+    # with `ls`; a variable is observable only from inside a process that
+    # inherited it. This renders one block per host listing every variable
+    # config asked for, which managed block it came from, and whether THIS run
+    # wrote it.
+    #
+    # Tagged `always` so a targeted run (--limit, --tags vm_env_vars) still
+    # ends with a report, scoped to whatever actually ran.
+    - name: Report the environment variables declared for each host
+      ansible.builtin.import_role:
+        name: env_vars_report
+      tags:
+        - env_vars_report
+        - always

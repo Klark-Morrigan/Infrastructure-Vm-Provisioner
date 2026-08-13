@@ -35,33 +35,14 @@
 
 set -euo pipefail
 
-# SECRET_SUFFIX selects the lifecycle whose secrets this run reads (e.g.
-# Production). Required both by the staging step (which vault to read) and by
-# the bridge; validate it here so the failure is one clear message rather than
-# an opaque empty-suffix error deeper in.
-if [[ -z "${SECRET_SUFFIX:-}" ]]; then
-    echo "SECRET_SUFFIX must be set (e.g. Production or the caller's lifecycle label)" >&2
-    exit 2
-fi
-
+# SECRET_SUFFIX validation, CA_CONSUMER_ROOT, the four sourced helpers, the
+# timing emitter and the shared CA_* contract - see _flow-preamble.sh. This
+# flow needs the suffix for the staging step below too, not only for the
+# bridge, so the preamble's check is load-bearing here before either.
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# This repo's Ansible-slice root (ops/ -> Ansible/): the consumer root the
-# bridge resolves the playbook and the Toolchains fragment from.
-CA_CONSUMER_ROOT="$(cd "${script_dir}/.." && pwd)"
-
-# shellcheck source=hyper-v/ubuntu/Ansible/ops/imports/_log.sh
-source "${script_dir}/imports/_log.sh"
-# shellcheck source=hyper-v/ubuntu/Ansible/ops/imports/_common-ansible-root.sh
-source "${script_dir}/imports/_common-ansible-root.sh"
-# shellcheck source=hyper-v/ubuntu/Ansible/ops/imports/_timing.sh
-source "${script_dir}/imports/_timing.sh"
-# shellcheck source=hyper-v/ubuntu/Ansible/ops/_dispatch-playbook.sh
-source "${script_dir}/_dispatch-playbook.sh"
-
-# Arm the timing emitter (a no-op unless TIMING_TREE_OUTPUT_PATH is set) so the
-# E2E orchestrator can graft this flow's staging / dispatch sub-steps under its
-# provisioning part. Neutral opt-in; the flow does not name its consumer.
-timing_init "provision-toolchains"
+flow_name="provision-toolchains"
+# shellcheck source=hyper-v/ubuntu/Ansible/ops/_flow-preamble.sh
+source "${script_dir}/_flow-preamble.sh"
 
 # Pre-stage the toolchain artifacts Windows-side and learn the directory the
 # file server will serve, its version tag, and the concrete pinned-versions
@@ -80,14 +61,15 @@ if [[ -z "${staging_dir}" || -z "${staging_version}" || -z "${resolved_wsl}" ]];
     exit 1
 fi
 
-export CA_INVENTORY_VAULT=VmProvisioner
-# The roles fetch their artifacts from a Windows-side HttpListener the bridge
-# spins up over the staged directory; its URL reaches the roles via the bridge's
-# always-on inventory fragment (no extra vault needed).
+# What this flow declares BEYOND the shared contract the preamble exported: the
+# roles fetch their artifacts from a Windows-side HttpListener the bridge spins
+# up over the staged directory, whose URL reaches the roles via the bridge's
+# always-on inventory fragment (no extra vault needed). Set here rather than in
+# the preamble because the values are staging's output, and because no other
+# flow in this repo serves a payload at all.
 export CA_NEEDS_HOST_FILE_SERVER=1
 export CA_HOST_FILE_SERVER_DIR="${staging_dir}"
 export CA_HOST_FILE_SERVER_VERSION="${staging_version}"
-export CA_CONSUMER_ROOT
 
 # The per-host concrete pins ride as a single play-wide --extra-vars dict
 # (toolchains_resolved_by_host); the playbook selects each host's entry so the

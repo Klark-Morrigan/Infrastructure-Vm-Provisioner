@@ -26,6 +26,7 @@
 - [Get-VmRuntimeDiag.ps1](#get-vmruntimediagps1)
 - [start-vms.ps1](#start-vmsps1)
 - [ensure-vms-ready.ps1](#ensure-vms-readyps1)
+- [set-env-vars.ps1](#set-env-varsps1)
 - [deprovision.ps1](#deprovisionps1)
 - [Toolchain provisioning via Ansible (Common-Ansible)](#toolchain-provisioning-via-ansible-common-ansible)
   - [Toolchain engine (selecting the live path)](#toolchain-engine-selecting-the-live-path)
@@ -41,6 +42,10 @@
   - [Controller-side path translation](#controller-side-path-translation)
   - [The playbook](#the-playbook)
   - [Reading the files report](#reading-the-files-report)
+- [Environment variable provisioning via Ansible (Common-Ansible)](#environment-variable-provisioning-via-ansible-common-ansible)
+  - [Which engine runs](#which-engine-runs)
+  - [The playbook and its one owned rule](#the-playbook-and-its-one-owned-rule)
+  - [Reading the environment variables report](#reading-the-environment-variables-report)
 - [CI](#ci)
 - [Repo structure](#repo-structure)
 
@@ -86,7 +91,10 @@ PSGallery automatically on first run.
 # 4. Bring the fleet back to ready after a host reboot (run as Administrator)
 .\hyper-v\ubuntu\PowerShell\ensure-vms-ready.ps1 -SecretSuffix Production
 
-# 5. Remove VMs when no longer needed (run as Administrator)
+# 5. Re-apply the declared envVars block without a full provision (as Administrator)
+.\hyper-v\ubuntu\PowerShell\set-env-vars.ps1 -SecretSuffix Production
+
+# 6. Remove VMs when no longer needed (run as Administrator)
 .\hyper-v\ubuntu\PowerShell\deprovision.ps1 -SecretSuffix Production
 ```
 
@@ -677,8 +685,15 @@ and target-collision pre-flight errors raised before any SSH I/O).
 Add an `envVars` object to any VM entry to write a sentinel-delimited
 managed block of `NAME="VALUE"` lines into `/etc/environment`. Unlike
 `/etc/profile.d/*.sh` snippets (sourced only by login shells), this file
-is read by `pam_env` for every login — including the non-login shells
-spawned by systemd-managed services.
+is read by `pam_env` for **every** login session, interactive or not.
+
+It is **not** read by systemd system services. `pam_env` is a PAM module,
+and a systemd unit starts outside PAM entirely, so a declaration here
+reaches an SSH session and misses the daemon running beside it - the two
+disagree, and only one of them is what CI runs under. A service that
+needs these variables has to be given them explicitly, by an
+`EnvironmentFile=-/etc/environment` drop-in owned by whatever provisions
+that unit.
 
 ```jsonc
 {
@@ -715,6 +730,13 @@ The transport is delegated to `Infrastructure.HyperV`'s
 [`Set-VmEnvironmentVariables`](https://github.com/Klark-Morrigan/Infrastructure-HyperV/blob/master/Infrastructure.HyperV/Public/EnvVars/Set-VmEnvironmentVariables.ps1) —
 see its notes for the exact managed-block, atomic-write, and
 skip-unchanged semantics.
+
+An Ansible engine writes the same block from the same config, and it is
+the one to reach for when re-applying an edit without a full
+`provision.ps1` run:
+[Environment variable provisioning via Ansible](#environment-variable-provisioning-via-ansible-common-ansible).
+The two are byte-compatible on the same host, and - unlike `files` and
+toolchains - there is no skip switch selecting between them.
 
 ### Router VM (kind: router)
 
@@ -846,8 +868,9 @@ Run as Administrator after `setup-secrets.ps1` has stored the config.
 | `-SecretSuffix` | **Required.** Names the lifecycle to read - the vault key is `VmProvisionerConfig-<Suffix>`. Operators pass `Production`; ephemeral environments (parallel workflows, E2E) pass their own label. Mandatory so a caller cannot fall through to a default and collide with another lifecycle's data. |
 | `-SkipToolchains` | Suppresses the in-line toolchain reconciler: this run installs nothing. See [Toolchain engine](#toolchain-engine-selecting-the-live-path). |
 | `-SkipFiles` | Suppresses the in-line `files` transport: this run copies nothing. See [File transport](#file-transport-the-two-chains). |
+| `-SkipEnvVars` | Suppresses the in-line `envVars` transport: this run writes no managed block, and retracts none either. See [Which engine runs](#which-engine-runs). |
 
-Both switches are pure suppression - neither hands off to the Ansible
+All three switches are pure suppression - none hands off to the Ansible
 counterpart, which is a second command you run yourself. A VM whose only
 opt-in field is suppressed opens no SSH session and no file server at all.
 Neither relaxes validation: a `files` entry naming a `source` that does not
@@ -1020,7 +1043,8 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
     step. Adding a new step (e.g. Maven) is a one-function addition with
     one dispatch line in `Invoke-VmPostProvisioning`. Skipped silently
     for VMs that have no opt-in fields - or whose only opt-in fields are
-    the ones `-SkipFiles` / `-SkipToolchains` suppressed, since the skip
+    the ones `-SkipFiles` / `-SkipToolchains` / `-SkipEnvVars` suppressed,
+    since the skip
     is decided before any transport is paid for. Idempotent on the VM side: the
     JDK install no-ops when its `release` file is already present, file
     copies overwrite with the current host source bytes, and the
@@ -1379,6 +1403,41 @@ lighter path for an operator about to RDP. Reach for `ensure-vms-ready.ps1`
 when you (or automation) need the fleet actually reachable over SSH.
 
 ---
+
+## set-env-vars.ps1
+
+Run as Administrator to reconcile the operator-declared `envVars` managed
+block onto an already-provisioned fleet, without a full provision.
+
+```powershell
+.\hyper-v\ubuntu\PowerShell\set-env-vars.ps1 -SecretSuffix Production
+
+# One VM only - the counterpart of provision-env.sh's --limit
+.\hyper-v\ubuntu\PowerShell\set-env-vars.ps1 -SecretSuffix Production -VmName ubuntu-02-ci
+```
+
+This is the PowerShell env engine as a standalone command, the peer of
+[`ops/provision-env.sh`](#environment-variable-provisioning-via-ansible-common-ansible).
+Until it existed the PowerShell engine could only be reached as a step inside
+`provision.ps1`, so re-applying one edited block meant paying for a whole
+provision run to reach it. It calls the same `Set-EnvironmentVariables` step
+`provision.ps1` dispatches, so the two paths cannot drift.
+
+**What it deliberately does not do** - no host-network phase (the fleet is
+already up, and toggling ICS to write a text file would risk the very
+connectivity the write needs), no cloud-init wait, no file server. It does keep
+the router jump: a workload sits on a private switch the host has no route
+into, so its session is tunnelled through its environment's router exactly as
+post-provisioning tunnels its own.
+
+**Selection** is by field presence, so a VM declaring `entries: []` is still
+visited - that is the "remove the managed block" intent, not an absence. A
+`-VmName` that matches nothing is an error rather than a silent no-op.
+
+Idempotent: the transport skips the SSH write when the desired block already
+matches the file, so a converged fleet reports every VM unchanged. One
+unreachable VM does not strand the rest; the run exits 1 with the failures
+named.
 
 ## deprovision.ps1
 
@@ -1741,10 +1800,11 @@ invokes Ansible, so there is nothing for a flag to select between.
 **not** hand off to Ansible, and nothing checks that you went on to run
 `provision-files.sh` - stopping after the first command leaves the files
 uncopied. The same is true of `-SkipToolchains`
-([Toolchain engine](#toolchain-engine-selecting-the-live-path)); the switches
-are independent, so all four combinations are valid, and
-`provision -SkipToolchains -SkipFiles` is the first half of the all-Ansible
-chain.
+([Toolchain engine](#toolchain-engine-selecting-the-live-path)) and
+`-SkipEnvVars` ([Which engine runs](#which-engine-runs)); the switches are
+independent, so every combination is valid, and
+`provision -SkipToolchains -SkipFiles -SkipEnvVars` is the first half of the
+all-Ansible chain.
 
 A VM whose only opt-in fields are covered by the switches passed opens no SSH
 session and no file server at all - the skip is decided before any transport is
@@ -1902,6 +1962,132 @@ for the next run of this flow, not for this report.
 
 ---
 
+## Environment variable provisioning via Ansible (Common-Ansible)
+
+A third Ansible flow, peer to the file one, carrying the operator-declared
+[`envVars`](#optional-set-system-wide-environment-variables) object of each VM
+definition into `/etc/environment` on the provisioned VMs through the
+substrate's `vm_env_vars` and `env_vars_report` roles. Same substrate, same
+[sibling checkout](#consuming-common-ansible), same `VmProvisionerConfig`
+desired-state - only the payload differs. The two flows are the two halves of
+what an operator declared for a VM: one moves the payload, this one moves the
+variables that let the VM find it.
+
+`ops/provision-env.sh` is the operator entry point, and it is the shortest
+wrapper in the repo - contract plus dispatch, nothing else:
+
+```bash
+# From hyper-v/ubuntu/Ansible/ops/, with SECRET_SUFFIX naming the lifecycle:
+SECRET_SUFFIX=Production ./provision-env.sh
+# Forwarded args reach ansible-playbook unchanged, e.g.:
+SECRET_SUFFIX=Production ./provision-env.sh --limit ubuntu-02-ci --check
+```
+
+Operationally what that buys you is a flow with nothing to go wrong before the
+dispatch: no vault read of its own, no reshape step, no temp document. It is
+cheap to re-run after editing one entry, and there is no half-finished state it
+can leave behind if you interrupt it. The reason it gets away with that - and
+the reason the file flow cannot - is in the wrapper's own header
+(`ops/provision-env.sh`), next to the code it explains.
+
+Prerequisites are the toolchain flow's, minus the file server:
+[see above](#running-the-flow). Like the file flow it declares no
+`CA_NEEDS_HOST_FILE_SERVER` - there is no payload to serve at all.
+
+### Which engine runs
+
+Environment variables are selected the same way files and toolchains are, by a
+visible per-invocation switch: `provision.ps1 -SkipEnvVars` stands the in-line
+transport down, and the separate `provision-env.sh` command reconciles the
+managed block instead. A bare `provision` keeps writing it during
+post-provisioning exactly as before, so the switch changes nothing for an
+operator who does not pass it.
+
+The switch also hands over the **retraction** intent, not just the write: an
+`entries: []` declaration means "remove the managed block", and executing that
+in-line would retract a block the Ansible run is about to be asked to write.
+
+Because the two engines write the same block rather than different artefacts,
+they are usable as alternatives *and* in sequence:
+
+| Engine | When it runs | What it is for |
+| --- | --- | --- |
+| PowerShell (`Set-VmEnvironmentVariables`) | in-line during any `provision` of a VM declaring `envVars` unless `-SkipEnvVars`, or on demand via [`set-env-vars.ps1`](#set-env-varsps1) | getting the block onto a VM as it is built, and re-applying it without a full provision |
+| Ansible (`provision-env.sh`) | whenever you run it | re-applying after a config edit, without a full `provision`; the whole job under `-SkipEnvVars` |
+
+Running both is safe, and by design: the two write **byte-identical** managed
+blocks (`# BEGIN <blockName>` / `# END <blockName>` sentinels, `NAME="value"`
+lines with `\` and `"` escaped), so each finds and replaces the other's block
+rather than appending a second one. The only visible difference is position -
+the PowerShell transport re-appends the block at end of file, `blockinfile`
+replaces it where it stands - so a host handed back and forth just sees its
+block migrate to the end once.
+
+### The playbook and its one owned rule
+
+`playbooks/provision-env.yml` composes the two substrate roles against the
+bridge's `vm_provisioner_hosts` group: `vm_env_vars` validates, renders and
+reconciles; `env_vars_report` renders what it did. Each host's desired-state is
+its own config entry's `envVars` object, selected by `inventory_hostname`
+exactly as `provision-toolchains.yml` selects its taxonomy block. The report is
+tagged `always`, so a `--limit` or `--tags vm_env_vars` run still ends with one,
+scoped to whatever ran. Facts are not gathered - neither role reads one.
+
+The play carries exactly one rule of its own, and it is worth knowing why it is
+not in the role. `Assert-VmEnvVarsField` validates the `envVars` object *whole*,
+and part of what it validates is the object's own shape: a JSON object, with
+sub-fields exactly `blockName` and `entries`, both required. `vm_env_vars` takes
+those two as **separate vars** and never sees the wrapper, so those three rules
+have no home in the role - giving them one would mean the role taking the object
+instead of the two vars, forking its input contract away from `vm_files`. The
+selection in the play is where the wrapper is last visible, so the check sits
+immediately after it.
+
+What it buys is a loud failure instead of a silent wrong one. `entrys` for
+`entries` would otherwise select nothing, hand the role an empty entry list
+beside a perfectly valid block name, and produce a run that reports success
+while **retracting** the very block it was asked to write - an empty `entries`
+array being the operator's explicit "remove this block" intent. The assert names
+the host and the offending sub-fields; it is tagged `always` because a targeted
+`--tags vm_env_vars` run is exactly when someone is iterating on this config.
+
+A host that declares no `envVars` at all skips the rule and no-ops the role -
+that is the ordinary case.
+
+### Reading the environment variables report
+
+The play ends with one report block per host, from the substrate's
+`env_vars_report` role. It answers what the PLAY output cannot, and what `ls`
+cannot either: a variable is observable only from inside a process that
+inherited it.
+
+```text
+Environment variables report for ubuntu-02-ci -- 2 written, 1 unchanged
+  block app-runtime -- 1 declared in /etc/environment
+    unchanged APP_HOME='/opt/app'
+  block ci-jars -- 2 declared in /etc/environment
+    written   STARSECTOR_HOME='/opt/ci-jars/starsector'
+    written   CI_JARS_OPTS='a "quoted" \ backslash'
+```
+
+Rows are grouped by managed block because that is the unit an operator acts on:
+a host may carry several consumers' blocks in one file, and the block name is
+what says which declaration to go and edit. Values are printed as **declared**,
+in single quotes the file's own `NAME="value"` lines never use - so the escaping
+is never mistaken for part of the value, and surrounding whitespace stays
+visible.
+
+`written` means this run put the block in place; `unchanged` means the host was
+already carrying it. Status is a property of the **block**, not of the variable:
+the block is reconciled as a unit in one atomic move, so every row of a group
+carries the same value. There is no per-variable change detection to be had, and
+the report does not pretend otherwise.
+
+Full field-by-field documentation lives in the
+[role README](https://github.com/Klark-Morrigan/Common-Ansible/blob/master/roles/env_vars_report/README.md).
+
+---
+
 ## CI
 
 CI runs on pull requests targeting `master` via `.github/workflows/ci.yml`,
@@ -1962,6 +2148,13 @@ shared Common-Ansible controller venv and puts the substrate roles on
 `ANSIBLE_ROLES_PATH` (so `jdk` / `dotnet_sdk` / `dotnet_tools` resolve) - so a
 sibling checkout at `..\Common-Ansible` with a bootstrapped `.venv` is
 required for that step (it auto-skips with a `::notice::` if absent).
+
+The bats suites under `Tests/Ansible/playbooks/` need that same shared venv,
+because they run the real playbooks through `ansible-playbook` against a
+fixture fleet (local connection, substrate roles stubbed) to exercise the rules
+the plays own rather than delegate. They **skip** when the sibling checkout is
+absent, which is what CI sees - so those cases are a local pre-push gate, not a
+merge gate. Run them before pushing a playbook change.
 `.gitattributes` pins `*.sh` to LF and `*.bat` to CRLF - Linux CI runners
 reject CRLF shebangs.
 
@@ -1985,6 +2178,7 @@ Infrastructure-VM-Provisioner/
 |     |- PowerShell/        # Slice: host-driven PowerShell reconciler (provision/deprovision)
 |     |  |- provision.ps1       # Entry point - orchestrates all provisioning steps
 |     |  |- start-vms.ps1       # Entry point - brings provisioned VMs back to Running
+|     |  |- set-env-vars.ps1    # Entry point - the PowerShell env engine standalone; reconciles the declared envVars block without a full provision (peer of ops/provision-env.sh)
 |     |  |- deprovision.ps1     # Entry point - reverses provision.ps1
 |     |  |- common/
 |     |  |  |- config/
@@ -2064,9 +2258,9 @@ Infrastructure-VM-Provisioner/
 |     |     |  `- teardown-network.ps1         # Per-env teardown: delegates legacy NetNat + host IP cleanup to Remove-LegacySingletonNat, then removes the Private switch when empty
 |     |     `- vm/
 |     |        `- remove-vm.ps1               # Stops, removes VM, deletes VHDX and config dir
-|     `- Ansible/           # Slice: on-VM toolchain + file push (Common-Ansible bridge)
-|        |- ops/            # Stage-ToolchainArtifacts.ps1 (reuses PowerShell/up resolvers), provision-toolchains.sh, provision-files.sh, imports/
-|        |- playbooks/      # provision-toolchains.yml, provision-files.yml
+|     `- Ansible/           # Slice: on-VM toolchain + file + env var push (Common-Ansible bridge)
+|        |- ops/            # Stage-ToolchainArtifacts.ps1 (reuses PowerShell/up resolvers), provision-toolchains.sh, provision-files.sh, provision-env.sh, imports/
+|        |- playbooks/      # provision-toolchains.yml, provision-files.yml, provision-env.yml
 |        `- requirements.yml
 |- Tests/
 |  |- shared/               # Unit tests for shared/ (setup-secrets)
@@ -2074,7 +2268,9 @@ Infrastructure-VM-Provisioner/
 |  |  |- common/            # Unit tests for common/ helpers (config, diag, network, power, ssh, ui)
 |  |  |- up/                # Unit tests for up/ (config, disk, jdk, dotnet, powershell, seed, network, post, reconciler, vm)
 |  |  `- down/              # Unit tests for down/ (network, vm)
-|  `- Ansible/              # Mirrors the Ansible slice (Stage-ToolchainArtifacts, ops/ bash helpers)
+|  `- Ansible/              # Mirrors the Ansible slice
+|     |- ops/               # Stage-ToolchainArtifacts, ops/ bash helpers
+|     `- playbooks/         # The playbooks' own rules, run against a fixture fleet with the substrate roles stubbed
 |- scripts/
 |  |- Run-Tests.ps1                       # Unit-test runner (delegates to Common-PowerShell)
 |  |- Run-IntegrationTests.ps1            # Docker-host integration runner (delegates to Common-PowerShell)
