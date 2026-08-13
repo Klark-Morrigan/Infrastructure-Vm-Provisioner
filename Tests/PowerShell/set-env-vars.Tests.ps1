@@ -29,6 +29,14 @@
     the early-exit control flow the "nothing declares envVars" branch needs.
 #>
 
+# PSAvoidGlobalVars is suppressed file-wide: the disposal counter and the
+# Write-Host transcript are read and written while `& $shimPath` is on the
+# call stack, where $script: resolves to the shimmed script's scope rather
+# than this file's. Global scope is the only tracker both sides can see.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidGlobalVars', '',
+    Justification = 'Pester v5 cross-scope mock-call trackers')]
+param()
+
 BeforeAll {
     $script:realPath = Join-Path $PSScriptRoot '..\..\hyper-v\ubuntu\PowerShell\set-env-vars.ps1'
 
@@ -195,9 +203,7 @@ Describe 'set-env-vars.ps1' {
             # declares envVars" would describe the fleet rather than the
             # request, and hide the config typo the operator came to find.
             Mock Read-VmProvisionerConfig { @( (New-TestVm -Name 'plain') ) }
-            # $global:, not $script: - the mock body runs while `& $shimPath` is
-            # on the call stack, where $script: resolves to the shimmed script's
-            # scope rather than this file's.
+            # $global:, not $script: - see the file header for why.
             $global:_SetEnvVars_Said = [System.Collections.Generic.List[string]]::new()
             Mock Write-Host { $global:_SetEnvVars_Said.Add([string]$Object) }
 
