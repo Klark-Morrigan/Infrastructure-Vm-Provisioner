@@ -1640,7 +1640,9 @@ self-hosted runner needs:
   "vmDownloaded": {
     "apt": [
       { "name": "shellcheck", "version": "0.9.0-1"  },
-      { "name": "bats",       "version": "1.10.0-1" }
+      { "name": "bats",       "version": "1.10.0-1" },
+      { "name": "zip"   },
+      { "name": "unzip" }
     ],
     "batsLibs": [
       { "name": "bats-support", "version": "0.3.0" },
