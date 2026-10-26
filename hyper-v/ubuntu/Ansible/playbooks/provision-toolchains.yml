@@ -142,8 +142,8 @@
         name: powershell
       tags: powershell
 
-    # Section 2, mechanism apt: packages the VM pulls itself (shellcheck, the
-    # bats binary). Always included - it is a no-op with an empty
+    # Section 2, mechanism apt: packages the VM pulls itself (the bats binary,
+    # zip). Always included - it is a no-op with an empty
     # toolchain_apt_packages, so config alone decides whether anything installs.
     - name: Reconcile the vm-downloaded (apt) toolchain
       ansible.builtin.import_role:

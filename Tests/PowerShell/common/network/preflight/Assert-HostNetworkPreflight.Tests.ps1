@@ -26,7 +26,11 @@ BeforeAll {
     $preflight = "$net\preflight"
     $checks    = "$preflight\checks"
     . "$net\Get-VmAdapterIPv4.ps1"
-    . "$checks\Test-IsCurrentSessionElevated.ps1"
+    # The real check functions, not stubs: each one's own verdicts are tested
+    # in checks\, and what is under test HERE is that the orchestrator feeds
+    # them the right host snapshot and consolidates what they return - which a
+    # stub would fake away.
+    Get-ChildItem $checks -Filter '*.ps1' | ForEach-Object { . $_.FullName }
     . "$preflight\Assert-PreflightFindings.ps1"
     . "$preflight\Assert-HostNetworkPreflight.ps1"
 

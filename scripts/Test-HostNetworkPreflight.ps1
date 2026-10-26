@@ -86,13 +86,21 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $net       = Join-Path $repoRoot 'hyper-v\ubuntu\PowerShell\common\network'
 $preflight = Join-Path $net      'preflight'
 $checks    = Join-Path $preflight 'checks'
+
 # Reset-IcsSharing, the Ics/Profile/DNS check functions, and
 # Get-WirelessNetAdapter ship in Infrastructure.Network.Windows. The
 # orchestrator + its elevation/findings helpers stay local to the
-# provisioner. Floor 1.3.0: Get-WirelessNetAdapter (used by the WAN
-# auto-detect below and the orchestrator's MAC checks) lands in 1.3.0.
-Import-Module Infrastructure.Network.Windows -MinimumVersion 1.3.0 -ErrorAction Stop
-. (Join-Path $checks    'Test-IsCurrentSessionElevated.ps1')
+# provisioner. Floor 1.5.0: this wrapper exists to hand an operator the
+# next action, and below 1.5.0 the ICS-proxy verdict describes its fix in
+# prose instead of shipping the commands that carry it out. Subsumes the
+# 1.3.0 floor (Get-WirelessNetAdapter, used by the WAN auto-detect below
+# and the orchestrator's MAC checks) and matches the agent-side floor in
+# Install-ModuleDependencies.ps1.
+Import-Module Infrastructure.Network.Windows -MinimumVersion 1.5.0 -ErrorAction Stop
+
+# Whole checks\ folder, matching provision.ps1: one function per file, all of
+# them called by the orchestrator, so neither loader carries a list to update.
+Get-ChildItem $checks -Filter '*.ps1' | ForEach-Object { . $_.FullName }
 . (Join-Path $preflight 'Assert-PreflightFindings.ps1')
 # Get-VmAdapterIPv4 backs the orchestrator's IP-collision check (check 5).
 # provision.ps1 dot-sources it before Assert-HostNetworkPreflight; this
@@ -112,10 +120,13 @@ Import-Module Infrastructure.Network.Windows -MinimumVersion 1.3.0 -ErrorAction 
 # bare "interface not found - run Get-NetAdapter to confirm the name".
 # Only needed under -AutoRepair: the read-only path never toggles ICS.
 if ($AutoRepair -and -not $WanAdapterName) {
+
     $wifiAdapter = Get-WirelessNetAdapter |
         Where-Object { $_.Status -eq 'Up' } |
         Select-Object -First 1
+
     if ($wifiAdapter) {
+
         $WanAdapterName = $wifiAdapter.Name
         Write-Host ("WAN adapter auto-detected for ICS repair: '$WanAdapterName' " +
             "($($wifiAdapter.InterfaceDescription)).") -ForegroundColor Cyan
@@ -150,6 +161,7 @@ try {
     # delete+re-add, so running it when no toggle fired is harmless.
     # Skipped when no router address is configured.
     if ($AutoRepair -and $RouterAddress) {
+
         Write-Host ""
         Write-Host ("Refreshing controller -> router SSH relay (-> ${RouterAddress}:22) " +
             "after host-network repair ...") -ForegroundColor Cyan
@@ -159,6 +171,7 @@ try {
     Write-Host ""
     Write-Host "Summary: host network preflight OK." -ForegroundColor Green
     exit 0
+
 } catch {
     Write-Host ""
     Write-Host $_.Exception.Message -ForegroundColor Red

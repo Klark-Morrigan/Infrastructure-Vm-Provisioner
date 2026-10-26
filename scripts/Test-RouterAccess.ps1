@@ -68,21 +68,23 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Floor 1.4.0: Test-RouterSshRelay lands in 1.4.0 alongside the Set/Remove
-# pair it verifies.
+# Floor 1.5.0: Test-RouterSshRelay lands in 1.4.0 alongside the Set/Remove
+# pair it verifies, but only from 1.5.0 does a refused connect - the exact
+# case this script exists to diagnose - report the re-lay instruction rather
+# than a generic .NET error. The whole output of this script is that verdict.
 #
 # Caught rather than thrown so an absent or too-old module exits 2 (cannot
 # check) instead of the 1 a bare throw would produce, which would report a
 # missing dependency as a broken relay - and send an operator to repair
 # host networking that was never at fault.
 try {
-    Import-Module Infrastructure.Network.Windows -MinimumVersion 1.4.0 -ErrorAction Stop
+    Import-Module Infrastructure.Network.Windows -MinimumVersion 1.5.0 -ErrorAction Stop
 }
 catch {
     Write-Host ""
     Write-Host "Cannot check the router SSH relay: Infrastructure.Network.Windows" `
         -ForegroundColor Yellow
-    Write-Host "1.4.0 or later is not available. $($_.Exception.Message)" `
+    Write-Host "1.5.0 or later is not available. $($_.Exception.Message)" `
         -ForegroundColor Yellow
     Write-Host "This says nothing about the relay itself - install the module" `
         -ForegroundColor Yellow

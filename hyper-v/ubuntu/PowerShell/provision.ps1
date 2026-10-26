@@ -89,7 +89,11 @@ $ErrorActionPreference = 'Stop'
 # imports it at agent startup; this file only consumes the exported
 # functions. Test-WslRouterReachability transitively depends on
 # Infrastructure.Wsl (auto-imported via RequiredModules).
-. "$PSScriptRoot\common\network\preflight\checks\Test-IsCurrentSessionElevated.ps1"
+# Whole checks\ folder: the preflight's checks are one function per file and
+# the orchestrator calls all of them, so a glob keeps this list from going
+# stale every time a check is added or split.
+Get-ChildItem "$PSScriptRoot\common\network\preflight\checks" -Filter '*.ps1' |
+    ForEach-Object { . $_.FullName }
 . "$PSScriptRoot\common\network\preflight\Assert-PreflightFindings.ps1"
 . "$PSScriptRoot\common\network\preflight\Assert-HostNetworkPreflight.ps1"
 . "$PSScriptRoot\common\network\Assert-WorkloadReachableViaRouter.ps1"

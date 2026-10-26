@@ -1175,7 +1175,7 @@ provisioning run.
 | 4 | Connected route to host vNIC subnet via that vNIC | Route missing -> host routes VM-subnet traffic out the Wi-Fi default gateway by mistake (the "duplicate-IP / SourceAddress=WiFi" symptom). |
 | 5 | No IP collision between host vNIC and any VM on the switch | The Wi-Fi External-bridge MAC-sharing smoking gun -> host steals VM traffic via local routing. |
 | 6 | vEthernet network profile = Private (Internal switches only) | `Public` blocks ICS's auto-generated DNS-In firewall rule so VM DNS queries silently drop. Auto-repaired when `-AutoRepair` is set (only toggles when current is Public; never redundantly). |
-| 7 | ICS DNS proxy answers at `$DnsProbeTarget` | The proxy's known broken state: it answers UDP/53 queries with TCP RSTs. Auto-repaired via `Reset-IcsSharing` (the programmatic equivalent of toggling the WiFi Sharing checkbox), one attempt + one re-probe; failure surfaces as a clean FAIL pointing at `Get-Service SharedAccess` + firewall rules. |
+| 7 | ICS DNS proxy answers at `$DnsProbeTarget` | The proxy's known broken state: it answers UDP/53 queries with TCP RSTs. Auto-repaired via `Reset-IcsSharing` (the programmatic equivalent of toggling the WiFi Sharing checkbox), one attempt + one re-probe; failure surfaces as a clean FAIL naming the one applicable fix (start the service / repair host DNS / restart + re-toggle + reboot) followed by the commands that carry it out, one per line, ending with the re-probe. |
 
 **Parameters:**
 
@@ -1623,24 +1623,25 @@ once. The projection lives in `ops/ConvertTo-PerVmToolchainConfig.ps1`.
 
 ### The toolchains taxonomy block (sections 2 and 3)
 
-Sections 2 and 3 need no host-side acquire/verify/stage - the VM pulls apt
-packages from its own archive and Docker from Docker's repo - so they bypass
-the staging channel entirely. They are declared in an optional `toolchains`
-block on the VM's config entry and dispatched straight into their roles by the
-playbook, which selects the block off `vm_provisioner_config` by matching
-`vmName` to `inventory_hostname`. The block's outer shape (only the three known
-section keys, each a list) is validated by the substrate at the point it is
-surfaced; each role validates its own entries. The production `ubuntu-02-ci`
-runner carries exactly this block in its `VmProvisionerConfig-Production` entry,
-declaring the `ci-bash` toolchain (shellcheck + bats) plus the Docker daemon its
-self-hosted runner needs:
+Sections 2 and 3 need no host-side acquire/verify/stage -
+the VM pulls apt packages from its own archive and Docker from Docker's repo -
+so they bypass the staging channel entirely.
+They are declared in an optional `toolchains` block on the VM's config entry,
+and dispatched straight into their roles by the playbook,
+which selects the block off `vm_provisioner_config` by matching `vmName` to `inventory_hostname`.
+The block's outer shape (only the three known section keys, each a list) is validated by the substrate at the point it is surfaced;
+each role validates its own entries.
+The production `ubuntu-02-ci` runner carries exactly this block in its `VmProvisionerConfig-Production` entry,
+declaring the `ci-bash` toolchain (bats and its helper libraries) plus the Docker daemon its self-hosted runner needs.
+shellcheck is deliberately absent:
+Common-Automation lints through its pinned `koalaman/shellcheck` image on that daemon, never a native install,
+so an apt copy would only drift from the version CI checks with.
 
 ```json
 "toolchains": {
   "vmDownloaded": {
     "apt": [
-      { "name": "shellcheck", "version": "0.9.0-1"  },
-      { "name": "bats",       "version": "1.10.0-1" },
+      { "name": "bats", "version": "1.10.0-1" },
       { "name": "zip"   },
       { "name": "unzip" }
     ],
@@ -1658,7 +1659,7 @@ self-hosted runner needs:
 - `vmDownloaded` (section 2) is split by install **mechanism** into two
   sub-lists, each `{ name, version }` per entry:
   - `apt` maps 1:1 to `toolchain_apt`'s package list - distro packages
-    (shellcheck, the bats binary), the `version` an exact apt pin.
+    (the bats binary, zip), the `version` an exact apt pin.
   - `batsLibs` maps 1:1 to `toolchain_bats_libs`'s library list - bats
     helper libraries fetched from GitHub tag tarballs, the `version` a tag
     without the leading `v`. apt cannot serve these; baking them here lets
@@ -1715,7 +1716,7 @@ section 1 - host-pushed (staged on the controller, pulled from the file server)
       dir   /opt/dotnet-10.0.100
       link  /usr/local/bin/dotnet -> /opt/dotnet-10.0.100/dotnet
 section 2 - vm-downloaded (the VM fetches these itself)
-  present   shellcheck 0.9.0-1
+  present   bats 1.10.0-1
       (dpkg-managed - the package manager owns these paths)
 ```
 
@@ -2194,10 +2195,15 @@ Infrastructure-VM-Provisioner/
 |     |  |  |  `- Invoke-VmRuntimeDiag.ps1      # Host-side + best-effort guest-side runtime snapshot. Auto-fires from create-vm.ps1's wait-for-SSH and router-side reachability timeout paths. Manual entry point: scripts\Get-VmRuntimeDiag.ps1.
 |     |  |  `- network/
 |     |  |     |- preflight/
-|     |  |     |  |- Assert-HostNetworkPreflight.ps1   # Orchestrator: seven host-side network checks (switch type, vNIC up + IP, MAC story, connected route, host-vs-VM IP collision, vEthernet profile, ICS DNS proxy reachability). The profile + DNS checks delegate to Infrastructure.Network.Windows (Test-HostNetworkProfileSetting / Test-IcsDnsProxyReachable). Throws on FAIL via Assert-PreflightFindings. Gate at provision.ps1 step 4; manual entry: scripts\Test-HostNetworkPreflight.ps1.
+|     |  |     |  |- Assert-HostNetworkPreflight.ps1   # Orchestrator: reads the host state once (switch, vEthernet, its IPv4) and routes every check's findings into one accumulator. Checks 1-5 live in checks\; the profile + DNS checks (6, 7) delegate to Infrastructure.Network.Windows (Test-HostNetworkProfileSetting / Test-IcsDnsProxyReachable). Throws on FAIL via Assert-PreflightFindings. Gate at provision.ps1 step 4; manual entry: scripts\Test-HostNetworkPreflight.ps1.
 |     |  |     |  |- Assert-PreflightFindings.ps1      # Multi-line throw collector: consolidates every FAIL finding into one operator-facing error.
-|     |  |     |  `- checks/
-|     |  |     |     `- Test-IsCurrentSessionElevated.ps1   # Pure predicate: WindowsPrincipal admin check used by check 0. (The Profile / DNS-reachable / ICS-DNS-proxy / Reset-IcsSharing checks moved to Infrastructure.Network.Windows.)
+|     |  |     |  `- checks/                           # One check per file; each takes the host snapshot it needs and RETURNS findings rather than printing. Both loaders dot-source the folder wholesale.
+|     |  |     |     |- Test-ConnectedRouteToSubnet.ps1    # Check 4: a connected route to the vNIC's own subnet VIA that vNIC. Missing = VM traffic leaves by the Wi-Fi default gateway.
+|     |  |     |     |- Test-HostVmIpCollision.ps1         # Check 5: no VM on the switch reports the host vNIC's IPv4. The Wi-Fi External-bridge smoking gun (one MAC at the AP = one shared DHCP lease).
+|     |  |     |     |- Test-HostVNicReady.ps1             # Check 2: vEthernet is Up and carries an IPv4 - reported as two findings, since the causes and the fixes differ.
+|     |  |     |     |- Test-IsCurrentSessionElevated.ps1  # Check 0: WindowsPrincipal admin predicate. Without elevation Get-VMSwitch returns nothing and every check below misreads as "switch missing".
+|     |  |     |     |- Test-SwitchMacExpectation.ps1      # Check 3: what the vEthernet MAC is allowed to be, per switch type (Internal: must NOT match a Wi-Fi NIC + ICS host IP; External: a shared Wi-Fi MAC is the DHCP-collision case).
+|     |  |     |     `- Test-VmSwitchPresent.ps1           # Check 1: the named switch exists. A FAIL here ends the preflight - everything downstream reads the switch.
 |     |  |     |- Assert-WorkloadReachableViaRouter.ps1 # Workload-side reachability gate: SSHs through the router VM jump host to a workload's private IP. Surfaces dead workloads before per-VM dispatch.
 |     |  |     |- Get-VmAdapterIPv4.ps1                # Pure helper: extracts IPv4 from VMNetworkAdapter objects under StrictMode (PSObject.Properties guard + IPv4 anchor regex).
 |     |  |     |- Resolve-ExistingRouterIp.ps1        # Router-IP lookup from existing Hyper-V state when the router is already up (reconcile path).
