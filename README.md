@@ -1623,24 +1623,25 @@ once. The projection lives in `ops/ConvertTo-PerVmToolchainConfig.ps1`.
 
 ### The toolchains taxonomy block (sections 2 and 3)
 
-Sections 2 and 3 need no host-side acquire/verify/stage - the VM pulls apt
-packages from its own archive and Docker from Docker's repo - so they bypass
-the staging channel entirely. They are declared in an optional `toolchains`
-block on the VM's config entry and dispatched straight into their roles by the
-playbook, which selects the block off `vm_provisioner_config` by matching
-`vmName` to `inventory_hostname`. The block's outer shape (only the three known
-section keys, each a list) is validated by the substrate at the point it is
-surfaced; each role validates its own entries. The production `ubuntu-02-ci`
-runner carries exactly this block in its `VmProvisionerConfig-Production` entry,
-declaring the `ci-bash` toolchain (shellcheck + bats) plus the Docker daemon its
-self-hosted runner needs:
+Sections 2 and 3 need no host-side acquire/verify/stage -
+the VM pulls apt packages from its own archive and Docker from Docker's repo -
+so they bypass the staging channel entirely.
+They are declared in an optional `toolchains` block on the VM's config entry,
+and dispatched straight into their roles by the playbook,
+which selects the block off `vm_provisioner_config` by matching `vmName` to `inventory_hostname`.
+The block's outer shape (only the three known section keys, each a list) is validated by the substrate at the point it is surfaced;
+each role validates its own entries.
+The production `ubuntu-02-ci` runner carries exactly this block in its `VmProvisionerConfig-Production` entry,
+declaring the `ci-bash` toolchain (bats and its helper libraries) plus the Docker daemon its self-hosted runner needs.
+shellcheck is deliberately absent:
+Common-Automation lints through its pinned `koalaman/shellcheck` image on that daemon, never a native install,
+so an apt copy would only drift from the version CI checks with.
 
 ```json
 "toolchains": {
   "vmDownloaded": {
     "apt": [
-      { "name": "shellcheck", "version": "0.9.0-1"  },
-      { "name": "bats",       "version": "1.10.0-1" },
+      { "name": "bats", "version": "1.10.0-1" },
       { "name": "zip"   },
       { "name": "unzip" }
     ],
@@ -1658,7 +1659,7 @@ self-hosted runner needs:
 - `vmDownloaded` (section 2) is split by install **mechanism** into two
   sub-lists, each `{ name, version }` per entry:
   - `apt` maps 1:1 to `toolchain_apt`'s package list - distro packages
-    (shellcheck, the bats binary), the `version` an exact apt pin.
+    (the bats binary, zip), the `version` an exact apt pin.
   - `batsLibs` maps 1:1 to `toolchain_bats_libs`'s library list - bats
     helper libraries fetched from GitHub tag tarballs, the `version` a tag
     without the leading `v`. apt cannot serve these; baking them here lets
@@ -1715,7 +1716,7 @@ section 1 - host-pushed (staged on the controller, pulled from the file server)
       dir   /opt/dotnet-10.0.100
       link  /usr/local/bin/dotnet -> /opt/dotnet-10.0.100/dotnet
 section 2 - vm-downloaded (the VM fetches these itself)
-  present   shellcheck 0.9.0-1
+  present   bats 1.10.0-1
       (dpkg-managed - the package manager owns these paths)
 ```
 
