@@ -402,6 +402,21 @@ Describe 'provision.ps1 - jump host wiring (feature 53 step 3 follow-up)' {
         $depsText | Should -Match "Infrastructure\.HyperV.*MinimumVersion\s+'(1\.[1-9]\d*\.\d+|[2-9]\.\d+\.\d+)'"
     }
 
+    It 'pins Infrastructure.Network.Windows to the version whose preflight verdicts are trustworthy' {
+        # Every host-network FAIL an operator acts on is produced by this
+        # module. Below 1.5.0 two of them misdirect: Test-RouterSshRelay
+        # reported a refused connect as a generic .NET error instead of the
+        # re-lay instruction, and the wedged-ICS verdict described its fix
+        # in prose rather than shipping the commands. A downgrade would not
+        # break the load graph - it would quietly send whoever reads the
+        # output somewhere else - so the floor is pinned here.
+        $depsPath = Join-Path (Split-Path $script:provisionPath -Parent) `
+            'Install-ModuleDependencies.ps1'
+        $depsText = Get-Content -Path $depsPath -Raw
+        $depsText | Should -Match `
+            "Infrastructure\.Network\.Windows.*MinimumVersion\s+'(1\.(?:[5-9]|\d{2,})\.\d+|[2-9]\.\d+\.\d+)'"
+    }
+
     It 'stamps _RouterVm onto every workload in the network-setup loop' {
         # Regression guard: if a future refactor of the network-setup
         # step drops the Add-Member, create-vm.ps1 and Invoke-Vm-

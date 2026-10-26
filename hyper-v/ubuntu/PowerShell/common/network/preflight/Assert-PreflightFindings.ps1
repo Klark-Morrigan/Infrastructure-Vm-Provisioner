@@ -14,7 +14,11 @@
 function Assert-PreflightFindings {
     [CmdletBinding()]
     param(
+        # AllowEmptyCollection because Mandatory alone rejects an empty list
+        # at bind time - which would turn "nothing to report" into a parameter
+        # error, the opposite of the no-op contract above.
         [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
         [System.Collections.Generic.List[object]] $Findings,
 
         [Parameter(Mandatory)]

@@ -311,7 +311,7 @@ function Resolve-NugetPackageHash {
 #   false negative that costs the staging run, never a wrong answer.
 #
 #   WHY A MISSING MODULE DOES NOT FAIL THE RUN. The floor
-#   (Infrastructure.Network.Windows 1.4.0) not being installed says nothing
+#   (Infrastructure.Network.Windows 1.5.0) not being installed says nothing
 #   about the relay. Treating it as a fault would let a dependency gap take
 #   toolchain provisioning down - the tooling failing closed over itself
 #   rather than over the estate. It warns and proceeds; the bridge still gates
@@ -328,13 +328,17 @@ function Assert-RouterRelayForStaging {
     )
 
     try {
-        Import-Module Infrastructure.Network.Windows -MinimumVersion 1.4.0 `
+        # 1.5.0, not 1.4.0: below it a REFUSED connect - nothing listening, the
+        # commonest failure this check exists to report - surfaced as a generic
+        # .NET error instead of the re-lay instruction, so the verdict shown to
+        # the operator here could not be trusted.
+        Import-Module Infrastructure.Network.Windows -MinimumVersion 1.5.0 `
             -ErrorAction Stop
     }
     catch {
         [Console]::Error.WriteLine(
             "  WARN: cannot check the router SSH relay - " +
-            "Infrastructure.Network.Windows 1.4.0+ is unavailable. This is no " +
+            "Infrastructure.Network.Windows 1.5.0+ is unavailable. This is no " +
             "verdict on the relay; staging proceeds and the bridge still " +
             "asserts the hop before dispatch.")
         return

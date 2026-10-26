@@ -7,10 +7,12 @@
 
 # ---------------------------------------------------------------------------
 # Assert-HostNetworkPreflight
-#   Five host-side checks that fail in seconds when the network is
+#   Host-side checks that fail in seconds when the network is
 #   obviously misconfigured, so the provisioner does not spend a 10-min
 #   wait-for-SSH on a host that cannot reach its own VMs:
 #
+#     0. The session is elevated. Without it Get-VMSwitch returns
+#        nothing and every check below misreads as "switch missing".
 #     1. The named External vSwitch exists, has a recognized SwitchType.
 #     2. Host vNIC (vEthernet (<switch>)) is Up and has an IPv4.
 #     3. Switch-type expectations:
@@ -28,6 +30,20 @@
 #     5. No IP collision between host vNIC and any VM on the same
 #        switch. Smoking gun for the WiFi External-bridge MAC-sharing
 #        case where DHCP gave both the same lease.
+#     6. vEthernet network profile is Private (Internal switches only) -
+#        Public blocks ICS's DNS-In rule. Delegated to
+#        Test-HostNetworkProfileSetting.
+#     7. The ICS DNS proxy answers on the path the VM is about to use.
+#        Delegated to Test-IcsDnsProxyReachable.
+#
+#   Every check is a function of its own that RETURNS findings; this
+#   function reads the host state once, hands each check the snapshot it
+#   needs, and routes what comes back into one accumulator. That split is
+#   what lets a check be tested against a state that is awkward to
+#   produce - a Down vNIC, a shared MAC - without mocking Hyper-V.
+#   Checks 1-5 live in checks\ beside this file; 6 and 7 live in
+#   Infrastructure.Network.Windows, being host-network facts with no
+#   Hyper-V or provisioner context.
 #
 #   PASS / WARN do NOT abort. FAIL throws with an actionable message
 #   so the operator can resolve before the next provisioner run.
@@ -101,6 +117,17 @@ function Assert-HostNetworkPreflight {
         })
     }
 
+    # Routes what a check function returned into the accumulator. Checks emit
+    # zero, one or several findings and stay silent when their precondition is
+    # absent, so nulls are skipped rather than rejected.
+    function Add-CheckFindings {
+        param([object[]] $Finding)
+
+        foreach ($f in $Finding) {
+            if ($f) { Add-Finding $f.Status $f.Label $f.Detail }
+        }
+    }
+
     Write-Host ""
     Write-Host "--- Host network preflight: $SwitchName ---" -ForegroundColor Cyan
 
@@ -120,144 +147,64 @@ function Assert-HostNetworkPreflight {
     }
     Add-Finding PASS "PowerShell session is elevated" "Hyper-V cmdlets are reachable."
 
-    # 1. Switch existence + type.
-    $sw = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
-    if (-not $sw) {
-        Add-Finding FAIL "VMSwitch '$SwitchName' exists" `
-            "Switch is missing. Expected to have been created by Initialize-ExternalSwitch, OR (if you migrated from External to Internal+ICS earlier) the switch was torn down by a Hyper-V service restart / Windows update. Recreate via: New-VMSwitch -Name '$SwitchName' -SwitchType Internal  (then re-enable ICS on WiFi -> vEthernet)."
+    # 1. Switch existence + type. Fetched once here; every check below reads
+    #    this same snapshot rather than re-querying Hyper-V.
+    $sw            = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
+    $switchFinding = Test-VmSwitchPresent -SwitchName $SwitchName -Switch $sw
+    Add-CheckFindings $switchFinding
+    if ($switchFinding.Status -eq 'FAIL') {
         # No point running downstream checks - they all depend on the switch.
         Assert-PreflightFindings -Findings $findings -SwitchName $SwitchName
         return
     }
-    Add-Finding PASS "VMSwitch '$SwitchName' exists" "SwitchType=$($sw.SwitchType)"
 
-    # 2. Host vNIC up + IPv4.
+    # 2. Host vNIC up + IPv4. The address lookup is skipped when the adapter
+    #    is absent - there is nothing to ask about - and the check reports the
+    #    missing address either way.
     $alias    = "vEthernet ($SwitchName)"
     $vAdapter = Get-NetAdapter -Name $alias -ErrorAction SilentlyContinue
-    if (-not $vAdapter) {
-        Add-Finding FAIL "Host vNIC '$alias' present" `
-            "vEthernet missing. Did switch creation finish?"
-    } elseif ($vAdapter.Status -ne 'Up') {
-        Add-Finding FAIL "Host vNIC '$alias' status" `
-            "Status=$($vAdapter.Status). Bring it Up or recreate the switch."
-    } else {
-        Add-Finding PASS "Host vNIC '$alias' is Up" "MAC=$($vAdapter.MacAddress)"
-    }
-
-    $vIp = $null
+    $vIp      = $null
     if ($vAdapter) {
         $vIp = Get-NetIPAddress -InterfaceAlias $alias -AddressFamily IPv4 `
                                 -ErrorAction SilentlyContinue |
                Select-Object -First 1
     }
-    if (-not $vIp) {
-        Add-Finding FAIL "Host vNIC has IPv4" `
-            "No IPv4 on '$alias'. ICS may have flipped off, or DHCP has not bound."
-    } else {
-        Add-Finding PASS "Host vNIC has IPv4" `
-            "$($vIp.IPAddress)/$($vIp.PrefixLength) ($($vIp.PrefixOrigin))"
-    }
+    Add-CheckFindings (Test-HostVNicReady -Alias $alias -Adapter $vAdapter -IpAddress $vIp)
 
     # 3. Switch-type-specific MAC expectations.
     #    Get-WirelessNetAdapter (Infrastructure.Network.Windows) is the
     #    shared "which NICs are Wi-Fi" predicate, so the matcher cannot
     #    drift between here and the manual preflight wrapper's WAN
     #    auto-detect.
-    $wifi = Get-WirelessNetAdapter
-
-    if ($sw.SwitchType -eq 'Internal') {
-        if ($vIp -and $vIp.IPAddress -ne '192.168.137.1') {
-            Add-Finding WARN "ICS host IP = 192.168.137.1" `
-                "Got $($vIp.IPAddress). ICS hardcodes .1; if you customized via registry that is fine, otherwise toggle ICS off+on."
-        } elseif ($vIp) {
-            Add-Finding PASS "ICS host IP = 192.168.137.1" "Matches ICS default."
-        }
-
-        if ($vAdapter -and $wifi) {
-            $matched = @($wifi | Where-Object { $_.MacAddress -eq $vAdapter.MacAddress })
-            if ($matched.Count -gt 0) {
-                Add-Finding FAIL "vEthernet MAC distinct from WiFi MAC" `
-                    "vEthernet MAC matches WiFi adapter '$($matched[0].Name)' MAC ($($vAdapter.MacAddress)). Internal switches must not share MAC with a physical adapter - did you forget to recreate the switch as Internal after External -> ICS migration?"
-            } else {
-                Add-Finding PASS "vEthernet MAC distinct from WiFi MAC" `
-                    "vEthernet MAC: $($vAdapter.MacAddress)"
-            }
-        }
-    } elseif ($sw.SwitchType -eq 'External') {
-        if ($vAdapter -and $wifi) {
-            $sharedMacWifi = $wifi | Where-Object { $_.MacAddress -eq $vAdapter.MacAddress }
-            if ($sharedMacWifi) {
-                # Hyper-V External bridges to Wi-Fi by MAC-translating
-                # every VM's egress to the host's WiFi MAC. At the AP,
-                # the host vNIC and every VM appear as the SAME client,
-                # so DHCP hands out one lease per MAC and they collide
-                # on the same IP. We hit this directly during the
-                # 2026-06 trip - 30 minutes wasted before we tied
-                # SourceAddress=192.168.5.8 to Test-NetConnection
-                # picking WiFi as the source for its own IP. There is
-                # no "lucky AP" workaround stable enough to recommend.
-                # Internal + ICS is the durable Wi-Fi answer.
-                Add-Finding FAIL "External switch bridged to WiFi" `
-                    "vEthernet shares MAC with WiFi adapter '$($sharedMacWifi.Name)'. Hyper-V External-on-WiFi MAC-translates all egress to one MAC, so the AP gives the host vNIC and every VM the same DHCP lease and they collide on the same IP. Recreate the switch as Internal + enable Windows ICS (see the README's Networking section)."
-            }
-        }
-    } else {
-        Add-Finding WARN "Switch type expected External or Internal" `
-            "Got $($sw.SwitchType). Private switches orphan VMs from any upstream."
-    }
+    Add-CheckFindings (Test-SwitchMacExpectation -Switch $sw `
+                                                 -Adapter $vAdapter `
+                                                 -IpAddress $vIp `
+                                                 -WirelessAdapter (Get-WirelessNetAdapter))
 
     # 4. Connected route to vNIC's subnet via vNIC.
-    if ($vIp) {
-        $subnet = ($vIp.IPAddress -replace '\.\d+$', '.0') + "/$($vIp.PrefixLength)"
-        $route  = Get-NetRoute -DestinationPrefix $subnet -ErrorAction SilentlyContinue |
-                  Where-Object InterfaceAlias -eq $alias
-        if (-not $route) {
-            Add-Finding FAIL "Connected route $subnet via $alias" `
-                "Route missing. Host will route VM traffic out the wrong interface (likely WiFi default route)."
-        } else {
-            $first = @($route)[0]
-            Add-Finding PASS "Connected route $subnet via $alias" `
-                "metric $($first.RouteMetric)+$($first.InterfaceMetric)"
-        }
-    }
+    Add-CheckFindings (Test-ConnectedRouteToSubnet -Alias $alias -IpAddress $vIp)
 
     # 5. IP collision between host vNIC and any VM on the same switch.
-    if ($vIp) {
-        $vmsOnSwitch = Get-VMNetworkAdapter -All -ErrorAction SilentlyContinue |
-                       Where-Object SwitchName -eq $SwitchName
-        $vmIps = @(Get-VmAdapterIPv4 -Adapter $vmsOnSwitch)
-
-        if ($vmIps | Where-Object { $_ -eq $vIp.IPAddress }) {
-            Add-Finding FAIL "No IP collision with VMs on '$SwitchName'" `
-                "Host vNIC and VM(s) both report $($vIp.IPAddress). Host steals VM traffic via local routing. Run 'ipconfig /release `"$alias`"' as a stopgap; switch to ICS for the durable fix."
-        } else {
-            Add-Finding PASS "No IP collision with VMs on '$SwitchName'" `
-                "Host: $($vIp.IPAddress); VMs ($($vmIps.Count) IPs): $(($vmIps | Sort-Object -Unique) -join ', ')"
-        }
-    }
+    Add-CheckFindings (Test-HostVmIpCollision -SwitchName $SwitchName `
+                                              -Alias $alias `
+                                              -IpAddress $vIp)
 
     # 6. Network profile (only relevant on Internal/ICS switches).
     #    Logic + auto-repair lives in Test-HostNetworkProfileSetting.ps1.
     if ($sw.SwitchType -eq 'Internal' -and $vAdapter) {
-        $profileFinding = Test-HostNetworkProfileSetting `
+        Add-CheckFindings (Test-HostNetworkProfileSetting `
             -InterfaceAlias $alias `
-            -NoAutoRepair:$NoAutoRepair
-        if ($profileFinding) {
-            Add-Finding $profileFinding.Status `
-                        $profileFinding.Label `
-                        $profileFinding.Detail
-        }
+            -NoAutoRepair:$NoAutoRepair)
     }
 
     # 7. DNS-via-ICS reachability + one-shot auto-repair. Logic
     #    lives in Test-IcsDnsProxyReachable.ps1.
     if ($DnsProbeTarget) {
-        $dnsFinding = Test-IcsDnsProxyReachable `
+        Add-CheckFindings (Test-IcsDnsProxyReachable `
             -DnsProbeTarget $DnsProbeTarget `
             -LanAdapterName $alias `
             -WanAdapterName $WanAdapterName `
-            -NoAutoRepair:$NoAutoRepair
-        Add-Finding $dnsFinding.Status $dnsFinding.Label $dnsFinding.Detail
+            -NoAutoRepair:$NoAutoRepair)
     }
 
     Assert-PreflightFindings -Findings $findings -SwitchName $SwitchName
