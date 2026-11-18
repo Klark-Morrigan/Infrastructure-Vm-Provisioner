@@ -2,7 +2,7 @@
 setlocal
 rem Explorer-double-click launcher for scripts/setup-hooks.sh (this repo's
 rem local entry). The local .sh exec's Common-Automation's canonical
-rem setup-hooks engine with COMMON_AUTOMATION_TARGET_REPO set, so the chain
+rem setup-hooks engine with CONSUMER_REPO_PATH set, so the chain
 rem is local.bat -> local.sh -> shared engine - one entry point per layer.
 rem
 rem _find-bash.bat from Common-Automation resolves Git Bash robustly and

@@ -6,11 +6,11 @@
 # (Common-Ansible/.github/actions/ansible-lint/ansible-lint.sh) so the local
 # pre-push bar cannot drift from CI's.
 #
-# Why this lives here and not in the delegated runner: feature 20 re-homed the
-# Ansible gate from Common-Automation into Common-Ansible, and Common-
-# Automation's delegated _run-lint-yaml-and-bash.sh no longer runs ansible-
-# lint. Without this script a local lint run would skip ansible-lint entirely
-# for this repo. Wired into run-lint-yaml-and-bash.sh.
+# Why this lives here and not in the delegated runner: the Ansible gate lives
+# in Common-Ansible, and Common-Automation's delegated
+# _run-lint-yaml-and-bash.sh does not run ansible-lint. Without this script
+# a local lint run would skip ansible-lint entirely for this repo. Wired into
+# run-lint-yaml-and-bash.sh.
 #
 # Composer role resolution. This repo ships NO roles of its own - its single
 # playbook import_roles the Common-Ansible substrate roles (jdk, dotnet_sdk,

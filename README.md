@@ -2144,7 +2144,7 @@ scripts/fix-permissions.sh     # or scripts\fix-permissions.bat
 
 These runners delegate the cross-cutting linters and bats to Common-
 Automation's engine, pointed at this repo via the
-`COMMON_AUTOMATION_TARGET_REPO` env var, so a sibling checkout at
+`CONSUMER_REPO_PATH` env var, so a sibling checkout at
 `..\Common-Automation` is required. The lint runner additionally runs the
 composer ansible-lint through `scripts/run-lint-ansible.sh`, which reuses the
 shared Common-Ansible controller venv and puts the substrate roles on

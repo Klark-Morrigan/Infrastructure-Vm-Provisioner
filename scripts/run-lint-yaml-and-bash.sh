@@ -3,7 +3,7 @@
 #   1. The cross-cutting linters - shellcheck, check-sh-executable,
 #      actionlint, action-validator, yamllint - delegated to Common-
 #      Automation's _run-lint-yaml-and-bash.sh, pointed at this repo via
-#      COMMON_AUTOMATION_TARGET_REPO.
+#      CONSUMER_REPO_PATH.
 #   2. This repo's composer ansible-lint (run-lint-ansible.sh), run through
 #      the shared Common-Ansible controller venv.
 # The ansible-lint step is owned here, not by the delegated runner: feature
@@ -24,7 +24,7 @@ common_automation_root="$(cd "${repo_root}/../Common-Automation" && pwd)"
 # control to run ansible-lint after it.
 failures=()
 
-if ! COMMON_AUTOMATION_TARGET_REPO="${repo_root}" \
+if ! CONSUMER_REPO_PATH="${repo_root}" \
         "${common_automation_root}/scripts/_run-lint-yaml-and-bash.sh"; then
     failures+=("yaml-and-bash")
 fi
