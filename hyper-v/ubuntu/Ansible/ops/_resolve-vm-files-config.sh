@@ -32,6 +32,7 @@ set -euo pipefail
 
 # shellcheck source=hyper-v/ubuntu/Ansible/ops/imports/_log.sh
 source "${BASH_SOURCE[0]%/*}/imports/_log.sh"
+
 # shellcheck source=hyper-v/ubuntu/Ansible/ops/_to-wsl-path.sh
 source "${BASH_SOURCE[0]%/*}/_to-wsl-path.sh"
 
@@ -80,6 +81,12 @@ fi
 #    string - would miss every one of them. The failure is silent: paths ride
 #    through untranslated and surface much later as a role assertion about a
 #    Windows path, or as a copy of a file the controller cannot open.
+#
+#    Translated paths reach jq on stdin, never as arguments. Git Bash rewrites
+#    any wildcard-free argument that starts with / before it launches jq.exe,
+#    so /mnt/c/x.json would arrive as C:/<git-root>/mnt/c/x.json. Stdin is
+#    never rewritten. Each pair is one tab-separated line, because a tab
+#    cannot occur in a Windows path.
 # ---------------------------------------------------------------------------
 # shellcheck disable=SC2312  # jq cannot fail here - the document was validated above
 mapfile -t controller_paths < <(printf '%s' "${input}" | jq -r '
@@ -91,29 +98,35 @@ mapfile -t controller_paths < <(printf '%s' "${input}" | jq -r '
     | select(type == "string")
 ' | tr -d '\r' | sort -u)
 
-path_map='{}'
+path_pairs=''
 if [[ "${#controller_paths[@]}" -gt 0 ]]; then
     for windows_path in "${controller_paths[@]}"; do
-        # shellcheck disable=SC2310  # predicate in `if`; the failure is handled below
+        # shellcheck disable=SC2310 # predicate in `if`; the failure is handled below
         if ! posix_path="$(_to_wsl_path "${windows_path}")"; then
             log_err "cannot translate a files entry path for the WSL controller: ${windows_path}"
             exit 1
         fi
-        path_map="$(jq -c --arg k "${windows_path}" --arg v "${posix_path}" \
-            '. + {($k): $v}' <<<"${path_map}" | tr -d '\r')"
+        path_pairs+="${windows_path}"$'\t'"${posix_path}"$'\n'
     done
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Reshape and substitute. `|=` on an existing key only (guarded by has())
-#    so a missing discriminator is not materialised as a null sub-field, which
-#    would turn a "missing source or pattern" schema error into a confusing
-#    "source is null" one.
+# 2. Reshape and substitute. The lookup map and the config travel as two
+#    documents on one stream, for the stdin-only reason given in step 1.
+#
+#    `|=` on an existing key only (guarded by has()) so a missing discriminator
+#    is not materialised as a null sub-field, which would turn a "missing
+#    source or pattern" schema error into a confusing "source is null" one.
 # ---------------------------------------------------------------------------
-printf '%s' "${input}" | jq --argjson map "${path_map}" '
-    def translated: if type == "string" then ($map[.] // .) else . end;
+{
+    printf '%s' "${path_pairs}" | jq -cRn '[inputs | split("\t") | {(.[0]): .[1]}] | add // {}'
+    printf '%s' "${input}"
+} | jq -n '
+    input as $map
+    | def translated: if type == "string" then ($map[.] // .) else . end;
 
-    reduce (.[]? | select(type == "object") | select(.vmName? != null)) as $vm ({};
+    input
+    | reduce (.[]? | select(type == "object") | select(.vmName? != null)) as $vm ({};
         .[$vm.vmName | tostring] = [
             ($vm.files? // [])[]?
             | if type == "object" then
