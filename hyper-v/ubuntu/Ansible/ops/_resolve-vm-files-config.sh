@@ -43,23 +43,23 @@ if [[ -z "${input}" ]]; then
     exit 1
 fi
 
-if ! printf '%s' "${input}" | jq empty >/dev/null 2>&1; then
+# The vault payload is one array of VM definitions. Anything else means the
+# wrong secret was read, which is worth naming here rather than letting the
+# reshape below silently produce an empty dict. Slurping counts the documents:
+# the reshape reads only the first, so any others would be dropped unseen.
+#
+# CR is stripped for the reason given in step 1. Git Bash drops a trailing CR
+# from `$(...)` but the controller's bash does not, so the comparison must not
+# depend on either.
+if ! config_shape="$(printf '%s' "${input}" \
+        | jq -rs 'if length == 1 then .[0] | type else "\(length) documents" end' 2>/dev/null \
+        | tr -d '\r')"; then
     log_err "provisioner config is not valid JSON"
     exit 1
 fi
 
-# The vault payload is an array of VM definitions; anything else means the
-# wrong secret was read, which is worth naming here rather than letting the
-# reshape below silently produce an empty dict.
-#
-# CR stripped here for the same reason as in the collection below (Windows
-# jq.exe writes CRLF). MSYS bash happens to drop a trailing CR from `$(...)`
-# on its own, so this is currently belt-and-braces there - but relying on that
-# quirk means the comparison is correct only under the shell that provides it,
-# which is precisely the kind of hidden dependency this file already got wrong.
-config_type="$(printf '%s' "${input}" | jq -r 'type' | tr -d '\r')"
-if [[ "${config_type}" != "array" ]]; then
-    log_err "provisioner config must be a JSON array of VM definitions (got ${config_type})"
+if [[ "${config_shape}" != "array" ]]; then
+    log_err "provisioner config must be a JSON array of VM definitions (got ${config_shape})"
     exit 1
 fi
 
@@ -73,14 +73,10 @@ fi
 #    the role reports far better than this script could, and they must reach it
 #    unchanged to be reported at all.
 #
-#    `tr -d '\r'` is load-bearing, not hygiene. Under Git Bash - the shell the
-#    operator menu launches this flow in - `jq` resolves to the WINDOWS jq.exe,
-#    which terminates lines with CRLF. `mapfile -t` strips only the newline, so
-#    every collected path would keep a trailing CR, the lookup map below would
-#    be keyed by "<path>\r", and step 2's lookup - which uses the clean JSON
-#    string - would miss every one of them. The failure is silent: paths ride
-#    through untranslated and surface much later as a role assertion about a
-#    Windows path, or as a copy of a file the controller cannot open.
+#    `tr -d '\r'` is load-bearing. Under Git Bash - the shell the operator menu
+#    launches this flow in - `jq` is the Windows jq.exe, which ends lines with
+#    CRLF. `mapfile -t` strips only the newline, so a kept CR would key the
+#    lookup map by "<path>\r" and every lookup in step 2 would silently miss.
 #
 #    Translated paths reach jq on stdin, never as arguments. Git Bash rewrites
 #    any wildcard-free argument that starts with / before it launches jq.exe,
@@ -99,16 +95,16 @@ mapfile -t controller_paths < <(printf '%s' "${input}" | jq -r '
 ' | tr -d '\r' | sort -u)
 
 path_pairs=''
-if [[ "${#controller_paths[@]}" -gt 0 ]]; then
-    for windows_path in "${controller_paths[@]}"; do
-        # shellcheck disable=SC2310 # predicate in `if`; the failure is handled below
-        if ! posix_path="$(_to_wsl_path "${windows_path}")"; then
-            log_err "cannot translate a files entry path for the WSL controller: ${windows_path}"
-            exit 1
-        fi
-        path_pairs+="${windows_path}"$'\t'"${posix_path}"$'\n'
-    done
-fi
+for windows_path in "${controller_paths[@]}"; do
+    # shellcheck disable=SC2310 # predicate in `if`; the failure is handled below
+    if ! posix_path="$(_to_wsl_path "${windows_path}")"; then
+        log_err "cannot translate a files entry path for the WSL controller: ${windows_path}"
+        exit 1
+    fi
+    path_pairs+="${windows_path}"$'\t'"${posix_path}"$'\n'
+done
+
+log_info "Translated ${#controller_paths[@]} controller-side path(s)"
 
 # ---------------------------------------------------------------------------
 # 2. Reshape and substitute. The lookup map and the config travel as two

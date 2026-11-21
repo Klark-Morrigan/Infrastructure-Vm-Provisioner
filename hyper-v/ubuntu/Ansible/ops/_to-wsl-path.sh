@@ -13,8 +13,8 @@
 # conversion. This helper is that knowledge, in one place, so the two ops/
 # scripts that need it cannot drift apart.
 #
-# Sourced, not executed - callers want the function, and a subshell per path
-# would be pure cost on a bulk `files` array.
+# Sourced, not executed - callers want the function, and starting a new bash
+# process per path would be pure cost on a bulk `files` array.
 #
 # If a second repo ever needs this, promote it to Common-Automation
 # (scripts/_to-wsl-path.sh) next to its inverse rather than copying it.

@@ -1855,6 +1855,10 @@ Four pieces, all under `hyper-v/ubuntu/Ansible/ops/`:
   Schema validation is **not** duplicated here - the `vm_files` role owns those
   rules, so a malformed entry rides through untouched to be reported by the
   component that knows them.
+  Under Git Bash `jq` is the Windows `jq.exe`,
+  so the script strips the CR from every line jq writes
+  and hands it translated paths only on stdin:
+  Git Bash rewrites any `/`-leading argument it passes to a Windows program.
 - `_create-controller-tempfile.sh` - the two-spelling handoff
   (`create_controller_tempfile` + `resolve_controller_path`). It classifies the
   shell by `uname`, the same test the bridge uses for its own re-exec, and

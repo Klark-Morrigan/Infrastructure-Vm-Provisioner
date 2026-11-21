@@ -4,8 +4,12 @@
 # hyper-v/ubuntu/Ansible/ops/_resolve-vm-files-config.sh,
 # the stdin -> stdout reshape that lifts each VM's `files` array into the
 # vm_files_by_host extra-vars document and translates every controller-side
-# path on the way. Pure transform; jq is the only external dep, run for real.
+# path on the way. Pure transform; jq is the only external dep. It runs for
+# real, except in the sections at the end that stub it as the Windows jq.exe.
 # Run with: bats Tests/Ansible/ops/_resolve-vm-files-config.bats
+
+# run --separate-stderr arrived in 1.5.0.
+bats_require_minimum_version 1.5.0
 
 SCRIPT="$(cd "${BATS_TEST_DIRNAME}/../../../hyper-v/ubuntu/Ansible/ops" && pwd)/_resolve-vm-files-config.sh"
 
@@ -15,6 +19,9 @@ source "${BATS_TEST_DIRNAME}/_bats-helpers.sh"
 setup() {
 
     _bats_init_temp resolveVmFiles
+
+    REAL_JQ="$(command -v jq)"
+    STUBS_DIR="${TEST_TMP}/stubs"
 }
 
 teardown() {
@@ -23,15 +30,21 @@ teardown() {
 }
 
 # Feed a config document on stdin, the way the wrapper pipes the vault read in.
+# The stubs folder leads PATH, so a test that installs a jq stub runs the script
+# against it. Without one the folder does not exist and the real jq is found.
+#
+# stdout and stderr are kept apart because the wrapper writes stdout to the
+# extra-vars file: a log line there would corrupt the document.
 resolve() {
 
-    run "${BASH_BIN}" -c 'printf "%s" "$2" | "$1"' _ "${SCRIPT}" "$1"
+    run --separate-stderr env PATH="${STUBS_DIR}:${PATH}" "${BASH_BIN}" -c 'printf "%s" "$2" | "$1"' _ "${SCRIPT}" "$1"
 }
 
-# Read one value out of the emitted document.
+# Read one value out of the emitted document. CR is stripped first, so output
+# written through a CRLF stub reads the same as any other.
 emitted() {
 
-    printf '%s' "${output}" | jq -r "$1"
+    printf '%s' "${output}" | tr -d '\r' | jq -r "$1"
 }
 
 @test "fails when stdin is empty" {
@@ -39,7 +52,7 @@ emitted() {
     resolve ''
 
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"no provisioner config on stdin"* ]]
+    [[ "${stderr}" == *"no provisioner config on stdin"* ]]
 }
 
 @test "fails when the config is not valid JSON" {
@@ -47,7 +60,7 @@ emitted() {
     resolve 'not-json'
 
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"not valid JSON"* ]]
+    [[ "${stderr}" == *"not valid JSON"* ]]
 }
 
 @test "fails when the config is not an array of VM definitions" {
@@ -57,8 +70,19 @@ emitted() {
     resolve '{"vmName":"a"}'
 
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"must be a JSON array"* ]]
-    [[ "${output}" == *"object"* ]]
+    [[ "${stderr}" == *"must be a JSON array"* ]]
+    [[ "${stderr}" == *"object"* ]]
+}
+
+@test "fails when stdin carries more than one document and says how many" {
+
+    # Only the first document would be reshaped, so a second one would be
+    # dropped without a word.
+    resolve '[{"vmName":"a"}] [{"vmName":"b"}]'
+
+    [ "${status}" -ne 0 ]
+    [[ "${stderr}" == *"must be a JSON array"* ]]
+    [[ "${stderr}" == *"2 documents"* ]]
 }
 
 @test "emits a single top-level vm_files_by_host key" {
@@ -155,8 +179,8 @@ emitted() {
     resolve '[{"vmName":"a","files":[{"source":"\\\\fileserver\\share\\app.jar","target":"/opt/app.jar"}]}]'
 
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"UNC"* ]]
-    [[ "${output}" == *"fileserver"* ]]
+    [[ "${stderr}" == *"UNC"* ]]
+    [[ "${stderr}" == *"fileserver"* ]]
 }
 
 @test "an entry with neither source nor pattern rides through untouched" {
@@ -190,6 +214,15 @@ emitted() {
     [ "$(emitted '.vm_files_by_host | keys | join(",")')" = "a" ]
 }
 
+@test "reports how many distinct paths it translated on stderr, keeping stdout a clean document" {
+
+    resolve '[{"vmName":"a","files":[{"source":"C:\\a.txt","target":"/opt/a"},{"pattern":"C:\\b\\*.jar","targetDir":"/opt/b"}]},{"vmName":"b","files":[{"source":"C:\\a.txt","target":"/opt/a"}]}]'
+
+    [ "${status}" -eq 0 ]
+    [[ "${stderr}" == *"Translated 2 controller-side path(s)"* ]]
+    [ "$(emitted 'keys | join(",")')" = "vm_files_by_host" ]
+}
+
 @test "an empty fleet yields an empty dict" {
 
     resolve '[]'
@@ -211,63 +244,109 @@ emitted() {
 }
 
 # ---------------------------------------------------------------------------
-# Windows jq (the Git Bash launch)
+# Windows jq stubs (the Git Bash launch)
 #
 # Under the operator menu this script runs in Git Bash, where `jq` resolves to
-# the WINDOWS jq.exe and every line it writes ends CRLF. That shipped as a
-# silent translation failure: `mapfile -t` strips only the newline, so the
-# lookup map was keyed by "<path>\r" while step 2 looked up the clean JSON
-# string, and every path rode through in its Windows form to fail much later
-# inside the vm_files role.
-#
-# bats runs on the controller, where jq writes LF, so nothing above can see it.
-# The stub below makes the Windows behaviour reproducible here.
+# the WINDOWS jq.exe. bats runs on the controller, where jq is a Linux binary,
+# so the sections above cannot see how jq.exe behaves. These stubs reproduce
+# it. Each one wraps a next jq - the real one, or another stub - so the
+# Windows stub is the two behaviours chained rather than a third copy of them.
 # ---------------------------------------------------------------------------
+
+# write_jq_stub <name> <next-jq>
+#
+# Writes the stub body read from stdin to the stubs folder. The body calls the
+# jq it wraps as "${next_jq}".
+write_jq_stub() {
+
+    local name="$1"
+    local next_jq="$2"
+
+    mkdir -p "${STUBS_DIR}"
+
+    {
+        printf '#!/usr/bin/env bash\nnext_jq=%q\n' "${next_jq}"
+        cat
+    } >"${STUBS_DIR}/${name}"
+
+    chmod +x "${STUBS_DIR}/${name}"
+}
+
+# jq.exe ends every line it writes with CRLF. pipefail so a jq failure still
+# propagates through the sed - without it the stub would mask every parse
+# error and the guards above would pass for the wrong reason.
+write_crlf_jq_stub() {
+
+    write_jq_stub "$1" "$2" <<'STUB'
+set -o pipefail
+"${next_jq}" "$@" | sed -e 's/$/\r/'
+STUB
+}
+
+# Before Git Bash starts a Windows program, it rewrites every argument that
+# looks like a POSIX path into a Windows one under its install root:
+# /mnt/c/x.json becomes C:/<git-root>/mnt/c/x.json. Arguments holding a glob
+# character are left alone, so only wildcard-free paths are affected.
+write_arg_rewriting_jq_stub() {
+
+    write_jq_stub "$1" "$2" <<'STUB'
+readonly msys_root='C:/msys-root'
+args=()
+for arg in "$@"; do
+    if [[ "${arg}" == /* && "${arg}" != *[*?]* ]]; then
+        arg="${msys_root}${arg}"
+    fi
+    args+=("${arg}")
+done
+exec "${next_jq}" "${args[@]}"
+STUB
+}
 
 install_crlf_jq_stub() {
 
-    local real_jq
-    real_jq="$(command -v jq)"
-
-    mkdir -p "${TEST_TMP}/stubs"
-
-    # pipefail so a real jq failure still propagates through the sed - without
-    # it the stub would mask every parse error and the guards above would pass
-    # for the wrong reason.
-    cat >"${TEST_TMP}/stubs/jq" <<STUB
-#!/usr/bin/env bash
-set -o pipefail
-"${real_jq}" "\$@" | sed -e 's/\$/\r/'
-STUB
-    chmod +x "${TEST_TMP}/stubs/jq"
+    write_crlf_jq_stub jq "${REAL_JQ}"
 }
 
-@test "translates a bulk pattern even when jq writes CRLF (Windows jq)" {
+install_arg_rewriting_jq_stub() {
+
+    write_arg_rewriting_jq_stub jq "${REAL_JQ}"
+}
+
+# Git Bash rewrites the arguments before jq.exe starts, and jq.exe then writes
+# CRLF, so the rewriting stub is the one on PATH and it calls the CRLF one.
+install_windows_jq_stub() {
+
+    write_crlf_jq_stub jq-crlf "${REAL_JQ}"
+    write_arg_rewriting_jq_stub jq "${STUBS_DIR}/jq-crlf"
+}
+
+# ---------------------------------------------------------------------------
+# jq writes CRLF
+#
+# `mapfile -t` strips only the newline, so a CR left on each collected path
+# would key the lookup map by "<path>\r". Step 2 looks paths up by the clean
+# JSON string, so every path would ride through in its Windows form and fail
+# much later inside the vm_files role.
+# ---------------------------------------------------------------------------
+
+@test "translates a bulk pattern even when jq writes CRLF" {
 
     install_crlf_jq_stub
 
-    run env PATH="${TEST_TMP}/stubs:${PATH}" "${BASH_BIN}" -c 'printf "%s" "$2" | "$1"' _ "${SCRIPT}" \
-        '[{"vmName":"ubuntu-02-ci","files":[{"pattern":"C:\\jars\\*.jar","targetDir":"/opt/app/lib"}]}]'
+    resolve '[{"vmName":"ubuntu-02-ci","files":[{"pattern":"C:\\jars\\*.jar","targetDir":"/opt/app/lib"}]}]'
 
     [ "${status}" -eq 0 ]
-
-    got="$(printf '%s' "${output}" | tr -d '\r' | jq -r '.vm_files_by_host["ubuntu-02-ci"][0].pattern')"
-
-    [ "${got}" = "/mnt/c/jars/*.jar" ]
+    [ "$(emitted '.vm_files_by_host["ubuntu-02-ci"][0].pattern')" = "/mnt/c/jars/*.jar" ]
 }
 
 @test "translates a single-form source even when jq writes CRLF" {
 
     install_crlf_jq_stub
 
-    run env PATH="${TEST_TMP}/stubs:${PATH}" "${BASH_BIN}" -c 'printf "%s" "$2" | "$1"' _ "${SCRIPT}" \
-        '[{"vmName":"ubuntu-01-ci","files":[{"source":"C:\\payloads\\app.jar","target":"/opt/app/app.jar"}]}]'
+    resolve '[{"vmName":"ubuntu-01-ci","files":[{"source":"C:\\payloads\\app.jar","target":"/opt/app/app.jar"}]}]'
 
     [ "${status}" -eq 0 ]
-
-    got="$(printf '%s' "${output}" | tr -d '\r' | jq -r '.vm_files_by_host["ubuntu-01-ci"][0].source')"
-
-    [ "${got}" = "/mnt/c/payloads/app.jar" ]
+    [ "$(emitted '.vm_files_by_host["ubuntu-01-ci"][0].source')" = "/mnt/c/payloads/app.jar" ]
 }
 
 @test "still rejects a non-array config when jq writes CRLF" {
@@ -277,11 +356,10 @@ STUB
     # does not, so the script must not depend on either.
     install_crlf_jq_stub
 
-    run env PATH="${TEST_TMP}/stubs:${PATH}" "${BASH_BIN}" -c 'printf "%s" "$2" | "$1"' _ "${SCRIPT}" \
-        '{"vmName":"ubuntu-01-ci"}'
+    resolve '{"vmName":"ubuntu-01-ci"}'
 
     [ "${status}" -ne 0 ]
-    [[ "${output}" == *"must be a JSON array"* ]]
+    [[ "${stderr}" == *"must be a JSON array"* ]]
 }
 
 @test "accepts a valid array config when jq writes CRLF" {
@@ -290,59 +368,24 @@ STUB
     # would reject a perfectly good config with "got array".
     install_crlf_jq_stub
 
-    run env PATH="${TEST_TMP}/stubs:${PATH}" "${BASH_BIN}" -c 'printf "%s" "$2" | "$1"' _ "${SCRIPT}" \
-        '[{"vmName":"ubuntu-01-ci","files":[]}]'
+    resolve '[{"vmName":"ubuntu-01-ci","files":[]}]'
 
     [ "${status}" -eq 0 ]
-    [[ "${output}" != *"must be a JSON array"* ]]
+    [[ "${stderr}" != *"must be a JSON array"* ]]
 }
 
 # ---------------------------------------------------------------------------
-# Git Bash argument rewriting (the same Git Bash launch)
+# Git Bash rewrites jq arguments
 #
-# Before Git Bash starts a Windows program such as jq.exe, it rewrites every
-# argument that looks like a POSIX path into a Windows one under its install
-# root: /mnt/c/x.json becomes C:/<git-root>/mnt/c/x.json. Arguments holding a
-# glob character are left alone, which is why only wildcard-free paths broke.
 # A translated path handed to jq on its command line arrives mangled, and the
 # vm_files role rejects it as not absolute.
-#
-# The stub applies that rule to every argument before calling the real jq.
 # ---------------------------------------------------------------------------
-
-readonly MSYS_STUB_ROOT="C:/msys-root"
-
-install_arg_rewriting_jq_stub() {
-
-    local real_jq
-    real_jq="$(command -v jq)"
-
-    mkdir -p "${TEST_TMP}/stubs"
-
-    cat >"${TEST_TMP}/stubs/jq" <<STUB
-#!/usr/bin/env bash
-args=()
-for arg in "\$@"; do
-    if [[ "\${arg}" == /* && "\${arg}" != *[*?]* ]]; then
-        arg="${MSYS_STUB_ROOT}\${arg}"
-    fi
-    args+=("\${arg}")
-done
-exec "${real_jq}" "\${args[@]}"
-STUB
-    chmod +x "${TEST_TMP}/stubs/jq"
-}
-
-resolve_with_arg_rewriting_jq() {
-
-    install_arg_rewriting_jq_stub
-    run env PATH="${TEST_TMP}/stubs:${PATH}" "${BASH_BIN}" -c 'printf "%s" "$2" | "$1"' _ "${SCRIPT}" "$1"
-}
 
 @test "translates a wildcard-free bulk pattern when Git Bash rewrites jq arguments" {
 
-    resolve_with_arg_rewriting_jq \
-        '[{"vmName":"a","files":[{"pattern":"C:\\mods\\lunalib\\mod_info.json","targetDir":"/opt/mods"}]}]'
+    install_arg_rewriting_jq_stub
+
+    resolve '[{"vmName":"a","files":[{"pattern":"C:\\mods\\lunalib\\mod_info.json","targetDir":"/opt/mods"}]}]'
 
     [ "${status}" -eq 0 ]
     [ "$(emitted '.vm_files_by_host.a[0].pattern')" = "/mnt/c/mods/lunalib/mod_info.json" ]
@@ -350,8 +393,9 @@ resolve_with_arg_rewriting_jq() {
 
 @test "translates a single-form source when Git Bash rewrites jq arguments" {
 
-    resolve_with_arg_rewriting_jq \
-        '[{"vmName":"a","files":[{"source":"C:\\payloads\\app.jar","target":"/opt/app/app.jar"}]}]'
+    install_arg_rewriting_jq_stub
+
+    resolve '[{"vmName":"a","files":[{"source":"C:\\payloads\\app.jar","target":"/opt/app/app.jar"}]}]'
 
     [ "${status}" -eq 0 ]
     [ "$(emitted '.vm_files_by_host.a[0].source')" = "/mnt/c/payloads/app.jar" ]
@@ -359,10 +403,37 @@ resolve_with_arg_rewriting_jq() {
 
 @test "translates wildcard and wildcard-free paths alike when Git Bash rewrites jq arguments" {
 
-    resolve_with_arg_rewriting_jq \
-        '[{"vmName":"a","files":[{"pattern":"C:\\jars\\*.jar","targetDir":"/opt/lib"},{"pattern":"C:\\mods\\mod_info.json","targetDir":"/opt/mods"}]}]'
+    install_arg_rewriting_jq_stub
+
+    resolve '[{"vmName":"a","files":[{"pattern":"C:\\jars\\*.jar","targetDir":"/opt/lib"},{"pattern":"C:\\mods\\mod_info.json","targetDir":"/opt/mods"}]}]'
 
     [ "${status}" -eq 0 ]
     [ "$(emitted '.vm_files_by_host.a[0].pattern')" = "/mnt/c/jars/*.jar" ]
     [ "$(emitted '.vm_files_by_host.a[1].pattern')" = "/mnt/c/mods/mod_info.json" ]
+}
+
+# ---------------------------------------------------------------------------
+# Windows jq: both behaviours at once, as the real jq.exe under Git Bash
+# ---------------------------------------------------------------------------
+
+@test "translates a fleet's mixed entries under Windows jq" {
+
+    install_windows_jq_stub
+
+    resolve '[
+        {"vmName":"ubuntu-01-router"},
+        {"vmName":"ubuntu-02-ci","files":[
+            {"pattern":"C:\\mods\\lunalib\\jars\\*.jar","targetDir":"/opt/mods/lunalib/jars","recurse":true},
+            {"pattern":"C:\\mods\\lunalib\\mod_info.json","targetDir":"/opt/mods/lunalib"},
+            {"pattern":"C:\\mods\\Console Commands\\mod_info.json","targetDir":"/opt/mods/ConsoleCommands"},
+            {"source":"D:\\payloads\\app.jar","target":"/opt/app/app.jar"}
+        ]}
+    ]'
+
+    [ "${status}" -eq 0 ]
+    [ "$(emitted '.vm_files_by_host["ubuntu-01-router"] | length')" = "0" ]
+    [ "$(emitted '.vm_files_by_host["ubuntu-02-ci"][0].pattern')" = "/mnt/c/mods/lunalib/jars/*.jar" ]
+    [ "$(emitted '.vm_files_by_host["ubuntu-02-ci"][1].pattern')" = "/mnt/c/mods/lunalib/mod_info.json" ]
+    [ "$(emitted '.vm_files_by_host["ubuntu-02-ci"][2].pattern')" = "/mnt/c/mods/Console Commands/mod_info.json" ]
+    [ "$(emitted '.vm_files_by_host["ubuntu-02-ci"][3].source')" = "/mnt/d/payloads/app.jar" ]
 }
