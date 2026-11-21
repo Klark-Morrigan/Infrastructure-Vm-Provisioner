@@ -26,16 +26,16 @@ _bats_resolve_bash() {
 }
 
 # Stand up a fake COMMON_AUTOMATION_ROOT carrying the cross-repo helpers the
-# ops/ scripts source at runtime - currently scripts/log.sh. The stub is
+# ops/ scripts source at runtime - currently .github/lib/log.sh. The stub is
 # self-contained (no colors.sh dependency) and reproduces the real logger's
 # no-colour output, which is exactly what the real logger emits against a
 # non-TTY test stream, so log assertions hold against either.
 _bats_install_common_automation_stub() {
     local root="$1"
-    mkdir -p "${root}/scripts"
-    cat >"${root}/scripts/log.sh" <<'STUB'
+    mkdir -p "${root}/.github/lib"
+    cat >"${root}/.github/lib/log.sh" <<'STUB'
 #!/usr/bin/env bash
-# Test stub for Common-Automation/scripts/log.sh - the [ts] LEVEL <script>:
+# Test stub for Common-Automation/.github/lib/log.sh - the [ts] LEVEL <script>:
 # stderr format, minus colour, with no cross-repo colors.sh dependency.
 _log_emit() {
     local level="$1"
@@ -51,7 +51,7 @@ STUB
 }
 
 # The second cross-repo helper an ops/ wrapper sources (via imports/_timing.sh):
-# Common-Automation's scripts/timing.sh. Only wrappers pull it in, so it is a
+# Common-Automation's .github/lib/timing.sh. Only wrappers pull it in, so it is a
 # separate installer rather than part of the stub above. The span verbs are
 # no-ops, but timing_enabled reproduces the REAL predicate - true exactly when
 # TIMING_TREE_OUTPUT_PATH is set. Hardcoding it false would be simpler and
@@ -59,8 +59,8 @@ STUB
 # minted and handed to the callback) unreachable from every test.
 _bats_install_timing_stub() {
     local root="$1"
-    mkdir -p "${root}/scripts"
-    cat >"${root}/scripts/timing.sh" <<'STUB'
+    mkdir -p "${root}/.github/lib"
+    cat >"${root}/.github/lib/timing.sh" <<'STUB'
 #!/usr/bin/env bash
 timing_init()                 { :; }
 timing_span_begin()           { :; }

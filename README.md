@@ -1855,6 +1855,10 @@ Four pieces, all under `hyper-v/ubuntu/Ansible/ops/`:
   Schema validation is **not** duplicated here - the `vm_files` role owns those
   rules, so a malformed entry rides through untouched to be reported by the
   component that knows them.
+  Under Git Bash `jq` is the Windows `jq.exe`,
+  so the script strips the CR from every line jq writes
+  and hands it translated paths only on stdin:
+  Git Bash rewrites any `/`-leading argument it passes to a Windows program.
 - `_create-controller-tempfile.sh` - the two-spelling handoff
   (`create_controller_tempfile` + `resolve_controller_path`). It classifies the
   shell by `uname`, the same test the bridge uses for its own re-exec, and
@@ -2144,7 +2148,7 @@ scripts/fix-permissions.sh     # or scripts\fix-permissions.bat
 
 These runners delegate the cross-cutting linters and bats to Common-
 Automation's engine, pointed at this repo via the
-`COMMON_AUTOMATION_TARGET_REPO` env var, so a sibling checkout at
+`CONSUMER_REPO_PATH` env var, so a sibling checkout at
 `..\Common-Automation` is required. The lint runner additionally runs the
 composer ansible-lint through `scripts/run-lint-ansible.sh`, which reuses the
 shared Common-Ansible controller venv and puts the substrate roles on

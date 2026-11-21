@@ -2,7 +2,7 @@
 setlocal
 rem Explorer-double-click launcher for scripts/fix-permissions.sh
 rem (this repo's local entry). The local .sh transitively exec's
-rem Common-Automation's canonical fix engine with COMMON_AUTOMATION_TARGET_REPO
+rem Common-Automation's canonical fix engine with CONSUMER_REPO_PATH
 rem set, so the chain is local.bat -> local.sh -> shared engine - one
 rem entry point per layer, no shortcutting.
 rem
