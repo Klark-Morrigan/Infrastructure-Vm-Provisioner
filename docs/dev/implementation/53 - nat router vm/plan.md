@@ -318,10 +318,11 @@ agent without doubling agent runtime.
   `Invoke-EgressAssertions.ps1` SSHes into the workload VM and
   fetches two real production endpoints with
   `curl -fsS --max-time 30`:
-    - `https://api.github.com` - GitHub Actions runner
-      registration depends on this.
-    - `https://api.nuget.org/v3/index.json` - NuGet host-side
-      `.nupkg` prefetch and tool install depend on this.
+  - `https://api.github.com` - GitHub Actions runner
+    registration depends on this.
+  - `https://api.nuget.org/v3/index.json` - NuGet host-side
+    `.nupkg` prefetch and tool install depend on this.
+
   Each endpoint maps to an actual downstream dependency, so a
   regression in cert trust, DNS path, or MTU surfaces against the
   same surface the real tests use. The assertion is dispatched
@@ -411,4 +412,3 @@ sequenceDiagram
     P->>H: remove VMs + PrivateSwitch-E2E
     Note over H: External vSwitch left intact (host-shared)
 ```
-

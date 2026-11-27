@@ -169,9 +169,9 @@ re-architecting.
 
 The .NET tools ecosystem allows tools to be placed on a box from
 several sources: `dotnet tool install -g` run by an interactive user
-(lands in `~/.dotnet/tools/`), `dotnet tool install --tool-path
-<dir>` run ad-hoc by an operator into an arbitrary directory, tools
-shipped by the base image, tools manually unpacked, etc. The
+(lands in `~/.dotnet/tools/`),
+`dotnet tool install --tool-path <dir>` run ad-hoc by an operator into
+an arbitrary directory, tools shipped by the base image, tools manually unpacked, etc. The
 reconciled provider in this feature manages **only** the tools it
 itself installed, and identifies them by the manifest sidecar - not
 by inspecting `.store/`, the tools dir, or `dotnet tool list`

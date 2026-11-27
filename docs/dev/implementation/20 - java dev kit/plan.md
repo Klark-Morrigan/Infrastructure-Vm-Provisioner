@@ -6,8 +6,6 @@ See [problem.md](problem.md) for context, schema, and rationale.
 
 - [Step 1 - Schema validation for `javaDevKit`](#step-1---schema-validation-for-javadevkit)
 - [Step 2 - Adoptium version resolver](#step-2---adoptium-version-resolver)
-- [Step 3 - Host-side prefetch and cache](#step-3---host-side-prefetch-and-cache)
-- [Step 4 - Wire prefetch into `provision.ps1`](#step-4---wire-prefetch-into-provisionps1)
 - [Step 5 - Out-of-band post-provisioning pipeline](#step-5---out-of-band-post-provisioning-pipeline)
 - [Step 6 - E2E test coverage for the JDK path](#step-6---e2e-test-coverage-for-the-jdk-path)
 
@@ -406,11 +404,13 @@ single per-software function. Reasons:
 - Stages `$Vm._jdkTarballPath` via `Add-VmFileServerFile`.
 - One SSH round-trip under `set -e`, guarded by
   `[ -f /opt/jdk-{vendor}-{resolvedVersion}/release ]` for idempotency:
+
   ```sh
   curl -fsSL "$url" | sudo tar -xzf - --strip-components=1 -C "$install_dir"
   printf 'export JAVA_HOME=%s\nexport PATH="$JAVA_HOME/bin:$PATH"\n' \
     "$install_dir" | sudo tee /etc/profile.d/jdk.sh > /dev/null
   ```
+
 - Throws with `$Vm.vmName` named in the message on non-zero exit.
 
 **Behaviour - `Copy-VmFiles -SshClient -Server -Vm`**

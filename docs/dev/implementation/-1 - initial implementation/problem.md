@@ -1,7 +1,7 @@
----
 # Problem Statement
 
 ## Index
+
 - [What we're building](#what-were-building)
 - [For the layperson](#for-the-layperson)
 - [Constraints](#constraints)

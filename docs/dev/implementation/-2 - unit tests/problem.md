@@ -1,8 +1,8 @@
 # Problem: Unit Test Coverage
 
 ## Index
+
 - [Summary](#summary)
-- [For Laymen](#for-laymen)
 - [What Is and Isn't Testable](#what-is-and-isnt-testable)
 - [Pattern Reference](#pattern-reference)
 
@@ -35,6 +35,7 @@ module installed.
 ## Pattern Reference
 
 Mirrors [Infrastructure.Secrets test setup](../../../../../Infrastructure-Secrets):
+
 - `Tests/` folder at repo root with `*.Tests.ps1` files
 - `Run-Tests.ps1` at repo root - auto-installs Pester 5, runs all tests,
   exits non-zero on failure

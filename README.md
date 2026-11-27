@@ -1047,70 +1047,70 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
     env-vars step skips the SSH write when the desired block already
     matches what is on disk.
 
-    ### Reconciler
+### Reconciler
 
-    The toolchain **reconciler** is the PowerShell toolchain path that
-    `provision` runs in-line by default (see
-    [Toolchain engine](#toolchain-engine-selecting-the-live-path) for how it
-    is selected against the Ansible alternative). Unless `provision` is
-    called with `-SkipToolchains`, post-provisioning runs the reconciler in
-    parallel with the `files` / `javaDevKit` / `envVars` branches. For each
-    VM the orchestrator:
+The toolchain **reconciler** is the PowerShell toolchain path that
+`provision` runs in-line by default (see
+[Toolchain engine](#toolchain-engine-selecting-the-live-path) for how it
+is selected against the Ansible alternative). Unless `provision` is
+called with `-SkipToolchains`, post-provisioning runs the reconciler in
+parallel with the `files` / `javaDevKit` / `envVars` branches. For each
+VM the orchestrator:
 
-    1. Calls `Initialize-VmManifestStore` once, creating
-       `/var/lib/infra-provisioner/manifests/` (root:root, 0755) — the
-       single source of truth for "what is installed by the reconciler
-       on this VM".
-    2. Calls `Invoke-ToolchainReconciliation` with the array returned by
-       `Get-Providers`. Each provider declares the JSON sub-field it
-       owns (e.g. `javaDevKit`, `dotnetSdk`) and the four operations
-       — `Get-DesiredVersions`, `Get-InstalledVersions`,
-       `Install-Version`, `Uninstall-Version` — the orchestrator
-       dispatches in JSON-declaration order.
+1. Calls `Initialize-VmManifestStore` once, creating
+   `/var/lib/infra-provisioner/manifests/` (root:root, 0755) — the
+   single source of truth for "what is installed by the reconciler
+   on this VM".
+2. Calls `Invoke-ToolchainReconciliation` with the array returned by
+   `Get-Providers`. Each provider declares the JSON sub-field it
+   owns (e.g. `javaDevKit`, `dotnetSdk`) and the four operations
+   — `Get-DesiredVersions`, `Get-InstalledVersions`,
+   `Install-Version`, `Uninstall-Version` — the orchestrator
+   dispatches in JSON-declaration order.
 
-    Registered providers (in dispatch order):
+Registered providers (in dispatch order):
 
-    | Provider              | JSON field    | Notes                                                                                                                                                                                                                                       |
-    |-----------------------|---------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-    | `JdkProvider`         | `javaDevKit`  | Manifest-driven install/uninstall of one Temurin JDK per VM.                                                                                                                                                                                |
-    | `DotnetSdkProvider`   | `dotnetSdk`   | Manifest-driven install/uninstall of one .NET SDK per VM. Exports `DOTNET_ROOT`, `DOTNET_TOOLS_ROOT`, and sets `DOTNET_CLI_TELEMETRY_OPTOUT=1` via `/etc/profile.d/dotnet.sh`. `PATH` prepends both the SDK install dir and the tools dir.   |
-    | `DotnetToolsProvider` | `dotnetTools` | Nested under `DotnetSdkProvider`. Manifest-driven install/uninstall of one or more .NET global tools system-wide under `/usr/local/share/dotnet/tools/`, with per-command symlinks under `/usr/local/bin/`. One manifest per `(id, version)`. |
+| Provider              | JSON field    | Notes                                                                                                                                                                                                                                       |
+|-----------------------|---------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `JdkProvider`         | `javaDevKit`  | Manifest-driven install/uninstall of one Temurin JDK per VM.                                                                                                                                                                                |
+| `DotnetSdkProvider`   | `dotnetSdk`   | Manifest-driven install/uninstall of one .NET SDK per VM. Exports `DOTNET_ROOT`, `DOTNET_TOOLS_ROOT`, and sets `DOTNET_CLI_TELEMETRY_OPTOUT=1` via `/etc/profile.d/dotnet.sh`. `PATH` prepends both the SDK install dir and the tools dir.   |
+| `DotnetToolsProvider` | `dotnetTools` | Nested under `DotnetSdkProvider`. Manifest-driven install/uninstall of one or more .NET global tools system-wide under `/usr/local/share/dotnet/tools/`, with per-command symlinks under `/usr/local/bin/`. One manifest per `(id, version)`. |
 
-    See
-    [docs/dev/implementation/42 - dotnet sdk/](docs/dev/implementation/42%20-%20dotnet%20sdk/)
-    for the full provider contract.
+See
+[docs/dev/implementation/42 - dotnet sdk/](docs/dev/implementation/42%20-%20dotnet%20sdk/)
+for the full provider contract.
 
-    **Nested providers (hybrid dispatch).** A provider may declare
-    a `ParentProvider` field naming another provider's `Name`.
-    Nested providers run in the orchestrator's main loop just like
-    top-level providers, in `Get-Providers` array order (convention:
-    a parent appears before its children). The `ParentProvider`
-    field is pure metadata used by the children walker built into
-    `Invoke-ToolchainReconciliation`: before a parent provider's
-    `Uninstall-Version` runs, the walker reads the parent manifest's
-    `children` array (each entry is `{ provider, manifestPath }`)
-    and dispatches the matching nested provider's `Uninstall-Version`
-    first, so a child install that lives under the parent's install
-    dir is torn down before its host directory disappears. Every
-    other operation (install, standalone uninstall, diff/NoOp) goes
-    through the main loop, including for nested providers — so a
-    child install fires even when the parent's diff is a NoOp. A
-    child entry that names an unregistered provider produces a
-    warning and leaves the child in place rather than blocking the
-    parent's removal forever. The first real consumer of this
-    contract is `DotnetToolsProvider` (global `dotnet` nuget tools
-    nested under `DotnetSdkProvider`) — see
-    [feature 43](docs/dev/implementation/43%20-%20dotnet%20nuget/).
+**Nested providers (hybrid dispatch).** A provider may declare
+a `ParentProvider` field naming another provider's `Name`.
+Nested providers run in the orchestrator's main loop just like
+top-level providers, in `Get-Providers` array order (convention:
+a parent appears before its children). The `ParentProvider`
+field is pure metadata used by the children walker built into
+`Invoke-ToolchainReconciliation`: before a parent provider's
+`Uninstall-Version` runs, the walker reads the parent manifest's
+`children` array (each entry is `{ provider, manifestPath }`)
+and dispatches the matching nested provider's `Uninstall-Version`
+first, so a child install that lives under the parent's install
+dir is torn down before its host directory disappears. Every
+other operation (install, standalone uninstall, diff/NoOp) goes
+through the main loop, including for nested providers — so a
+child install fires even when the parent's diff is a NoOp. A
+child entry that names an unregistered provider produces a
+warning and leaves the child in place rather than blocking the
+parent's removal forever. The first real consumer of this
+contract is `DotnetToolsProvider` (global `dotnet` nuget tools
+nested under `DotnetSdkProvider`) — see
+[feature 43](docs/dev/implementation/43%20-%20dotnet%20nuget/).
 
-    **Guest layout for `dotnetTools`.** Tools install system-wide
-    under `/usr/local/share/dotnet/tools/` (the `--tool-path` argument
-    to `dotnet tool install`). Each installed tool's commands are
-    discovered by parsing `dotnet tool list --tool-path …` output and
-    surfaced as symlinks under `/usr/local/bin/{cmd}` so non-login
-    shells (sshd command exec, systemd units, cron) find them without
-    sourcing `/etc/profile.d/`. Login shells pick the same dir up
-    automatically because `DotnetSdkProvider`'s `/etc/profile.d/dotnet.sh`
-    prepends `DOTNET_TOOLS_ROOT` to `PATH`.
+**Guest layout for `dotnetTools`.** Tools install system-wide
+under `/usr/local/share/dotnet/tools/` (the `--tool-path` argument
+to `dotnet tool install`). Each installed tool's commands are
+discovered by parsing `dotnet tool list --tool-path …` output and
+surfaced as symlinks under `/usr/local/bin/{cmd}` so non-login
+shells (sshd command exec, systemd units, cron) find them without
+sourcing `/etc/profile.d/`. Login shells pick the same dir up
+automatically because `DotnetSdkProvider`'s `/etc/profile.d/dotnet.sh`
+prepends `DOTNET_TOOLS_ROOT` to `PATH`.
 
 ### Phase-timing report and cross-process export
 
@@ -1195,7 +1195,7 @@ the host SSH relay. Run it when an Ansible flow reports UNREACHABLE, or
 after any host networking change (ICS toggle, switch recreate, host
 reboot, Wi-Fi LAN change).
 
-```
+```powershell
 .\scripts\Test-RouterAccess.ps1
 ```
 
@@ -2101,7 +2101,7 @@ CI runs on pull requests targeting `master` via `.github/workflows/ci.yml`,
 which delegates to the shared reusable workflow in
 [Common-PowerShell](https://github.com/Klark-Morrigan/Common-PowerShell):
 
-```
+```text
 Klark-Morrigan/Common-PowerShell/.github/workflows/ci-powershell.yml@master
 ```
 
@@ -2169,7 +2169,7 @@ reject CRLF shebangs.
 
 ## Repo structure
 
-```
+```text
 Infrastructure-VM-Provisioner/
 |- .gitattributes           # Pins *.sh to LF and *.bat to CRLF
 |- .github/

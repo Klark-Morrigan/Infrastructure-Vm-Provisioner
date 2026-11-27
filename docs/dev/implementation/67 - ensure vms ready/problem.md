@@ -152,7 +152,7 @@ New file
 The single source of truth for "is this VM SSH-accessible right now,
 accounting for the router topology". Signature (sketch):
 
-```
+```text
 Wait-VmSshAccessible
     -Vm          <vm def>            # the VM to reach
     -RouterVm    <router def | $null># its env router, or $null if standalone/router itself
@@ -347,7 +347,7 @@ zero otherwise. The script never throws past the orchestration loop.
   attempting a doomed tunnel; the run still completes and exits 1.
 - A single VM failing to power on or to become reachable does not abort
   the run; remaining VMs are still processed, and the failed VM's name
-  + reason appear in the output. Exit code is 1 if any VM is not Ready,
+  plus reason appear in the output. Exit code is 1 if any VM is not Ready,
   0 otherwise. The script never throws past the loop.
 - Re-running against an already-ready fleet is a no-op that still exits
   0: `Start-VmIfStopped` reports `AlreadyRunning` for each VM and every
