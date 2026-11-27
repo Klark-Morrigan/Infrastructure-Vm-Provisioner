@@ -869,8 +869,9 @@ Run as Administrator after `setup-secrets.ps1` has stored the config.
 | `-SkipToolchains` | Suppresses the in-line toolchain reconciler: this run installs nothing. See [Toolchain engine](#toolchain-engine-selecting-the-live-path). |
 | `-SkipFiles` | Suppresses the in-line `files` transport: this run copies nothing. See [File transport](#file-transport-the-two-chains). |
 | `-SkipEnvVars` | Suppresses the in-line `envVars` transport: this run writes no managed block, and retracts none either. See [Which engine runs](#which-engine-runs). |
+| `-AllowOtherInternetRoute` | Lets the host network preflight pass when internet traffic leaves through an adapter other than the one ICS shares: check 8's FAIL becomes a WARN that still prints. For a false positive only. See [`Test-HostNetworkPreflight.ps1`](#test-hostnetworkpreflightps1). |
 
-All three switches are pure suppression - none hands off to the Ansible
+The three `-Skip*` switches are pure suppression - none hands off to the Ansible
 counterpart, which is a second command you run yourself. A VM whose only
 opt-in field is suppressed opens no SSH session and no file server at all.
 Neither relaxes validation: a `files` entry naming a `source` that does not
@@ -962,13 +963,18 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
       via shared MAC at the AP), missing connected route, IP
       collision between host vNIC and any VM on that switch,
       vEthernet's network profile being `Public` (which blocks ICS's
-      DNS-In firewall rule and silently breaks VM DNS), or the ICS
-      DNS proxy not answering at `192.168.137.1`. The last two are
+      DNS-In firewall rule and silently breaks VM DNS), the ICS
+      DNS proxy not answering at `192.168.137.1`, or internet traffic
+      leaving through an adapter other than the one ICS shares
+      (a VPN holding the route, which strands the VMs while the host
+      stays online). The profile and the DNS proxy are
       **auto-repaired** in the provisioner gate: profile gets
       flipped to `Private`, and ICS sharing is toggled off+on via
       the `HNetCfg` COM API to kick a hung DNS proxy. One repair
       attempt per check; if it doesn't take, surfaces as a clean
-      FAIL with the next steps named in the error. See
+      FAIL with the next steps named in the error. The internet-route
+      check is report-only - disconnecting a VPN is the operator's
+      call - and `-AllowOtherInternetRoute` downgrades it to a WARN. See
       [`Test-HostNetworkPreflight.ps1`](#test-hostnetworkpreflightps1)
       for the manual entry point with the same checks.
    4. **Router-IP discovery** for existing routers
@@ -1176,6 +1182,7 @@ provisioning run.
 | 5 | No IP collision between host vNIC and any VM on the switch | The Wi-Fi External-bridge MAC-sharing smoking gun -> host steals VM traffic via local routing. |
 | 6 | vEthernet network profile = Private (Internal switches only) | `Public` blocks ICS's auto-generated DNS-In firewall rule so VM DNS queries silently drop. Auto-repaired when `-AutoRepair` is set (only toggles when current is Public; never redundantly). |
 | 7 | ICS DNS proxy answers at `$DnsProbeTarget` | The proxy's known broken state: it answers UDP/53 queries with TCP RSTs. Auto-repaired via `Reset-IcsSharing` (the programmatic equivalent of toggling the WiFi Sharing checkbox), one attempt + one re-probe; failure surfaces as a clean FAIL naming the one applicable fix (start the service / repair host DNS / restart + re-toggle + reboot) followed by the commands that carry it out, one per line, ending with the re-probe. |
+| 8 | Internet traffic leaves via the WAN adapter ICS shares (Internal switches only) | A VPN holds the internet route ahead of the WAN adapter. ICS NATs the VMs' traffic only out of the adapter it shares, so the VMs have no way out while the host itself stays online - and checks 1-7 all pass, the DNS probe included. Also catches ICS sharing the wrong one of two connected adapters, and a host with no internet route at all. Never auto-repaired; `-AllowOtherInternetRoute` downgrades the FAIL to a WARN. |
 
 **Parameters:**
 
@@ -1183,8 +1190,9 @@ provisioning run.
 |---|---|---|
 | `-SwitchName` | `ExternalSwitch-Shared` | The External vSwitch to inspect (matches `secret.json`'s `externalSwitchName`). |
 | `-DnsProbeTarget` | `192.168.137.1` | Address the DNS-via-ICS check probes (the host-side ICS gateway IP). |
-| `-WanAdapterName` | `Wi-Fi` | WAN side passed to `Reset-IcsSharing` during auto-repair. |
+| `-WanAdapterName` | the Up wireless adapter, auto-detected | WAN side: what check 8 compares the internet route against, and what `Reset-IcsSharing` toggles during auto-repair. Pass it to pin the name, such as on an Ethernet-WAN host. |
 | `-AutoRepair` | off | Opt INTO check 6/7 auto-repair. Default off for the manual entry point because an interactive operator may have other VMs alive that would lose their default route during an ICS toggle. The provisioner gate calls `Assert-HostNetworkPreflight` directly with auto-repair on (no live VMs at preflight time). |
+| `-AllowOtherInternetRoute` | off | Downgrade check 8's FAIL to a WARN, for a host where internet traffic rightly leaves through another adapter. The finding still prints. `provision.ps1` takes the same switch. |
 
 ---
 
@@ -2199,12 +2207,13 @@ Infrastructure-VM-Provisioner/
 |     |  |  |  `- Invoke-VmRuntimeDiag.ps1      # Host-side + best-effort guest-side runtime snapshot. Auto-fires from create-vm.ps1's wait-for-SSH and router-side reachability timeout paths. Manual entry point: scripts\Get-VmRuntimeDiag.ps1.
 |     |  |  `- network/
 |     |  |     |- preflight/
-|     |  |     |  |- Assert-HostNetworkPreflight.ps1   # Orchestrator: reads the host state once (switch, vEthernet, its IPv4) and routes every check's findings into one accumulator. Checks 1-5 live in checks\; the profile + DNS checks (6, 7) delegate to Infrastructure.Network.Windows (Test-HostNetworkProfileSetting / Test-IcsDnsProxyReachable). Throws on FAIL via Assert-PreflightFindings. Gate at provision.ps1 step 4; manual entry: scripts\Test-HostNetworkPreflight.ps1.
+|     |  |     |  |- Assert-HostNetworkPreflight.ps1   # Orchestrator: reads the host state once (switch, vEthernet, its IPv4) and routes every check's findings into one accumulator. Checks 1-5 and 8 live in checks\; the profile + DNS checks (6, 7) delegate to Infrastructure.Network.Windows (Test-HostNetworkProfileSetting / Test-IcsDnsProxyReachable). Throws on FAIL via Assert-PreflightFindings. Gate at provision.ps1 step 4; manual entry: scripts\Test-HostNetworkPreflight.ps1.
 |     |  |     |  |- Assert-PreflightFindings.ps1      # Multi-line throw collector: consolidates every FAIL finding into one operator-facing error.
 |     |  |     |  `- checks/                           # One check per file; each takes the host snapshot it needs and RETURNS findings rather than printing. Both loaders dot-source the folder wholesale.
 |     |  |     |     |- Test-ConnectedRouteToSubnet.ps1    # Check 4: a connected route to the vNIC's own subnet VIA that vNIC. Missing = VM traffic leaves by the Wi-Fi default gateway.
 |     |  |     |     |- Test-HostVmIpCollision.ps1         # Check 5: no VM on the switch reports the host vNIC's IPv4. The Wi-Fi External-bridge smoking gun (one MAC at the AP = one shared DHCP lease).
 |     |  |     |     |- Test-HostVNicReady.ps1             # Check 2: vEthernet is Up and carries an IPv4 - reported as two findings, since the causes and the fixes differ.
+|     |  |     |     |- Test-InternetRouteThroughWan.ps1   # Check 8: internet traffic leaves via the WAN adapter ICS shares. A VPN holding the route strands the VMs while the host stays online. Report-only; -AllowOtherInternetRoute downgrades FAIL to WARN.
 |     |  |     |     |- Test-IsCurrentSessionElevated.ps1  # Check 0: WindowsPrincipal admin predicate. Without elevation Get-VMSwitch returns nothing and every check below misreads as "switch missing".
 |     |  |     |     |- Test-SwitchMacExpectation.ps1      # Check 3: what the vEthernet MAC is allowed to be, per switch type (Internal: must NOT match a Wi-Fi NIC + ICS host IP; External: a shared Wi-Fi MAC is the DHCP-collision case).
 |     |  |     |     `- Test-VmSwitchPresent.ps1           # Check 1: the named switch exists. A FAIL here ends the preflight - everything downstream reads the switch.

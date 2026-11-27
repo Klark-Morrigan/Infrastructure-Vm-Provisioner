@@ -35,13 +35,17 @@
 #        Test-HostNetworkProfileSetting.
 #     7. The ICS DNS proxy answers on the path the VM is about to use.
 #        Delegated to Test-IcsDnsProxyReachable.
+#     8. Internet traffic leaves through the WAN adapter ICS shares
+#        (Internal switches only). A VPN holding the route strands the VMs
+#        while the host stays online. Report-only; -AllowOtherInternetRoute
+#        downgrades its FAIL to a WARN.
 #
 #   Every check is a function of its own that RETURNS findings; this
 #   function reads the host state once, hands each check the snapshot it
 #   needs, and routes what comes back into one accumulator. That split is
 #   what lets a check be tested against a state that is awkward to
 #   produce - a Down vNIC, a shared MAC - without mocking Hyper-V.
-#   Checks 1-5 live in checks\ beside this file; 6 and 7 live in
+#   Checks 1-5 and 8 live in checks\ beside this file; 6 and 7 live in
 #   Infrastructure.Network.Windows, being host-network facts with no
 #   Hyper-V or provisioner context.
 #
@@ -89,8 +93,18 @@ function Assert-HostNetworkPreflight {
         # when an operator wants to inspect state without mutating
         # it, or when another VM is mid-flight and an ICS toggle
         # would disrupt it.
-        [switch] $NoAutoRepair
+        [switch] $NoAutoRepair,
+
+        # Downgrade check 8's FAIL to a WARN, for a host where the internet
+        # route rightly leaves through another adapter. The finding stays in
+        # the report; only the block goes.
+        [switch] $AllowOtherInternetRoute
     )
+
+    # Any public address works: Windows answers which interface it would use,
+    # and a VPN's half-default routes (0.0.0.0/1 + 128.0.0.0/1) show up here
+    # as surely as a full default route.
+    $internetProbeAddress = '1.1.1.1'
 
     # Per-call verdict accumulator. Findings array drives both the
     # console output AND the throw message at the end - same source
@@ -105,15 +119,25 @@ function Assert-HostNetworkPreflight {
             [string] $Label,
             [string] $Detail
         )
+
         $color = switch ($Status) {
             'PASS' { 'Green' }
             'WARN' { 'Yellow' }
             'FAIL' { 'Red' }
         }
-        Write-Host ("  [{0}] {1}" -f $Status, $Label) -ForegroundColor $color
-        if ($Detail) { Write-Host "         $Detail" -ForegroundColor DarkGray }
+
+        Write-Host ("  [{0}] {1}" -f $Status, $Label) `
+            -ForegroundColor $color
+
+        if ($Detail) {
+            Write-Host "         $Detail" `
+                -ForegroundColor DarkGray
+        }
+
         $findings.Add([PSCustomObject]@{
-            Status = $Status; Label = $Label; Detail = $Detail
+            Status = $Status
+            Label = $Label
+            Detail = $Detail
         })
     }
 
@@ -124,12 +148,17 @@ function Assert-HostNetworkPreflight {
         param([object[]] $Finding)
 
         foreach ($f in $Finding) {
-            if ($f) { Add-Finding $f.Status $f.Label $f.Detail }
+            if ($f) {
+                Add-Finding `
+                    $f.Status `
+                    $f.Label `
+                    $f.Detail }
         }
     }
 
     Write-Host ""
-    Write-Host "--- Host network preflight: $SwitchName ---" -ForegroundColor Cyan
+    Write-Host "--- Host network preflight: $SwitchName ---" `
+        -ForegroundColor Cyan
 
     # 0. Admin check. Hyper-V / Get-Net* cmdlets need admin (or
     #    Hyper-V Administrators group). Without it, Get-VMSwitch
@@ -140,58 +169,97 @@ function Assert-HostNetworkPreflight {
     #    elevation check sits behind one named predicate instead of a
     #    raw WindowsPrincipal call inline here.
     if (-not (Test-IsCurrentSessionElevated)) {
-        Add-Finding FAIL "PowerShell session is elevated" `
-            "Hyper-V and Get-Net* cmdlets need admin (or Hyper-V Administrators group). Re-run from an elevated PowerShell."
-        Assert-PreflightFindings -Findings $findings -SwitchName $SwitchName
+
+        Add-Finding `
+            FAIL `
+            "PowerShell session is elevated" `
+            ("Hyper-V and Get-Net* cmdlets need admin (or Hyper-V Administrators group). " +
+                "Re-run from an elevated PowerShell.")
+
+        Assert-PreflightFindings `
+            -Findings $findings `
+            -SwitchName $SwitchName
+
         return
     }
-    Add-Finding PASS "PowerShell session is elevated" "Hyper-V cmdlets are reachable."
+    Add-Finding `
+        PASS `
+        "PowerShell session is elevated" `
+        "Hyper-V cmdlets are reachable."
 
     # 1. Switch existence + type. Fetched once here; every check below reads
     #    this same snapshot rather than re-querying Hyper-V.
-    $sw            = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
-    $switchFinding = Test-VmSwitchPresent -SwitchName $SwitchName -Switch $sw
+    $sw = Get-VMSwitch `
+        -Name $SwitchName `
+        -ErrorAction SilentlyContinue
+
+    $switchFinding = Test-VmSwitchPresent `
+        -SwitchName $SwitchName `
+        -Switch $sw
+
     Add-CheckFindings $switchFinding
+
     if ($switchFinding.Status -eq 'FAIL') {
+
         # No point running downstream checks - they all depend on the switch.
-        Assert-PreflightFindings -Findings $findings -SwitchName $SwitchName
+        Assert-PreflightFindings `
+            -Findings $findings `
+            -SwitchName $SwitchName
+
         return
     }
 
     # 2. Host vNIC up + IPv4. The address lookup is skipped when the adapter
     #    is absent - there is nothing to ask about - and the check reports the
     #    missing address either way.
-    $alias    = "vEthernet ($SwitchName)"
-    $vAdapter = Get-NetAdapter -Name $alias -ErrorAction SilentlyContinue
-    $vIp      = $null
+    $alias = "vEthernet ($SwitchName)"
+
+    $vAdapter = Get-NetAdapter `
+        -Name $alias `
+        -ErrorAction SilentlyContinue
+
+    $vIp = $null
+
     if ($vAdapter) {
-        $vIp = Get-NetIPAddress -InterfaceAlias $alias -AddressFamily IPv4 `
-                                -ErrorAction SilentlyContinue |
-               Select-Object -First 1
+
+        $vIp = Get-NetIPAddress `
+                -InterfaceAlias $alias `
+                -AddressFamily IPv4 `
+                -ErrorAction SilentlyContinue |
+            Select-Object -First 1
     }
-    Add-CheckFindings (Test-HostVNicReady -Alias $alias -Adapter $vAdapter -IpAddress $vIp)
+    Add-CheckFindings (Test-HostVNicReady `
+        -Alias $alias `
+        -Adapter $vAdapter `
+        -IpAddress $vIp)
 
     # 3. Switch-type-specific MAC expectations.
     #    Get-WirelessNetAdapter (Infrastructure.Network.Windows) is the
     #    shared "which NICs are Wi-Fi" predicate, so the matcher cannot
     #    drift between here and the manual preflight wrapper's WAN
     #    auto-detect.
-    Add-CheckFindings (Test-SwitchMacExpectation -Switch $sw `
-                                                 -Adapter $vAdapter `
-                                                 -IpAddress $vIp `
-                                                 -WirelessAdapter (Get-WirelessNetAdapter))
+    Add-CheckFindings (Test-SwitchMacExpectation `
+        -Switch $sw `
+        -Adapter $vAdapter `
+        -IpAddress $vIp `
+        -WirelessAdapter (Get-WirelessNetAdapter))
 
     # 4. Connected route to vNIC's subnet via vNIC.
-    Add-CheckFindings (Test-ConnectedRouteToSubnet -Alias $alias -IpAddress $vIp)
+    Add-CheckFindings (Test-ConnectedRouteToSubnet `
+        -Alias $alias `
+        -IpAddress $vIp)
 
     # 5. IP collision between host vNIC and any VM on the same switch.
-    Add-CheckFindings (Test-HostVmIpCollision -SwitchName $SwitchName `
-                                              -Alias $alias `
-                                              -IpAddress $vIp)
+    Add-CheckFindings (Test-HostVmIpCollision `
+        -SwitchName $SwitchName `
+        -Alias $alias `
+        -IpAddress $vIp)
 
     # 6. Network profile (only relevant on Internal/ICS switches).
     #    Logic + auto-repair lives in Test-HostNetworkProfileSetting.ps1.
-    if ($sw.SwitchType -eq 'Internal' -and $vAdapter) {
+    if ($sw.SwitchType -eq 'Internal' `
+            -and $vAdapter) {
+
         Add-CheckFindings (Test-HostNetworkProfileSetting `
             -InterfaceAlias $alias `
             -NoAutoRepair:$NoAutoRepair)
@@ -200,6 +268,7 @@ function Assert-HostNetworkPreflight {
     # 7. DNS-via-ICS reachability + one-shot auto-repair. Logic
     #    lives in Test-IcsDnsProxyReachable.ps1.
     if ($DnsProbeTarget) {
+
         Add-CheckFindings (Test-IcsDnsProxyReachable `
             -DnsProbeTarget $DnsProbeTarget `
             -LanAdapterName $alias `
@@ -207,5 +276,25 @@ function Assert-HostNetworkPreflight {
             -NoAutoRepair:$NoAutoRepair)
     }
 
-    Assert-PreflightFindings -Findings $findings -SwitchName $SwitchName
+    # 8. Internet route leaves through the ICS WAN adapter. Only ICS forwards
+    #    the VMs' traffic, so an External switch has nothing to compare.
+    #    Find-NetRoute answers with the source address and then the route;
+    #    the route is the half that carries NextHop.
+    if ($sw.SwitchType -eq 'Internal') {
+
+        $internetRoute = Find-NetRoute `
+            -RemoteIPAddress $internetProbeAddress `
+            -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSObject.Properties['NextHop'] } |
+            Select-Object -First 1
+
+        Add-CheckFindings (Test-InternetRouteThroughWan `
+            -WanAdapterName $WanAdapterName `
+            -InternetRoute $internetRoute `
+            -AllowOtherInternetRoute:$AllowOtherInternetRoute)
+    }
+
+    Assert-PreflightFindings `
+        -Findings $findings `
+        -SwitchName $SwitchName
 }

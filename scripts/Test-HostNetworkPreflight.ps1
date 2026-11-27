@@ -35,6 +35,11 @@
     refresh. OFF by default so the manual entry point is purely
     diagnostic.
 
+.PARAMETER AllowOtherInternetRoute
+    Downgrade the internet-route check's FAIL to a WARN, for a host where
+    internet traffic rightly leaves through an adapter other than the one
+    ICS shares. The finding still prints.
+
 .EXAMPLE
     .\scripts\Test-HostNetworkPreflight.ps1
 
@@ -51,7 +56,8 @@ param(
     # gateway address.
     [string] $DnsProbeTarget = '192.168.137.1',
 
-    # WAN-side (internet-facing) adapter Reset-IcsSharing toggles during
+    # WAN-side (internet-facing) adapter: the one the internet-route check
+    # compares against, and the one Reset-IcsSharing toggles during
     # auto-repair. Left empty by default and resolved at runtime from the
     # live wireless adapter (see the detection block below), because the
     # connection name varies by host ('Wi-Fi', 'Wi-Fi 2', a vendor name)
@@ -76,16 +82,28 @@ param(
     # an ICS toggle. The provisioner gate calls Assert-HostNetworkPreflight
     # directly with auto-repair ON because it runs pre-VM-creation
     # when no VMs are alive.
-    [switch] $AutoRepair
+    [switch] $AutoRepair,
+
+    # Downgrade the internet-route check's FAIL to a WARN (see .PARAMETER).
+    [switch] $AllowOtherInternetRoute
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$net       = Join-Path $repoRoot 'hyper-v\ubuntu\PowerShell\common\network'
-$preflight = Join-Path $net      'preflight'
-$checks    = Join-Path $preflight 'checks'
+
+$net = Join-Path `
+    $repoRoot `
+    'hyper-v\ubuntu\PowerShell\common\network'
+
+$preflight = Join-Path `
+    $net `
+    'preflight'
+
+$checks = Join-Path `
+    $preflight `
+    'checks'
 
 # Reset-IcsSharing, the Ics/Profile/DNS check functions, and
 # Get-WirelessNetAdapter ship in Infrastructure.Network.Windows. The
@@ -96,30 +114,44 @@ $checks    = Join-Path $preflight 'checks'
 # 1.3.0 floor (Get-WirelessNetAdapter, used by the WAN auto-detect below
 # and the orchestrator's MAC checks) and matches the agent-side floor in
 # Install-ModuleDependencies.ps1.
-Import-Module Infrastructure.Network.Windows -MinimumVersion 1.5.0 -ErrorAction Stop
+Import-Module Infrastructure.Network.Windows `
+    -MinimumVersion 1.5.0 `
+    -ErrorAction Stop
 
 # Whole checks\ folder, matching provision.ps1: one function per file, all of
 # them called by the orchestrator, so neither loader carries a list to update.
-Get-ChildItem $checks -Filter '*.ps1' | ForEach-Object { . $_.FullName }
-. (Join-Path $preflight 'Assert-PreflightFindings.ps1')
+Get-ChildItem $checks `
+    -Filter '*.ps1' |
+    ForEach-Object { . $_.FullName }
+
+. (Join-Path `
+    $preflight `
+    'Assert-PreflightFindings.ps1')
+
 # Get-VmAdapterIPv4 backs the orchestrator's IP-collision check (check 5).
 # provision.ps1 dot-sources it before Assert-HostNetworkPreflight; this
 # manual wrapper must too, or the preflight dies with "Get-VmAdapterIPv4
 # is not recognized" before reaching the DNS-via-ICS check.
-. (Join-Path $net       'Get-VmAdapterIPv4.ps1')
+. (Join-Path `
+    $net `
+    'Get-VmAdapterIPv4.ps1')
+
 # Set-RouterSshRelay (post-repair portproxy + firewall pair) and
 # Get-WirelessNetAdapter (WAN auto-detect below) both come from the
 # module imported above, so no dot-source for them here.
-. (Join-Path $preflight 'Assert-HostNetworkPreflight.ps1')
+. (Join-Path `
+    $preflight `
+    'Assert-HostNetworkPreflight.ps1')
 
-# Resolve the WAN adapter name for auto-repair when the operator did not
-# pin one. Reset-IcsSharing matches HNetCfg on the connection name, which
-# is the same friendly name Get-NetAdapter reports - so detect the Up
-# wireless adapter and use its name, surfacing what was found (and the
-# candidate list when none) instead of failing deep in the COM call with a
-# bare "interface not found - run Get-NetAdapter to confirm the name".
-# Only needed under -AutoRepair: the read-only path never toggles ICS.
-if ($AutoRepair -and -not $WanAdapterName) {
+# Resolve the WAN adapter name when the operator did not pin one.
+# Reset-IcsSharing matches HNetCfg on the connection name, which is the
+# same friendly name Get-NetAdapter reports - so detect the Up wireless
+# adapter and use its name, surfacing what was found (and the candidate
+# list when none) instead of failing deep in the COM call with a bare
+# "interface not found - run Get-NetAdapter to confirm the name". Runs on
+# the read-only path too: detection changes nothing, and the internet-route
+# check needs the name to compare against.
+if (-not $WanAdapterName) {
 
     $wifiAdapter = Get-WirelessNetAdapter |
         Where-Object { $_.Status -eq 'Up' } |
@@ -128,28 +160,40 @@ if ($AutoRepair -and -not $WanAdapterName) {
     if ($wifiAdapter) {
 
         $WanAdapterName = $wifiAdapter.Name
-        Write-Host ("WAN adapter auto-detected for ICS repair: '$WanAdapterName' " +
-            "($($wifiAdapter.InterfaceDescription)).") -ForegroundColor Cyan
+
+        Write-Host (
+            "WAN adapter auto-detected for the ICS checks: '$WanAdapterName' " +
+            "($($wifiAdapter.InterfaceDescription)).") `
+            -ForegroundColor Cyan
     }
     else {
-        $physical = Get-NetAdapter -Physical -ErrorAction SilentlyContinue |
+
+        $physical = Get-NetAdapter `
+            -Physical `
+            -ErrorAction SilentlyContinue |
             Sort-Object Name |
             ForEach-Object { "$($_.Name) [$($_.Status)]" }
-        Write-Host "Could not auto-detect an Up wireless adapter for ICS repair." `
+
+        Write-Host `
+            "Could not auto-detect an Up wireless adapter for the ICS checks." `
             -ForegroundColor Yellow
-        Write-Host "Physical adapters present: $($physical -join ', ')" `
+        Write-Host `
+            "Physical adapters present: $($physical -join ', ')" `
             -ForegroundColor Yellow
-        Write-Host "Re-run with -WanAdapterName '<your internet-facing connection>'." `
+        Write-Host `
+            "Re-run with -WanAdapterName '<your internet-facing connection>'." `
             -ForegroundColor Yellow
     }
 }
 
 try {
+
     Assert-HostNetworkPreflight `
-        -SwitchName     $SwitchName `
+        -SwitchName $SwitchName `
         -DnsProbeTarget $DnsProbeTarget `
         -WanAdapterName $WanAdapterName `
-        -NoAutoRepair:(-not $AutoRepair)
+        -NoAutoRepair:(-not $AutoRepair) `
+        -AllowOtherInternetRoute:$AllowOtherInternetRoute
 
     # Re-establish the controller -> router SSH relay after an auto-repair.
     # The ICS toggle above regenerates the Internal vSwitch network, which
@@ -163,17 +207,27 @@ try {
     if ($AutoRepair -and $RouterAddress) {
 
         Write-Host ""
-        Write-Host ("Refreshing controller -> router SSH relay (-> ${RouterAddress}:22) " +
-            "after host-network repair ...") -ForegroundColor Cyan
+        Write-Host (
+            "Refreshing controller -> router SSH relay (-> ${RouterAddress}:22) " +
+            "after host-network repair ...") `
+            -ForegroundColor Cyan
+
         Set-RouterSshRelay -ConnectAddress $RouterAddress
     }
 
     Write-Host ""
-    Write-Host "Summary: host network preflight OK." -ForegroundColor Green
-    exit 0
+    Write-Host `
+        "Summary: host network preflight OK." `
+        -ForegroundColor Green
 
-} catch {
+    exit 0
+}
+catch {
+
     Write-Host ""
-    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host `
+        $_.Exception.Message `
+        -ForegroundColor Red
+
     exit 1
 }
