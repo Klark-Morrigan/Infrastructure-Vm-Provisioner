@@ -1,7 +1,6 @@
 <#
 .NOTES
-    Do not run this file directly. Dot-sourced by provision.ps1 and by
-    scripts\Test-HostNetworkPreflight.ps1.
+    Do not run this file directly. Dot-sourced by Import-PreflightFunctions.ps1.
 #>
 
 # ---------------------------------------------------------------------------
@@ -28,24 +27,31 @@ function Test-ConnectedRouteToSubnet {
         [object] $IpAddress
     )
 
-    if (-not $IpAddress) { return }
+    if (-not $IpAddress) {
+        return
+    }
 
     $subnet = ($IpAddress.IPAddress -replace '\.\d+$', '.0') + "/$($IpAddress.PrefixLength)"
-    $route  = Get-NetRoute -DestinationPrefix $subnet -ErrorAction SilentlyContinue |
-              Where-Object InterfaceAlias -eq $Alias
+    $label = "Connected route $subnet via $Alias"
+
+    $route = Get-NetRoute `
+        -DestinationPrefix $subnet `
+        -ErrorAction SilentlyContinue |
+        Where-Object InterfaceAlias -eq $Alias
 
     if (-not $route) {
-        return [PSCustomObject]@{
-            Status = 'FAIL'
-            Label  = "Connected route $subnet via $Alias"
-            Detail = "Route missing. Host will route VM traffic out the wrong interface (likely WiFi default route)."
-        }
+        return New-PreflightFinding `
+            -Status FAIL `
+            -Label $label `
+            -Detail (
+                "Route missing. " +
+                "Host will route VM traffic out the wrong interface (likely WiFi default route).")
     }
 
     $first = @($route)[0]
-    [PSCustomObject]@{
-        Status = 'PASS'
-        Label  = "Connected route $subnet via $Alias"
-        Detail = "metric $($first.RouteMetric)+$($first.InterfaceMetric)"
-    }
+
+    New-PreflightFinding `
+        -Status PASS `
+        -Label $label `
+        -Detail "metric $($first.RouteMetric)+$($first.InterfaceMetric)"
 }

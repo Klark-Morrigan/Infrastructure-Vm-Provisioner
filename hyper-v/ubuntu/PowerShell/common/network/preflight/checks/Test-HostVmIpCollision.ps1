@@ -1,7 +1,6 @@
 <#
 .NOTES
-    Do not run this file directly. Dot-sourced by provision.ps1 and by
-    scripts\Test-HostNetworkPreflight.ps1.
+    Do not run this file directly. Dot-sourced by Import-PreflightFunctions.ps1.
 #>
 
 # ---------------------------------------------------------------------------
@@ -33,23 +32,35 @@ function Test-HostVmIpCollision {
         [object] $IpAddress
     )
 
-    if (-not $IpAddress) { return }
+    if (-not $IpAddress) {
+        return
+    }
 
-    $vmsOnSwitch = Get-VMNetworkAdapter -All -ErrorAction SilentlyContinue |
-                   Where-Object SwitchName -eq $SwitchName
+    $label = "No IP collision with VMs on '$SwitchName'"
+
+    $vmsOnSwitch = Get-VMNetworkAdapter `
+        -All `
+        -ErrorAction SilentlyContinue |
+        Where-Object SwitchName -eq $SwitchName
+
     $vmIps = @(Get-VmAdapterIPv4 -Adapter $vmsOnSwitch)
 
     if ($vmIps | Where-Object { $_ -eq $IpAddress.IPAddress }) {
-        return [PSCustomObject]@{
-            Status = 'FAIL'
-            Label  = "No IP collision with VMs on '$SwitchName'"
-            Detail = "Host vNIC and VM(s) both report $($IpAddress.IPAddress). Host steals VM traffic via local routing. Run 'ipconfig /release `"$Alias`"' as a stopgap; switch to ICS for the durable fix."
-        }
+        return New-PreflightFinding `
+            -Status FAIL `
+            -Label $label `
+            -Detail (
+                "Host vNIC and VM(s) both report $($IpAddress.IPAddress). " +
+                "Host steals VM traffic via local routing. " +
+                "Run 'ipconfig /release `"$Alias`"' as a stopgap; switch to ICS for the durable fix.")
     }
 
-    [PSCustomObject]@{
-        Status = 'PASS'
-        Label  = "No IP collision with VMs on '$SwitchName'"
-        Detail = "Host: $($IpAddress.IPAddress); VMs ($($vmIps.Count) IPs): $(($vmIps | Sort-Object -Unique) -join ', ')"
-    }
+    $distinctVmIps = ($vmIps |
+        Sort-Object -Unique) `
+        -join ', '
+
+    New-PreflightFinding `
+        -Status PASS `
+        -Label $label `
+        -Detail "Host: $($IpAddress.IPAddress); VMs ($($vmIps.Count) IPs): $distinctVmIps"
 }

@@ -71,11 +71,11 @@ param(
     # it - which is what lets a host be driven by either engine.
     [switch] $SkipEnvVars,
 
-    # Let the host network preflight pass when internet traffic leaves
-    # through an adapter other than the one ICS shares: its FAIL becomes a
-    # WARN that still prints. For a false positive only - a VPN holding the
-    # route really does leave new VMs with no way out.
-    [switch] $AllowOtherInternetRoute
+    # Let the host network preflight pass when its internet-route check
+    # fails: the FAIL becomes a WARN that still prints. For a false positive
+    # only - a VPN holding the route really does leave new VMs with no way
+    # out.
+    [switch] $AllowInternetRouteFault
 )
 
 Set-StrictMode -Version Latest
@@ -96,14 +96,10 @@ $ErrorActionPreference = 'Stop'
 # imports it at agent startup; this file only consumes the exported
 # functions. Test-WslRouterReachability transitively depends on
 # Infrastructure.Wsl (auto-imported via RequiredModules).
-# Whole checks\ folder: the preflight's checks are one function per file and
-# the orchestrator calls all of them, so a glob keeps this list from going
-# stale every time a check is added or split.
-Get-ChildItem "$PSScriptRoot\common\network\preflight\checks" -Filter '*.ps1' |
-    ForEach-Object { . $_.FullName }
+# The host network preflight loads through its own list, shared with the
+# manual entry point, so neither can fall behind the other.
+. "$PSScriptRoot\common\network\preflight\Import-PreflightFunctions.ps1"
 
-. "$PSScriptRoot\common\network\preflight\Assert-PreflightFindings.ps1"
-. "$PSScriptRoot\common\network\preflight\Assert-HostNetworkPreflight.ps1"
 . "$PSScriptRoot\common\network\Assert-WorkloadReachableViaRouter.ps1"
 . "$PSScriptRoot\common\network\Remove-LegacySingletonNat.ps1"
 . "$PSScriptRoot\common\network\Resolve-ExistingRouterIp.ps1"
@@ -323,7 +319,7 @@ try {
     #         IP-collision check.
     #      b. External + Private switches before the preflight - the
     #         preflight's first check is "switch exists".
-    #      c. Assert-HostNetworkPreflight: checks 1-7 with auto-repair
+    #      c. Assert-HostNetworkPreflight: every check, with auto-repair
     #         ON (no VMs alive yet, ICS toggle disrupts nothing).
     #      d. Router-IP discovery (existing-state routers only - new
     #         routers get their IP at step 8's KVP discovery).
@@ -369,7 +365,7 @@ try {
                 -SwitchName $routerVm.externalSwitchName `
                 -WanAdapterName $routerVm.externalAdapterName `
                 -DnsProbeTarget $dnsProbeTarget `
-                -AllowOtherInternetRoute:$AllowOtherInternetRoute
+                -AllowInternetRouteFault:$AllowInternetRouteFault
 
             Resolve-ExistingRouterIp -RouterVm $routerVm
 

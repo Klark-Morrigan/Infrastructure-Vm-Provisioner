@@ -1,5 +1,6 @@
 BeforeAll {
     $checks = "$PSScriptRoot\..\..\..\..\..\..\hyper-v\ubuntu\PowerShell\common\network\preflight\checks"
+    . "$checks\..\New-PreflightFinding.ps1"
     . "$checks\Test-VmSwitchPresent.ps1"
 }
 

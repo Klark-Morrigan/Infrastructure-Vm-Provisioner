@@ -869,7 +869,7 @@ Run as Administrator after `setup-secrets.ps1` has stored the config.
 | `-SkipToolchains` | Suppresses the in-line toolchain reconciler: this run installs nothing. See [Toolchain engine](#toolchain-engine-selecting-the-live-path). |
 | `-SkipFiles` | Suppresses the in-line `files` transport: this run copies nothing. See [File transport](#file-transport-the-two-chains). |
 | `-SkipEnvVars` | Suppresses the in-line `envVars` transport: this run writes no managed block, and retracts none either. See [Which engine runs](#which-engine-runs). |
-| `-AllowOtherInternetRoute` | Lets the host network preflight pass when internet traffic leaves through an adapter other than the one ICS shares: check 8's FAIL becomes a WARN that still prints. For a false positive only. See [`Test-HostNetworkPreflight.ps1`](#test-hostnetworkpreflightps1). |
+| `-AllowInternetRouteFault` | Lets the host network preflight pass when its internet-route check fails: the FAIL becomes a WARN that still prints. For a false positive only. See [`Test-HostNetworkPreflight.ps1`](#test-hostnetworkpreflightps1). |
 
 The three `-Skip*` switches are pure suppression - none hands off to the Ansible
 counterpart, which is a second command you run yourself. A VM whose only
@@ -955,28 +955,18 @@ Reads `VmProvisionerConfig` from the vault and for each VM definition:
       IP-collision check.
    2. **External + Private switch ensures** (the preflight's first
       check is "switch exists").
-   3. **`Assert-HostNetworkPreflight`** — throws on any of:
-      missing/wrong-type switch, host vNIC down or unbound, Internal
-      vSwitch sharing MAC with a Wi-Fi adapter (stale config from
-      an unfinished External -> Internal+ICS migration), External
-      vSwitch bridged to Wi-Fi (guaranteed host-vs-VM IP collision
-      via shared MAC at the AP), missing connected route, IP
-      collision between host vNIC and any VM on that switch,
-      vEthernet's network profile being `Public` (which blocks ICS's
-      DNS-In firewall rule and silently breaks VM DNS), the ICS
-      DNS proxy not answering at `192.168.137.1`, or internet traffic
-      leaving through an adapter other than the one ICS shares
-      (a VPN holding the route, which strands the VMs while the host
-      stays online). The profile and the DNS proxy are
-      **auto-repaired** in the provisioner gate: profile gets
-      flipped to `Private`, and ICS sharing is toggled off+on via
-      the `HNetCfg` COM API to kick a hung DNS proxy. One repair
-      attempt per check; if it doesn't take, surfaces as a clean
-      FAIL with the next steps named in the error. The internet-route
-      check is report-only - disconnecting a VPN is the operator's
-      call - and `-AllowOtherInternetRoute` downgrades it to a WARN. See
+   3. **`Assert-HostNetworkPreflight`** — throws when any check in the
       [`Test-HostNetworkPreflight.ps1`](#test-hostnetworkpreflightps1)
-      for the manual entry point with the same checks.
+      table fails; that section is the one list of them, and the manual
+      entry point for the same checks. The network profile and the ICS
+      DNS proxy are **auto-repaired** in the provisioner gate: the
+      profile gets flipped to `Private`, and ICS sharing is toggled
+      off+on via the `HNetCfg` COM API to kick a hung DNS proxy. One
+      repair attempt per check; if it doesn't take, it surfaces as a
+      clean FAIL with the next steps named in the error. The
+      internet-route check is report-only - disconnecting a VPN is the
+      operator's call - and `-AllowInternetRouteFault` downgrades it to
+      a WARN.
    4. **Router-IP discovery** for existing routers
       (`Resolve-ExistingRouterIp` — looks up the IP via Hyper-V
       KVP; new-state routers get theirs at step 8's create-vm.ps1
@@ -1175,6 +1165,7 @@ provisioning run.
 
 | # | Check | Smoking-gun failure mode it catches |
 |---|---|---|
+| 0 | PowerShell session is elevated | Without admin, Hyper-V and `Get-Net*` cmdlets return nothing, which every later check would misread as "switch missing". A FAIL here ends the preflight. |
 | 1 | External vSwitch exists, recognized SwitchType | Switch missing, or accidentally Private (no upstream egress) |
 | 2 | Host vNIC `vEthernet (<switch>)` Up + IPv4 | ICS flipped off, switch torn down without recreate |
 | 3 | Switch-type-specific MAC story | **Internal**: vEthernet MAC matches a Wi-Fi NIC -> stale config (forgot to recreate as Internal after External -> ICS migration). **External**: vEthernet MAC matches a Wi-Fi NIC -> Hyper-V is MAC-translating every VM's egress to the host's Wi-Fi MAC, so the AP gives the host vNIC and every VM the same DHCP lease and they collide on the same IP. |
@@ -1182,17 +1173,18 @@ provisioning run.
 | 5 | No IP collision between host vNIC and any VM on the switch | The Wi-Fi External-bridge MAC-sharing smoking gun -> host steals VM traffic via local routing. |
 | 6 | vEthernet network profile = Private (Internal switches only) | `Public` blocks ICS's auto-generated DNS-In firewall rule so VM DNS queries silently drop. Auto-repaired when `-AutoRepair` is set (only toggles when current is Public; never redundantly). |
 | 7 | ICS DNS proxy answers at `$DnsProbeTarget` | The proxy's known broken state: it answers UDP/53 queries with TCP RSTs. Auto-repaired via `Reset-IcsSharing` (the programmatic equivalent of toggling the WiFi Sharing checkbox), one attempt + one re-probe; failure surfaces as a clean FAIL naming the one applicable fix (start the service / repair host DNS / restart + re-toggle + reboot) followed by the commands that carry it out, one per line, ending with the re-probe. |
-| 8 | Internet traffic leaves via the WAN adapter ICS shares (Internal switches only) | A VPN holds the internet route ahead of the WAN adapter. ICS NATs the VMs' traffic only out of the adapter it shares, so the VMs have no way out while the host itself stays online - and checks 1-7 all pass, the DNS probe included. Also catches ICS sharing the wrong one of two connected adapters, and a host with no internet route at all. Never auto-repaired; `-AllowOtherInternetRoute` downgrades the FAIL to a WARN. |
+| 8 | Internet traffic leaves via the WAN adapter ICS shares (Internal switches only) | A VPN holds the internet route ahead of the WAN adapter. ICS NATs the VMs' traffic only out of the adapter it shares, so the VMs have no way out while the host itself stays online - and checks 1-7 all pass, the DNS probe included. Also catches ICS sharing the wrong one of two connected adapters, and a host with no internet route at all. Never auto-repaired; `-AllowInternetRouteFault` downgrades the FAIL to a WARN. |
 
 **Parameters:**
 
 | Param | Default | Effect |
 |---|---|---|
 | `-SwitchName` | `ExternalSwitch-Shared` | The External vSwitch to inspect (matches `secret.json`'s `externalSwitchName`). |
-| `-DnsProbeTarget` | `192.168.137.1` | Address the DNS-via-ICS check probes (the host-side ICS gateway IP). |
+| `-DnsProbeTarget` | `192.168.137.1` | Address the DNS-via-ICS check probes (the host-side ICS gateway IP). Pass it empty to skip that check. |
 | `-WanAdapterName` | the Up wireless adapter, auto-detected | WAN side: what check 8 compares the internet route against, and what `Reset-IcsSharing` toggles during auto-repair. Pass it to pin the name, such as on an Ethernet-WAN host. |
 | `-AutoRepair` | off | Opt INTO check 6/7 auto-repair. Default off for the manual entry point because an interactive operator may have other VMs alive that would lose their default route during an ICS toggle. The provisioner gate calls `Assert-HostNetworkPreflight` directly with auto-repair on (no live VMs at preflight time). |
-| `-AllowOtherInternetRoute` | off | Downgrade check 8's FAIL to a WARN, for a host where internet traffic rightly leaves through another adapter. The finding still prints. `provision.ps1` takes the same switch. |
+| `-RouterAddress` | `192.168.137.11` | Router VM's address on the ICS network, where the controller -> router SSH relay is re-laid after an auto-repair. Pass it empty to skip the re-lay. |
+| `-AllowInternetRouteFault` | off | Downgrade check 8's FAIL to a WARN, for a host where that check is a false positive. The finding still prints. `provision.ps1` takes the same switch. |
 
 ---
 
@@ -2207,18 +2199,25 @@ Infrastructure-VM-Provisioner/
 |     |  |  |  `- Invoke-VmRuntimeDiag.ps1      # Host-side + best-effort guest-side runtime snapshot. Auto-fires from create-vm.ps1's wait-for-SSH and router-side reachability timeout paths. Manual entry point: scripts\Get-VmRuntimeDiag.ps1.
 |     |  |  `- network/
 |     |  |     |- preflight/
-|     |  |     |  |- Assert-HostNetworkPreflight.ps1   # Orchestrator: reads the host state once (switch, vEthernet, its IPv4) and routes every check's findings into one accumulator. Checks 1-5 and 8 live in checks\; the profile + DNS checks (6, 7) delegate to Infrastructure.Network.Windows (Test-HostNetworkProfileSetting / Test-IcsDnsProxyReachable). Throws on FAIL via Assert-PreflightFindings. Gate at provision.ps1 step 4; manual entry: scripts\Test-HostNetworkPreflight.ps1.
+|     |  |     |  |- Assert-HostNetworkPreflight.ps1   # Orchestrator: reads the host state once (switch, vEthernet, its IPv4) and routes every check's findings into one accumulator. Throws on FAIL via Assert-PreflightFindings. Gate at provision.ps1 step 4; manual entry: scripts\Test-HostNetworkPreflight.ps1. The checks are tabled under Test-HostNetworkPreflight.ps1 above.
 |     |  |     |  |- Assert-PreflightFindings.ps1      # Multi-line throw collector: consolidates every FAIL finding into one operator-facing error.
-|     |  |     |  `- checks/                           # One check per file; each takes the host snapshot it needs and RETURNS findings rather than printing. Both loaders dot-source the folder wholesale.
-|     |  |     |     |- Test-ConnectedRouteToSubnet.ps1    # Check 4: a connected route to the vNIC's own subnet VIA that vNIC. Missing = VM traffic leaves by the Wi-Fi default gateway.
-|     |  |     |     |- Test-HostVmIpCollision.ps1         # Check 5: no VM on the switch reports the host vNIC's IPv4. The Wi-Fi External-bridge smoking gun (one MAC at the AP = one shared DHCP lease).
-|     |  |     |     |- Test-HostVNicReady.ps1             # Check 2: vEthernet is Up and carries an IPv4 - reported as two findings, since the causes and the fixes differ.
-|     |  |     |     |- Test-InternetRouteThroughWan.ps1   # Check 8: internet traffic leaves via the WAN adapter ICS shares. A VPN holding the route strands the VMs while the host stays online. Report-only; -AllowOtherInternetRoute downgrades FAIL to WARN.
-|     |  |     |     |- Test-IsCurrentSessionElevated.ps1  # Check 0: WindowsPrincipal admin predicate. Without elevation Get-VMSwitch returns nothing and every check below misreads as "switch missing".
-|     |  |     |     |- Test-SwitchMacExpectation.ps1      # Check 3: what the vEthernet MAC is allowed to be, per switch type (Internal: must NOT match a Wi-Fi NIC + ICS host IP; External: a shared Wi-Fi MAC is the DHCP-collision case).
-|     |  |     |     `- Test-VmSwitchPresent.ps1           # Check 1: the named switch exists. A FAIL here ends the preflight - everything downstream reads the switch.
+|     |  |     |  |- Import-PreflightFunctions.ps1     # The one list of files the preflight needs. Dot-sourced by provision.ps1, the manual entry point and the orchestrator's tests.
+|     |  |     |  |- Invoke-HostNetworkPreflightCheck.ps1 # The manual run: resolves the WAN adapter, runs the preflight, re-lays the SSH relay after a repair, returns the exit code.
+|     |  |     |  |- New-PreflightFinding.ps1          # The one place a finding (Status / Label / Detail) takes its shape; refuses a status outside PASS, WARN, FAIL.
+|     |  |     |  `- checks/                           # One check per file; each takes the host snapshot it needs and RETURNS findings rather than printing. The loader dot-sources the folder wholesale.
+|     |  |     |     |- Test-ConnectedRouteToSubnet.ps1    # Check 4.
+|     |  |     |     |- Test-ElevatedSession.ps1           # Check 0.
+|     |  |     |     |- Test-HostVmIpCollision.ps1         # Check 5.
+|     |  |     |     |- Test-HostVNicReady.ps1             # Check 2.
+|     |  |     |     |- Test-InternetRouteThroughWan.ps1   # Check 8.
+|     |  |     |     |- Test-IsCurrentSessionElevated.ps1  # The WindowsPrincipal admin predicate check 0 asks, kept apart so a test can decide it.
+|     |  |     |     |- Test-SwitchMacExpectation.ps1      # Check 3.
+|     |  |     |     `- Test-VmSwitchPresent.ps1           # Check 1.
 |     |  |     |- Assert-WorkloadReachableViaRouter.ps1 # Workload-side reachability gate: SSHs through the router VM jump host to a workload's private IP. Surfaces dead workloads before per-VM dispatch.
+|     |  |     |- Get-IcsHostAddress.ps1               # The address ICS hardcodes for the host side of the network it shares into.
+|     |  |     |- Get-InternetRoute.ps1                # The route Windows would use to reach the internet; hides Find-NetRoute's two-object answer.
 |     |  |     |- Get-VmAdapterIPv4.ps1                # Pure helper: extracts IPv4 from VMNetworkAdapter objects under StrictMode (PSObject.Properties guard + IPv4 anchor regex).
+|     |  |     |- Resolve-WanAdapterName.ps1           # The WAN adapter ICS shares: the operator's choice, else the wireless adapter that is Up.
 |     |  |     |- Resolve-ExistingRouterIp.ps1        # Router-IP lookup from existing Hyper-V state when the router is already up (reconcile path).
 |     |  |     `- Remove-LegacySingletonNat.ps1       # Idempotent NetNat + host vNIC cleanup at a given gateway IP. Shared by Invoke-NetworkSetup (provision) and Invoke-NetworkTeardown (deprovision); also exports Test-IpInPrefix.
 |     |  |- up/

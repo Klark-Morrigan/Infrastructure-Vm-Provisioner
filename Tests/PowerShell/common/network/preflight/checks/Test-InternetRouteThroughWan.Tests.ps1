@@ -1,9 +1,11 @@
 BeforeAll {
 
-    $checks = "$PSScriptRoot\..\..\..\..\..\..\hyper-v\ubuntu\PowerShell\common\network\preflight\checks"
-    . "$checks\Test-InternetRouteThroughWan.ps1"
+    $preflight = "$PSScriptRoot\..\..\..\..\..\..\hyper-v\ubuntu\PowerShell\common\network\preflight"
 
-    # The route half of what Find-NetRoute returns for a public address.
+    . "$preflight\New-PreflightFinding.ps1"
+    . "$preflight\checks\Test-InternetRouteThroughWan.ps1"
+
+    # What Get-InternetRoute answers for a host with a route out.
     function New-InternetRoute {
 
         param(
@@ -47,7 +49,7 @@ Describe 'Test-InternetRouteThroughWan' {
         $expectedDetail =
             "Windows sends internet traffic via 'ProtonVPN', so ICS cannot carry the VMs' traffic out. " +
             "A VPN: disconnect it. Another adapter: share that one through ICS instead. " +
-            "A false positive: re-run with -AllowOtherInternetRoute."
+            "A false positive: re-run with -AllowInternetRouteFault."
 
         # Act
         $finding = Test-InternetRouteThroughWan `
@@ -59,7 +61,7 @@ Describe 'Test-InternetRouteThroughWan' {
         $finding.Detail | Should -Be $expectedDetail
     }
 
-    It 'warns instead of failing when another adapter is allowed' {
+    It 'warns instead of failing on another adapter when the fault is allowed' {
 
         # Arrange
         $route = New-InternetRoute `
@@ -68,13 +70,13 @@ Describe 'Test-InternetRouteThroughWan' {
 
         $expectedDetail =
             "Windows sends internet traffic via 'ProtonVPN'. " +
-            "Allowed by -AllowOtherInternetRoute, so VM egress may fail."
+            "Allowed by -AllowInternetRouteFault, so VM egress may fail."
 
         # Act
         $finding = Test-InternetRouteThroughWan `
             -WanAdapterName 'WiFi' `
             -InternetRoute $route `
-            -AllowOtherInternetRoute
+            -AllowInternetRouteFault
 
         # Assert
         $finding.Status | Should -Be 'WARN'
@@ -101,7 +103,7 @@ Describe 'Test-InternetRouteThroughWan' {
         $expectedDetail =
             "The host has no route to the internet, so neither it nor the VMs can reach out. " +
             "Connect 'WiFi' to a network. " +
-            "A false positive: re-run with -AllowOtherInternetRoute."
+            "A false positive: re-run with -AllowInternetRouteFault."
 
         # Act
         $finding = Test-InternetRouteThroughWan `
@@ -113,18 +115,18 @@ Describe 'Test-InternetRouteThroughWan' {
         $finding.Detail | Should -Be $expectedDetail
     }
 
-    It 'warns instead of failing on no route when another route is allowed' {
+    It 'warns instead of failing on no route when the fault is allowed' {
 
         # Arrange
         $expectedDetail =
             "The host has no route to the internet. " +
-            "Allowed by -AllowOtherInternetRoute, so VM egress may fail."
+            "Allowed by -AllowInternetRouteFault, so VM egress may fail."
 
         # Act
         $finding = Test-InternetRouteThroughWan `
             -WanAdapterName 'WiFi' `
             -InternetRoute $null `
-            -AllowOtherInternetRoute
+            -AllowInternetRouteFault
 
         # Assert
         $finding.Status | Should -Be 'WARN'

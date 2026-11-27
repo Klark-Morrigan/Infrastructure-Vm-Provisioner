@@ -7,7 +7,6 @@ BeforeAll {
     function Get-NetAdapter { param([string]$Name, [switch]$Physical, $ErrorAction) }
     function Get-NetIPAddress { param([string]$InterfaceAlias, $AddressFamily, $ErrorAction) }
     function Get-NetRoute { param([string]$DestinationPrefix, $ErrorAction) }
-    function Find-NetRoute { param([string]$RemoteIPAddress, $ErrorAction) }
     function Get-VMNetworkAdapter { param([switch]$All, $ErrorAction) }
 
     # Get-WirelessNetAdapter is the shared "which NICs are Wi-Fi" helper
@@ -31,25 +30,15 @@ BeforeAll {
 
     function Test-HostNetworkProfileSetting { param([string]$InterfaceAlias, [switch]$NoAutoRepair) }
 
-    # Pure adapter-IPv4 extractor - dot-source the real one so the
-    # IP-collision check's StrictMode-safety contract is exercised
-    # end-to-end, not stubbed.
-    $net = "$PSScriptRoot\..\..\..\..\..\hyper-v\ubuntu\PowerShell\common\network"
-    $preflight = "$net\preflight"
-    $checks = "$preflight\checks"
+    # The production loader, so the suite runs against the same set of
+    # functions the entry points load. The checks, the pure adapter-IPv4
+    # extractor and the findings helpers are real, not stubs: each has a
+    # suite of its own, and what is under test HERE is that the orchestrator
+    # feeds them the right host snapshot and consolidates what they return -
+    # which a stub would fake away.
+    $preflight = "$PSScriptRoot\..\..\..\..\..\hyper-v\ubuntu\PowerShell\common\network\preflight"
 
-    . "$net\Get-VmAdapterIPv4.ps1"
-
-    # The real check functions, not stubs: each one's own verdicts are tested
-    # in checks\, and what is under test HERE is that the orchestrator feeds
-    # them the right host snapshot and consolidates what they return - which a
-    # stub would fake away.
-    Get-ChildItem $checks `
-        -Filter '*.ps1' |
-        ForEach-Object { . $_.FullName }
-
-    . "$preflight\Assert-PreflightFindings.ps1"
-    . "$preflight\Assert-HostNetworkPreflight.ps1"
+    . "$preflight\Import-PreflightFunctions.ps1"
 
     # The switch under test; Internal is the ICS topology.
     function New-VmSwitch {
@@ -72,11 +61,30 @@ BeforeAll {
         }
     }
 
-    function New-IcsIp {
+    # The host vNIC's address; the defaults are what ICS assigns.
+    function New-VNicIp {
+
+        param(
+            [string] $Address = '192.168.137.1',
+            [string] $PrefixOrigin = 'Manual'
+        )
+
         [PSCustomObject]@{
-            IPAddress = '192.168.137.1'
+            IPAddress = $Address
             PrefixLength = 24
-            PrefixOrigin = 'Manual'
+            PrefixOrigin = $PrefixOrigin
+        }
+    }
+
+    # The connected route to the host vNIC's own subnet.
+    function New-VNicRoute {
+
+        param([int] $InterfaceMetric = 15)
+
+        [PSCustomObject]@{
+            InterfaceAlias = 'vEthernet (ExternalSwitch-Shared)'
+            RouteMetric = 256
+            InterfaceMetric = $InterfaceMetric
         }
     }
 
@@ -91,23 +99,32 @@ BeforeAll {
         }
     }
 
-    # What Find-NetRoute answers for a public address: the source address,
-    # then the route.
-    function New-FoundNetRoute {
+    # A VM's adapter as Get-VMNetworkAdapter reports it.
+    function New-VmNetworkAdapter {
+
+        param(
+            [string] $SwitchName = 'ExternalSwitch-Shared',
+            [string[]] $IpAddress = @()
+        )
+
+        [PSCustomObject]@{
+            SwitchName = $SwitchName
+            IPAddresses = $IpAddress
+        }
+    }
+
+    # What Get-InternetRoute answers for a host with a route out.
+    function New-InternetRoute {
 
         param(
             [string] $Alias,
-            [string] $SourceAddress,
             [string] $NextHop
         )
 
         [PSCustomObject]@{
             InterfaceAlias = $Alias
-            IPAddress = $SourceAddress }
-
-        [PSCustomObject]@{
-            InterfaceAlias = $Alias
-            NextHop = $NextHop }
+            NextHop = $NextHop
+        }
     }
 
     function Initialize-HappyMocks {
@@ -122,23 +139,14 @@ BeforeAll {
         # the physical-Wi-Fi lookup moved behind Get-WirelessNetAdapter.
         Mock Get-NetAdapter { New-IcsVNic }
         Mock Get-WirelessNetAdapter { @(New-WifiAdapter) }
-        Mock Get-NetIPAddress { New-IcsIp }
-
-        Mock Get-NetRoute {
-            [PSCustomObject]@{
-                InterfaceAlias = 'vEthernet (ExternalSwitch-Shared)'
-                RouteMetric = 256
-                InterfaceMetric = 15
-            }
-        }
-
+        Mock Get-NetIPAddress { New-VNicIp }
+        Mock Get-NetRoute { New-VNicRoute }
         Mock Get-VMNetworkAdapter { }
 
         # Internet traffic leaves via the Wi-Fi WAN adapter.
-        Mock Find-NetRoute {
-            New-FoundNetRoute `
+        Mock Get-InternetRoute {
+            New-InternetRoute `
                 -Alias 'WiFi' `
-                -SourceAddress '172.16.0.20' `
                 -NextHop '172.16.0.1'
         }
 
@@ -325,21 +333,12 @@ Describe 'Assert-HostNetworkPreflight' {
             Mock Get-VMSwitch { New-VmSwitch -SwitchType 'External' }
             Mock Get-NetAdapter { New-IcsVNic -Mac $sharedMac }
             Mock Get-WirelessNetAdapter { @(New-WifiAdapter -Mac $sharedMac) }
+            Mock Get-NetRoute { New-VNicRoute -InterfaceMetric 35 }
 
             Mock Get-NetIPAddress {
-                [PSCustomObject]@{
-                    IPAddress = '192.168.5.8'
-                    PrefixLength = 24
-                    PrefixOrigin = 'Dhcp'
-                }
-            }
-
-            Mock Get-NetRoute {
-                [PSCustomObject]@{
-                    InterfaceAlias = 'vEthernet (ExternalSwitch-Shared)'
-                    RouteMetric = 256
-                    InterfaceMetric = 35
-                }
+                New-VNicIp `
+                    -Address '192.168.5.8' `
+                    -PrefixOrigin 'Dhcp'
             }
 
             { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } |
@@ -357,21 +356,12 @@ Describe 'Assert-HostNetworkPreflight' {
             # The bridged Ethernet adapter's MAC.
             Mock Get-NetAdapter { New-IcsVNic -Mac '00-11-22-33-44-55' }
             Mock Get-WirelessNetAdapter { @(New-WifiAdapter -Mac '44-A3-BB-BC-51-06') }
+            Mock Get-NetRoute { New-VNicRoute -InterfaceMetric 25 }
 
             Mock Get-NetIPAddress {
-                [PSCustomObject]@{
-                    IPAddress = '192.168.1.10'
-                    PrefixLength = 24
-                    PrefixOrigin = 'Dhcp'
-                }
-            }
-
-            Mock Get-NetRoute {
-                [PSCustomObject]@{
-                    InterfaceAlias = 'vEthernet (ExternalSwitch-Shared)'
-                    RouteMetric = 256
-                    InterfaceMetric = 25
-                }
+                New-VNicIp `
+                    -Address '192.168.1.10' `
+                    -PrefixOrigin 'Dhcp'
             }
 
             { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } |
@@ -393,22 +383,13 @@ Describe 'Assert-HostNetworkPreflight' {
         It 'derives the subnet from the host vNIC IPv4 + PrefixLength' {
 
             Initialize-HappyMocks
-            $script:_routeQuery = $null
-
-            Mock Get-NetRoute {
-
-                $script:_routeQuery = $DestinationPrefix
-
-                [PSCustomObject]@{
-                    InterfaceAlias = 'vEthernet (ExternalSwitch-Shared)'
-                    RouteMetric = 256
-                    InterfaceMetric = 15
-                }
-            }
 
             Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared'
 
-            $script:_routeQuery | Should -Be '192.168.137.0/24'
+            Should -Invoke Get-NetRoute `
+                -Times 1 `
+                -Exactly `
+                -ParameterFilter { $DestinationPrefix -eq '192.168.137.0/24' }
         }
     }
 
@@ -419,15 +400,7 @@ Describe 'Assert-HostNetworkPreflight' {
             # The WiFi-MAC-collision smoking gun: host vNIC and VM
             # both bound to the same address.
             Initialize-HappyMocks
-
-            Mock Get-VMNetworkAdapter {
-                @(
-                    [PSCustomObject]@{
-                        SwitchName = 'ExternalSwitch-Shared'
-                        IPAddresses = @('192.168.137.1')
-                    }
-                )
-            }
+            Mock Get-VMNetworkAdapter { @(New-VmNetworkAdapter -IpAddress '192.168.137.1') }
 
             { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } |
                 Should -Throw -ExpectedMessage "*IP collision*"
@@ -439,12 +412,9 @@ Describe 'Assert-HostNetworkPreflight' {
 
             # The same IP, on a different switch.
             Mock Get-VMNetworkAdapter {
-                @(
-                    [PSCustomObject]@{
-                        SwitchName = 'PrivateSwitch-E2E'
-                        IPAddresses = @('192.168.137.1')
-                    }
-                )
+                @(New-VmNetworkAdapter `
+                    -SwitchName 'PrivateSwitch-E2E' `
+                    -IpAddress '192.168.137.1')
             }
 
             { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } |
@@ -454,15 +424,7 @@ Describe 'Assert-HostNetworkPreflight' {
         It 'tolerates a VM with no reported IPs (KVP daemon not up yet)' {
 
             Initialize-HappyMocks
-
-            Mock Get-VMNetworkAdapter {
-                @(
-                    [PSCustomObject]@{
-                        SwitchName = 'ExternalSwitch-Shared'
-                        IPAddresses = @()
-                    }
-                )
-            }
+            Mock Get-VMNetworkAdapter { @(New-VmNetworkAdapter) }
 
             { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } |
                 Should -Not -Throw
@@ -501,32 +463,14 @@ Describe 'Assert-HostNetworkPreflight' {
 
     Context 'internet route off the WAN adapter' {
 
-        It 'asks Windows how it would reach a public address' {
-
-            # Arrange
-            Initialize-HappyMocks
-
-            # Act
-            Assert-HostNetworkPreflight `
-                -SwitchName 'ExternalSwitch-Shared' `
-                -WanAdapterName 'WiFi'
-
-            # Assert
-            Should -Invoke Find-NetRoute `
-                -Times 1 `
-                -Exactly `
-                -ParameterFilter { $RemoteIPAddress -eq '1.1.1.1' }
-        }
-
         It 'throws when a VPN carries the internet route' {
 
             # Arrange
             Initialize-HappyMocks
 
-            Mock Find-NetRoute {
-                New-FoundNetRoute `
+            Mock Get-InternetRoute {
+                New-InternetRoute `
                     -Alias 'ProtonVPN' `
-                    -SourceAddress '10.2.0.2' `
                     -NextHop '0.0.0.0'
             }
 
@@ -541,15 +485,14 @@ Describe 'Assert-HostNetworkPreflight' {
             $preflight | Should -Throw -ExpectedMessage "*internet traffic via 'ProtonVPN'*"
         }
 
-        It 'does not throw when another internet route is allowed' {
+        It 'does not throw when the internet-route fault is allowed' {
 
             # Arrange
             Initialize-HappyMocks
 
-            Mock Find-NetRoute {
-                New-FoundNetRoute `
+            Mock Get-InternetRoute {
+                New-InternetRoute `
                     -Alias 'ProtonVPN' `
-                    -SourceAddress '10.2.0.2' `
                     -NextHop '0.0.0.0'
             }
 
@@ -558,7 +501,7 @@ Describe 'Assert-HostNetworkPreflight' {
                 Assert-HostNetworkPreflight `
                     -SwitchName 'ExternalSwitch-Shared' `
                     -WanAdapterName 'WiFi' `
-                    -AllowOtherInternetRoute
+                    -AllowInternetRouteFault
             }
 
             # Assert
@@ -569,7 +512,7 @@ Describe 'Assert-HostNetworkPreflight' {
 
             # Arrange
             Initialize-HappyMocks
-            Mock Find-NetRoute { }
+            Mock Get-InternetRoute { }
 
             # Act
             $preflight = {
@@ -601,7 +544,7 @@ Describe 'Assert-HostNetworkPreflight' {
             }
 
             # Assert
-            Should -Invoke Find-NetRoute -Times 0
+            Should -Invoke Get-InternetRoute -Times 0
         }
     }
 
@@ -618,20 +561,13 @@ Describe 'Assert-HostNetworkPreflight' {
             Mock Get-NetIPAddress { }
             Mock Get-NetRoute { }
 
-            try {
+            $failure = { Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared' } |
+                Should -Throw -PassThru
 
-                Assert-HostNetworkPreflight -SwitchName 'ExternalSwitch-Shared'
-                throw 'expected an exception, got none'
-            }
-            catch {
-
-                $msg = $_.Exception.Message
-
-                # Headline + at least two of the four downstream FAIL labels.
-                $msg | Should -Match 'preflight failed'
-                $msg | Should -Match 'Host vNIC'
-                $msg | Should -Match 'has IPv4'
-            }
+            # Headline + at least two of the four downstream FAIL labels.
+            $failure.Exception.Message | Should -Match 'preflight failed'
+            $failure.Exception.Message | Should -Match 'Host vNIC'
+            $failure.Exception.Message | Should -Match 'has IPv4'
         }
     }
 
