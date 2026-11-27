@@ -643,7 +643,8 @@ Given `$spec = { Provider; Vendor; Version }`:
    `New-VmSymlink -SshClient -Path "/usr/local/bin/$bin"
     -Target "$installDir/bin/$bin"`.
 6. Compose a manifest object:
-   ```
+
+   ```text
    schemaVersion = 1
    provider      = 'javaDevKit'
    version       = $spec.ResolvedVersion
@@ -652,6 +653,7 @@ Given `$spec = { Provider; Vendor; Version }`:
    ownedProfileScripts = @('jdk')
    children      = @()
    ```
+
 7. `Write-VmManifest -SshClient -Manifest $m` to
    `/var/lib/infra-provisioner/manifests/javaDevKit-$($spec.ResolvedVersion).json`.
 

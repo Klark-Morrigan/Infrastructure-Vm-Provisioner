@@ -1,5 +1,7 @@
 BeforeAll {
     $checks = "$PSScriptRoot\..\..\..\..\..\..\hyper-v\ubuntu\PowerShell\common\network\preflight\checks"
+    . "$checks\..\New-PreflightFinding.ps1"
+    . "$checks\..\..\Get-IcsHostAddress.ps1"
     . "$checks\Test-SwitchMacExpectation.ps1"
 
     $script:WifiMac = '44-A3-BB-BC-51-06'

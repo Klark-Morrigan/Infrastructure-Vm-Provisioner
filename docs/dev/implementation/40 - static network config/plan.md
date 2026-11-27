@@ -133,6 +133,7 @@ sequenceDiagram
 >    via write_files made netplan apply a no-op.
 >
 > Fix:
+>
 > - Add the `network:` wrapper in `New-StaticNetplanYaml` (single
 >   source of truth for both consumers).
 > - Restore `network-config` to ship the full static netplan so

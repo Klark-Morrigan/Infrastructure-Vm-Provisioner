@@ -3,7 +3,6 @@
 ## Index
 
 - [What we are changing](#what-we-are-changing)
-- [For the layman](#for-the-layman)
 - [Constraints](#constraints)
 
 ---

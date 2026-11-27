@@ -12,8 +12,8 @@ committable steps that each carry their own tests.
   - [Step 2 - E2E for unregistered-child fallback](#step-2---e2e-for-unregistered-child-fallback)
 - [Phase B - DotnetToolsProvider](#phase-b---dotnettoolsprovider)
   - [Step 3 - `dotnetTools` schema + `Assert-DotnetToolsField`](#step-3---dotnettools-schema--assert-dotnettoolsfield)
-  - [Step 4 - Host-side `.nupkg` acquirer with repo-signature verification](#step-4---host-side-nupkg-acquirer-with-repo-signature-verification)
-  - [Step 5 - `DotnetToolsProvider.*` operations (guest-side install / uninstall)](#step-5---dotnettoolsproviderx-operations-guest-side-install--uninstall)
+  - [Step 4 - Host-side `.nupkg` acquirer with SHA-512 verification](#step-4---host-side-nupkg-acquirer-with-sha-512-verification)
+  - [Step 5 - `DotnetToolsProvider.*` operations (guest-side install / uninstall)](#step-5---dotnettoolsprovider-operations-guest-side-install--uninstall)
   - [Step 6A - Provider composition, nested registration, and dispatcher wiring](#step-6a---provider-composition-nested-registration-and-dispatcher-wiring)
   - [Step 6B - Reconciler dispatch for nested-provider installs](#step-6b---reconciler-dispatch-for-nested-provider-installs)
   - [Step 7 - E2E: happy-path nested-provider scenario for `reportgenerator`](#step-7---e2e-happy-path-nested-provider-scenario-for-reportgenerator)
@@ -145,8 +145,8 @@ sequenceDiagram
 **Reason.** Step 1's walker has a "child provider not registered ->
 warn and proceed" branch that the happy-path nested-provider E2E in
 Phase B cannot exercise, because real cases will always register
-both parent and child. The branch covers a real operational scenario
-- a provider is removed from `Get-Providers` (deprecated, renamed,
+both parent and child. The branch covers a real operational scenario -
+a provider is removed from `Get-Providers` (deprecated, renamed,
 feature reverted) but long-lived VMs still carry manifests that
 reference it - so it needs live coverage rather than unit-only
 coverage. One synthetic fixture is the smallest way to guard it on
@@ -325,6 +325,7 @@ before any VM-side code depends on it.
      Throw with both hashes on mismatch.
   6. Atomically rename the temp file into the final cache path and
      write the lockfile:
+
      ```json
      {
        "id":            "{id}",
@@ -335,6 +336,7 @@ before any VM-side code depends on it.
        "acquiredAt":    "ISO-8601 UTC"
      }
      ```
+
   7. Stamp `$Vm._dotnetToolNupkgPaths` (hashtable: `{id}@{version}` ->
      absolute `.nupkg` path) via `Add-Member`, append-style across
      entries. The reconciler's provider reads these paths the same
@@ -492,12 +494,14 @@ where they become reachable through the reconciler. Mirrors
 - `hyper-v/ubuntu/up/dotnet/Get-DotnetToolsProvider.ps1` (new) -
   composes the four operation scriptblocks into one
   `IToolchainProvider` pscustomobject:
-  ```
+
+  ```text
   Name             = 'dotnetTools'
   ParentProvider   = 'dotnetSdk'
   Get-DesiredVersions / Get-InstalledVersions /
   Install-Version    / Uninstall-Version  (closures over helpers)
   ```
+
   Closure construction follows the same `GetNewClosure()` +
   call-operator pattern as `Get-DotnetSdkProvider.ps1`.
 - `hyper-v/ubuntu/up/reconciler/Get-Providers.ps1` - append

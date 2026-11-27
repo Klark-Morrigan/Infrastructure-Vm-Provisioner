@@ -4,6 +4,7 @@ BeforeAll {
     function Get-NetRoute { param([string] $DestinationPrefix, $ErrorAction) }
 
     $checks = "$PSScriptRoot\..\..\..\..\..\..\hyper-v\ubuntu\PowerShell\common\network\preflight\checks"
+    . "$checks\..\New-PreflightFinding.ps1"
     . "$checks\Test-ConnectedRouteToSubnet.ps1"
 
     function New-Ip {

@@ -7,6 +7,7 @@ BeforeAll {
     # The real IPv4 extractor: its StrictMode tolerance for adapters with no
     # IPAddresses property is part of what this check depends on.
     . "$net\Get-VmAdapterIPv4.ps1"
+    . "$checks\..\New-PreflightFinding.ps1"
     . "$checks\Test-HostVmIpCollision.ps1"
 
     function New-Ip {

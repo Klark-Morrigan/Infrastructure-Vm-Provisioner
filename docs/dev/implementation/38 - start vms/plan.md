@@ -473,4 +473,3 @@ sequenceDiagram
     SV->>Op: per-VM summary + aggregate line
     SV->>Op: exit 0 (no failures) | 1 (any failure)
 ```
-

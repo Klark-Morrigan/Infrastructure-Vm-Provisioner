@@ -1,7 +1,6 @@
 <#
 .NOTES
-    Do not run this file directly. Dot-sourced by provision.ps1 and by
-    scripts\Test-HostNetworkPreflight.ps1.
+    Do not run this file directly. Dot-sourced by Import-PreflightFunctions.ps1.
 #>
 
 # ---------------------------------------------------------------------------
@@ -27,17 +26,22 @@ function Test-VmSwitchPresent {
         [object] $Switch
     )
 
+    $label = "VMSwitch '$SwitchName' exists"
+
     if (-not $Switch) {
-        return [PSCustomObject]@{
-            Status = 'FAIL'
-            Label  = "VMSwitch '$SwitchName' exists"
-            Detail = "Switch is missing. Expected to have been created by Initialize-ExternalSwitch, OR (if you migrated from External to Internal+ICS earlier) the switch was torn down by a Hyper-V service restart / Windows update. Recreate via: New-VMSwitch -Name '$SwitchName' -SwitchType Internal  (then re-enable ICS on WiFi -> vEthernet)."
-        }
+        return New-PreflightFinding `
+            -Status FAIL `
+            -Label $label `
+            -Detail (
+                "Switch is missing. Expected to have been created by Initialize-ExternalSwitch, " +
+                "OR (if you migrated from External to Internal+ICS earlier) the switch was torn down " +
+                "by a Hyper-V service restart / Windows update. " +
+                "Recreate via: New-VMSwitch -Name '$SwitchName' -SwitchType Internal  " +
+                "(then re-enable ICS on WiFi -> vEthernet).")
     }
 
-    [PSCustomObject]@{
-        Status = 'PASS'
-        Label  = "VMSwitch '$SwitchName' exists"
-        Detail = "SwitchType=$($Switch.SwitchType)"
-    }
+    New-PreflightFinding `
+        -Status PASS `
+        -Label $label `
+        -Detail "SwitchType=$($Switch.SwitchType)"
 }

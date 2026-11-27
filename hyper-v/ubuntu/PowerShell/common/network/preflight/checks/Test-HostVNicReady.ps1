@@ -1,7 +1,6 @@
 <#
 .NOTES
-    Do not run this file directly. Dot-sourced by provision.ps1 and by
-    scripts\Test-HostNetworkPreflight.ps1.
+    Do not run this file directly. Dot-sourced by Import-PreflightFunctions.ps1.
 #>
 
 # ---------------------------------------------------------------------------
@@ -32,36 +31,36 @@ function Test-HostVNicReady {
     )
 
     if (-not $Adapter) {
-        [PSCustomObject]@{
-            Status = 'FAIL'
-            Label  = "Host vNIC '$Alias' present"
-            Detail = "vEthernet missing. Did switch creation finish?"
-        }
-    } elseif ($Adapter.Status -ne 'Up') {
-        [PSCustomObject]@{
-            Status = 'FAIL'
-            Label  = "Host vNIC '$Alias' status"
-            Detail = "Status=$($Adapter.Status). Bring it Up or recreate the switch."
-        }
-    } else {
-        [PSCustomObject]@{
-            Status = 'PASS'
-            Label  = "Host vNIC '$Alias' is Up"
-            Detail = "MAC=$($Adapter.MacAddress)"
-        }
+        New-PreflightFinding `
+            -Status FAIL `
+            -Label "Host vNIC '$Alias' present" `
+            -Detail "vEthernet missing. Did switch creation finish?"
+    }
+    elseif ($Adapter.Status -ne 'Up') {
+        New-PreflightFinding `
+            -Status FAIL `
+            -Label "Host vNIC '$Alias' status" `
+            -Detail "Status=$($Adapter.Status). Bring it Up or recreate the switch."
+    }
+    else {
+        New-PreflightFinding `
+            -Status PASS `
+            -Label "Host vNIC '$Alias' is Up" `
+            -Detail "MAC=$($Adapter.MacAddress)"
     }
 
+    $addressLabel = "Host vNIC has IPv4"
+
     if (-not $IpAddress) {
-        [PSCustomObject]@{
-            Status = 'FAIL'
-            Label  = "Host vNIC has IPv4"
-            Detail = "No IPv4 on '$Alias'. ICS may have flipped off, or DHCP has not bound."
-        }
-    } else {
-        [PSCustomObject]@{
-            Status = 'PASS'
-            Label  = "Host vNIC has IPv4"
-            Detail = "$($IpAddress.IPAddress)/$($IpAddress.PrefixLength) ($($IpAddress.PrefixOrigin))"
-        }
+        New-PreflightFinding `
+            -Status FAIL `
+            -Label $addressLabel `
+            -Detail "No IPv4 on '$Alias'. ICS may have flipped off, or DHCP has not bound."
+    }
+    else {
+        New-PreflightFinding `
+            -Status PASS `
+            -Label $addressLabel `
+            -Detail "$($IpAddress.IPAddress)/$($IpAddress.PrefixLength) ($($IpAddress.PrefixOrigin))"
     }
 }

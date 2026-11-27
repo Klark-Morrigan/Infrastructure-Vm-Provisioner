@@ -1,7 +1,7 @@
----
 # Implementation Plan
 
 ## Index
+
 - [Step 1 — Repo skeleton](#step-1--repo-skeleton)
 - [Step 2 — setup-secrets.ps1](#step-2--setup-secretsps1)
 - [Step 3 — provision.ps1: vault read + validation](#step-3--provisionps1-vault-read--validation)
@@ -17,7 +17,7 @@
 
 **What:** Create the directory structure and placeholder files.
 
-```
+```text
 hyper-v/
 └── ubuntu/
     ├── provision.ps1       (empty)
@@ -34,6 +34,7 @@ step has a clear home.
 ## Step 2 — setup-secrets.ps1
 
 **What:** Script that:
+
 1. Installs `Microsoft.PowerShell.SecretManagement` +
    `Microsoft.PowerShell.SecretStore` if not already present.
 2. Registers a `SecretStore` vault named `VmProvisioner` (no-prompt,
@@ -60,6 +61,7 @@ graph TD
 ## Step 3 — provision.ps1: vault read + validation
 
 **What:** Opening section of `provision.ps1` that:
+
 1. Reads the `VmProvisionerConfig` secret (JSON array).
 2. Parses and validates required fields per VM entry.
 3. Checks each VM name against existing Hyper-V VMs — skips if found.
@@ -86,6 +88,7 @@ graph TD
 ## Step 4 — provision.ps1: disk image acquisition
 
 **What:** For each VM entry that passes validation:
+
 1. Derive the Ubuntu download URL from `ubuntuVersion`. Ubuntu 22.04+
    only ships a VHD in the Azure variant (`-azure.vhd.tar.gz`); the
    generic `.vhd.zip` is not available for those releases.
@@ -140,6 +143,7 @@ graph TD
 ## Step 5 — provision.ps1: cloud-init seed ISO
 
 **What:** For each VM, generate:
+
 - `meta-data` (instance-id, local-hostname)
 - `user-data` covering:
   - OS user + hashed password
@@ -182,6 +186,7 @@ sequenceDiagram
 ## Step 6 — provision.ps1: virtual switch and NAT
 
 **What:** Once, before any VM is created:
+
 1. If a switch named `VmLAN` already exists, skip creation (idempotent).
 2. `New-VMSwitch -SwitchType Internal` — creates a host-only virtual NIC;
    VMs on this switch can reach the host but not the physical network directly.
@@ -219,6 +224,7 @@ sequenceDiagram
 ## Step 7 — provision.ps1: VM creation
 
 **What:** For each validated VM entry:
+
 1. `New-VM` with the correct generation (Gen 2), memory, CPU, and vhd path.
 2. Attach the seed ISO as a DVD drive.
 3. Set Secure Boot template to `MicrosoftUEFICertificateAuthority`
@@ -261,6 +267,7 @@ sequenceDiagram
 ## Step 8 — README.md
 
 **What:** Root `README.md` covering:
+
 - Prerequisites (Hyper-V, PowerShell, modules, virtual switch) — note that
   **PS 5.1 (ships with Windows 11) is sufficient**; PS 7 is recommended but
   not required. State this explicitly so operators don't install PS 7

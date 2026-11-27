@@ -3,6 +3,7 @@
 See [problem.md](problem.md) for context and scope.
 
 ## Index
+
 - [Step 1 - Run-Tests.ps1](#step-1---run-testsps1)
 - [Step 2 - Get-SanitizedVmDisplay tests](#step-2---get-sanitizedvmdisplay-tests)
 - [Step 3 - ConvertFrom-VmConfigJson tests](#step-3---convertfrom-vmconfigjson-tests)
@@ -44,6 +45,7 @@ Add `Tests/Get-SanitizedVmDisplay.Tests.ps1`. Dot-sources `common.ps1`.
 No mocks needed - the function has no external dependencies.
 
 Coverage:
+
 | Case | What it checks |
 |------|----------------|
 | Password field is masked | Secret fields are replaced with `***` |
@@ -83,6 +85,7 @@ Stubs `Assert-ConfigFields` in `BeforeAll` (so the Infrastructure.Secrets
 module is not required).
 
 Coverage:
+
 | Case | What it checks |
 |------|----------------|
 | Valid JSON array, all fields present | Returns array of VM objects |

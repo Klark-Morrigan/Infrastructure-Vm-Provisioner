@@ -1,6 +1,6 @@
 <#
 .NOTES
-    Do not run this file directly. Dot-sourced by provision.ps1.
+    Do not run this file directly. Dot-sourced by Import-PreflightFunctions.ps1.
 #>
 
 # ---------------------------------------------------------------------------

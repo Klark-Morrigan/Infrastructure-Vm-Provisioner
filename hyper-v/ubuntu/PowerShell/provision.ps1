@@ -69,7 +69,13 @@ param(
     # replaces the other's rather than appending a second one, so skipping
     # here hands the block over cleanly rather than splitting ownership of
     # it - which is what lets a host be driven by either engine.
-    [switch] $SkipEnvVars
+    [switch] $SkipEnvVars,
+
+    # Let the host network preflight pass when its internet-route check
+    # fails: the FAIL becomes a WARN that still prints. For a false positive
+    # only - a VPN holding the route really does leave new VMs with no way
+    # out.
+    [switch] $AllowInternetRouteFault
 )
 
 Set-StrictMode -Version Latest
@@ -82,6 +88,7 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common\diag\Get-VmDiagFolder.ps1"
 . "$PSScriptRoot\common\diag\Invoke-VmRuntimeDiag.ps1"
 . "$PSScriptRoot\common\network\Get-VmAdapterIPv4.ps1"
+
 # The host-network helpers (ICS toggle, netsh portproxy + firewall,
 # the SSH relay that pairs them, wireless-adapter detection, profile,
 # DNS, WSL reachability probe) now ship in the
@@ -89,21 +96,20 @@ $ErrorActionPreference = 'Stop'
 # imports it at agent startup; this file only consumes the exported
 # functions. Test-WslRouterReachability transitively depends on
 # Infrastructure.Wsl (auto-imported via RequiredModules).
-# Whole checks\ folder: the preflight's checks are one function per file and
-# the orchestrator calls all of them, so a glob keeps this list from going
-# stale every time a check is added or split.
-Get-ChildItem "$PSScriptRoot\common\network\preflight\checks" -Filter '*.ps1' |
-    ForEach-Object { . $_.FullName }
-. "$PSScriptRoot\common\network\preflight\Assert-PreflightFindings.ps1"
-. "$PSScriptRoot\common\network\preflight\Assert-HostNetworkPreflight.ps1"
+# The host network preflight loads through its own list, shared with the
+# manual entry point, so neither can fall behind the other.
+. "$PSScriptRoot\common\network\preflight\Import-PreflightFunctions.ps1"
+
 . "$PSScriptRoot\common\network\Assert-WorkloadReachableViaRouter.ps1"
 . "$PSScriptRoot\common\network\Remove-LegacySingletonNat.ps1"
 . "$PSScriptRoot\common\network\Resolve-ExistingRouterIp.ps1"
 . "$PSScriptRoot\common\ssh\Assert-VmSshCredentialsAccepted.ps1"
+
 # Wait-VmSshAccessible self-loads Wait-VmSshBannerReachable, so no separate
 # dot-source for the banner helper here.
 . "$PSScriptRoot\common\ssh\Wait-VmSshAccessible.ps1"
 . "$PSScriptRoot\common\ui\Format-ElapsedBudgetWithGradient.ps1"
+
 # SSH jump-host helpers (New-VmSshTunnel, New-VmSshClientWithJump,
 # Test-SshBanner) and the upstream-host-IP discovery (Get-VmSwitchHostIp)
 # live in Infrastructure.HyperV >= 0.11.0 - imported by
@@ -145,6 +151,7 @@ Get-ChildItem "$PSScriptRoot\common\network\preflight\checks" -Filter '*.ps1' |
 . "$PSScriptRoot\up\reconciler\Invoke-ToolchainReconciliation.ps1"
 . "$PSScriptRoot\up\reconciler\Get-Providers.ps1"
 . "$PSScriptRoot\up\post\Set-EnvironmentVariables.ps1"
+
 # Per-VM diagnostic helpers. See each file's NOTES block for the
 # specific data it captures and where outputs land. All three write
 # under <vmConfigPath>\diagnostics\<vmName>\<timestamp>\ so a single
@@ -158,6 +165,7 @@ Get-ChildItem "$PSScriptRoot\common\network\preflight\checks" -Filter '*.ps1' |
 . "$PSScriptRoot\up\post\Invoke-VmPostProvisioning.ps1"
 . "$PSScriptRoot\up\seed\New-StaticNetplanYaml.ps1"
 . "$PSScriptRoot\up\seed\Get-RouterNicStaticMac.ps1"
+
 # Shared cloud-init helpers - the workload and router seed generators
 # both call these so the meta-data / users / write_files / disable-flag
 # / literal-block-indent / seed-ISO-write paths have one owner.
@@ -174,6 +182,7 @@ Get-ChildItem "$PSScriptRoot\common\network\preflight\checks" -Filter '*.ps1' |
 . "$PSScriptRoot\up\network\setup-network.ps1"
 . "$PSScriptRoot\up\vm\Remove-VmSeedIso.ps1"
 . "$PSScriptRoot\up\vm\create-vm.ps1"
+
 # The five phase-timing verbs (Initialize-PhaseTimings, Invoke-WithPhaseTimer,
 # Add-SubStepDuration, Invoke-WithSubStepTimer, Write-PhaseTimingReport) are the
 # 2-level compat shims exported by Common.PowerShell (imported by
@@ -234,11 +243,12 @@ if ($vmsToProcess.Count -eq 0) {
 # acquisitions + post-provisioning). Network setup is always run because
 # it is idempotent and may need to be applied if the host environment was
 # rebuilt around already-existing VMs.
-$newVms      = ConvertTo-Array ($vmsToProcess | Where-Object { $_._state -eq 'new' })
+$newVms = ConvertTo-Array ($vmsToProcess | Where-Object { $_._state -eq 'new' })
 $existingVms = ConvertTo-Array ($vmsToProcess | Where-Object { $_._state -eq 'existing' })
 
-Write-Host ("Queued: $($newVms.Count) new VM(s), " +
-            "$($existingVms.Count) existing VM(s) for reconcile.") `
+Write-Host (
+    "Queued: $($newVms.Count) new VM(s), " +
+    "$($existingVms.Count) existing VM(s) for reconcile.") `
     -ForegroundColor Cyan
 # ---------------------------------------------------------------------------
 # Phase-timing setup
@@ -256,7 +266,8 @@ Write-Host ("Queued: $($newVms.Count) new VM(s), " +
 # the closure captures it but never dereferences at this stage.
 $placeholderVm = [PSCustomObject]@{ vmName = '<phase-init>' }
 $reconcileSubSteps = @(
-    @(Get-Providers -Vm $placeholderVm) | ForEach-Object { "reconcile/$($_.Name)" }
+    @(Get-Providers -Vm $placeholderVm) |
+        ForEach-Object { "reconcile/$($_.Name)" }
 )
 
 Initialize-PhaseTimings -Phases @(
@@ -308,7 +319,7 @@ try {
     #         IP-collision check.
     #      b. External + Private switches before the preflight - the
     #         preflight's first check is "switch exists".
-    #      c. Assert-HostNetworkPreflight: checks 1-7 with auto-repair
+    #      c. Assert-HostNetworkPreflight: every check, with auto-repair
     #         ON (no VMs alive yet, ICS toggle disrupts nothing).
     #      d. Router-IP discovery (existing-state routers only - new
     #         routers get their IP at step 8's KVP discovery).
@@ -321,15 +332,23 @@ try {
     # -----------------------------------------------------------------------
 
     Invoke-WithPhaseTimer -Name 'Host network setup' -Action {
+
         foreach ($env in (Group-VmsByEnvironment -VmDefs $vmsToProcess)) {
-            if ($env.RouterVms.Count -eq 0) { continue }
+
+            if ($env.RouterVms.Count -eq 0) {
+                continue
+            }
+
             $routerVm = $env.RouterVms[0]
 
-            Invoke-NetworkSetup -RouterVm    $routerVm `
-                                -WorkloadVms $env.WorkloadVms
+            Invoke-NetworkSetup `
+                -RouterVm $routerVm `
+                -WorkloadVms $env.WorkloadVms
 
-            Initialize-ExternalSwitch -Name           $routerVm.externalSwitchName `
-                                  -NetAdapterName $routerVm.externalAdapterName
+            Initialize-ExternalSwitch `
+                -Name $routerVm.externalSwitchName `
+                -NetAdapterName $routerVm.externalAdapterName
+
             Initialize-PrivateSwitch -Name $routerVm.privateSwitchName
 
             # 'gateway' is an optional, kind-specific field: the schema
@@ -338,14 +357,15 @@ try {
             # guarded way - an absent value leaves DnsProbeTarget empty
             # and Assert-HostNetworkPreflight simply skips the DNS-via-ICS
             # probe. Unconditional $routerVm.gateway tripped StrictMode.
-            $dnsProbeTarget = if ($routerVm.PSObject.Properties['gateway']) {
-                $routerVm.gateway
-            } else { $null }
+            $dnsProbeTarget = $routerVm.PSObject.Properties['gateway'] `
+                ? $routerVm.gateway `
+                : $null
 
             Assert-HostNetworkPreflight `
-                -SwitchName      $routerVm.externalSwitchName `
-                -WanAdapterName  $routerVm.externalAdapterName `
-                -DnsProbeTarget  $dnsProbeTarget
+                -SwitchName $routerVm.externalSwitchName `
+                -WanAdapterName $routerVm.externalAdapterName `
+                -DnsProbeTarget $dnsProbeTarget `
+                -AllowInternetRouteFault:$AllowInternetRouteFault
 
             Resolve-ExistingRouterIp -RouterVm $routerVm
 
@@ -357,18 +377,21 @@ try {
             # discovery populates ipAddress, joining the firewall this
             # pass pre-laid.
             if ($routerVm.PSObject.Properties['ipAddress'] -and
-                $routerVm.ipAddress) {
+                    $routerVm.ipAddress) {
+
                 Set-RouterSshRelay -ConnectAddress $routerVm.ipAddress
             } else {
                 Set-RouterSshRelay -FirewallOnly
             }
 
             foreach ($workload in $env.WorkloadVms) {
-                Add-Member -InputObject $workload `
-                           -MemberType NoteProperty `
-                           -Name '_RouterVm' `
-                           -Value $routerVm `
-                           -Force
+
+                Add-Member `
+                    -InputObject $workload `
+                    -MemberType NoteProperty `
+                    -Name '_RouterVm' `
+                    -Value $routerVm `
+                    -Force
             }
         }
     }
@@ -387,14 +410,19 @@ try {
     # -----------------------------------------------------------------------
 
     Invoke-WithPhaseTimer -Name 'Disk image acquisition' -Action {
+
         foreach ($vm in $newVms) {
+
             try {
                 Invoke-DiskImageAcquisition -Vm $vm
             }
             catch {
                 if ($_.Exception.Message -match '^Wsl2NotReady: ') {
-                    Write-Host ($_.Exception.Message -replace '^Wsl2NotReady: ', '') `
+
+                    Write-Host (
+                        $_.Exception.Message -replace '^Wsl2NotReady: ', '') `
                         -ForegroundColor Yellow
+
                     # Print the report before exiting so the operator
                     # still sees how far we got. exit bypasses the
                     # outer finally, so call it explicitly here - and, for
@@ -423,11 +451,13 @@ try {
     #    against an already-cached artefact is cheap.
     # -----------------------------------------------------------------------
 
-    Invoke-WithPhaseTimer -Name 'Host-side acquisitions' -Action {
-        foreach ($vm in $vmsToProcess) {
-            Invoke-VmAcquisitions -Vm $vm
+    Invoke-WithPhaseTimer `
+        -Name 'Host-side acquisitions' `
+        -Action {
+            foreach ($vm in $vmsToProcess) {
+                Invoke-VmAcquisitions -Vm $vm
+            }
         }
-    }
 
     # -----------------------------------------------------------------------
     # 7. Cloud-init seed ISO generation (new VMs only)
@@ -436,20 +466,23 @@ try {
     #    Skipped for existing VMs - cloud-init already ran on their first boot.
     # -----------------------------------------------------------------------
 
-    Invoke-WithPhaseTimer -Name 'Cloud-init seed ISO' -Action {
-        foreach ($vm in $newVms) {
-            # Branch on kind so router VMs get the dual-NIC seed
-            # (Invoke-RouterSeedIsoGeneration) and workload VMs keep
-            # the single-NIC seed they have always had. Schema defaults
-            # 'kind' to 'workload', so this comparison is total.
-            if ($vm.kind -eq 'router') {
-                Invoke-RouterSeedIsoGeneration -Vm $vm
-            }
-            else {
-                Invoke-SeedIsoGeneration -Vm $vm
+    Invoke-WithPhaseTimer `
+        -Name 'Cloud-init seed ISO' `
+        -Action {
+            foreach ($vm in $newVms) {
+
+                # Branch on kind so router VMs get the dual-NIC seed
+                # (Invoke-RouterSeedIsoGeneration) and workload VMs keep
+                # the single-NIC seed they have always had. Schema defaults
+                # 'kind' to 'workload', so this comparison is total.
+                if ($vm.kind -eq 'router') {
+                    Invoke-RouterSeedIsoGeneration -Vm $vm
+                }
+                else {
+                    Invoke-SeedIsoGeneration -Vm $vm
+                }
             }
         }
-    }
 
     # -----------------------------------------------------------------------
     # 8. VM creation (new VMs only)
@@ -460,29 +493,35 @@ try {
     #    Skipped for existing VMs.
     # -----------------------------------------------------------------------
 
-    Invoke-WithPhaseTimer -Name 'VM creation' -Action {
-        foreach ($vm in $newVms) {
-            $primarySwitch = if ($vm.kind -eq 'router') {
-                $vm.externalSwitchName
+    Invoke-WithPhaseTimer `
+        -Name 'VM creation' `
+        -Action {
+            foreach ($vm in $newVms) {
+
+                $primarySwitch = $vm.kind -eq 'router' `
+                    ? $vm.externalSwitchName `
+                    : $vm.privateSwitchName
+
+                Invoke-VmCreation -Vm $vm -SwitchName $primarySwitch
             }
-            else {
-                $vm.privateSwitchName
+
+            # Follow-up relay pass for routers whose IP was unknown
+            # at step 4 (DHCP) and got populated by create-vm.ps1's KVP
+            # discovery just above. Static routers already had their
+            # relay set in step 4; Set-RouterSshRelay is idempotent so a
+            # static router whose IP did not change is a no-op. A new IP at
+            # the same listen target triggers a delete+re-add inside the
+            # portproxy half.
+            foreach ($vm in $newVms |
+                    Where-Object { $_.kind -eq 'router' }) {
+                        
+                if ($vm.PSObject.Properties['ipAddress'] `
+                        -and $vm.ipAddress) {
+
+                    Set-RouterSshRelay -ConnectAddress $vm.ipAddress
+                }
             }
-            Invoke-VmCreation -Vm $vm -SwitchName $primarySwitch
         }
-        # Follow-up relay pass for routers whose IP was unknown
-        # at step 4 (DHCP) and got populated by create-vm.ps1's KVP
-        # discovery just above. Static routers already had their
-        # relay set in step 4; Set-RouterSshRelay is idempotent so a
-        # static router whose IP did not change is a no-op. A new IP at
-        # the same listen target triggers a delete+re-add inside the
-        # portproxy half.
-        foreach ($vm in $newVms | Where-Object { $_.kind -eq 'router' }) {
-            if ($vm.PSObject.Properties['ipAddress'] -and $vm.ipAddress) {
-                Set-RouterSshRelay -ConnectAddress $vm.ipAddress
-            }
-        }
-    }
 
     # -----------------------------------------------------------------------
     # 9. Post-provisioning (per VM - new AND existing)
@@ -498,14 +537,18 @@ try {
     #     side (release-file guard, file-overwrite semantics).
     # -----------------------------------------------------------------------
 
-    Invoke-WithPhaseTimer -Name 'Post-provisioning' -Action {
-        foreach ($vm in $vmsToProcess) {
-            Invoke-VmPostProvisioning -Vm $vm `
-                -SkipToolchains:$SkipToolchains `
-                -SkipFiles:$SkipFiles `
-                -SkipEnvVars:$SkipEnvVars
+    Invoke-WithPhaseTimer `
+        -Name 'Post-provisioning' `
+        -Action {
+            foreach ($vm in $vmsToProcess) {
+
+                Invoke-VmPostProvisioning `
+                    -Vm $vm `
+                    -SkipToolchains:$SkipToolchains `
+                    -SkipFiles:$SkipFiles `
+                    -SkipEnvVars:$SkipEnvVars
+            }
         }
-    }
 
     # Toolchains are installed - `files` entries transported, and the
     # `envVars` managed block reconciled - here, in step 9's
@@ -522,6 +565,7 @@ try {
     Write-Host "Provisioning complete." -ForegroundColor Green
 }
 finally {
+
     Write-PhaseTimingReport
 
     # Cross-process handoff (opt-in). When a parent orchestrator (the E2E

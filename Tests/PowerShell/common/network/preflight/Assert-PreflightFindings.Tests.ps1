@@ -1,5 +1,6 @@
 BeforeAll {
     $preflight = "$PSScriptRoot\..\..\..\..\..\hyper-v\ubuntu\PowerShell\common\network\preflight"
+    . "$preflight\New-PreflightFinding.ps1"
     . "$preflight\Assert-PreflightFindings.ps1"
 
     function New-FindingList {
@@ -9,12 +10,6 @@ BeforeAll {
         foreach ($f in $Finding) { $list.Add($f) }
         return , $list
     }
-
-    function New-Finding {
-        param([string] $Status, [string] $Label, [string] $Detail = '')
-
-        [PSCustomObject]@{ Status = $Status; Label = $Label; Detail = $Detail }
-    }
 }
 
 Describe 'Assert-PreflightFindings' {
@@ -23,8 +18,8 @@ Describe 'Assert-PreflightFindings' {
 
         It 'returns silently so callers do not have to branch' {
             $findings = New-FindingList @(
-                (New-Finding -Status 'PASS' -Label 'switch exists'),
-                (New-Finding -Status 'WARN' -Label 'switch type unusual')
+                (New-PreflightFinding -Status 'PASS' -Label 'switch exists'),
+                (New-PreflightFinding -Status 'WARN' -Label 'switch type unusual')
             )
 
             { Assert-PreflightFindings -Findings $findings -SwitchName 'Sw' } |
@@ -41,8 +36,8 @@ Describe 'Assert-PreflightFindings' {
 
         It 'names the switch and the FAIL count' {
             $findings = New-FindingList @(
-                (New-Finding -Status 'PASS' -Label 'switch exists'),
-                (New-Finding -Status 'FAIL' -Label 'vNIC is Up' -Detail 'Status=Disabled.')
+                (New-PreflightFinding -Status 'PASS' -Label 'switch exists'),
+                (New-PreflightFinding -Status 'FAIL' -Label 'vNIC is Up' -Detail 'Status=Disabled.')
             )
 
             { Assert-PreflightFindings -Findings $findings -SwitchName 'ExternalSwitch-Shared' } |
@@ -53,9 +48,9 @@ Describe 'Assert-PreflightFindings' {
             # The whole point of the accumulator: an operator gets the full
             # picture in one run instead of fixing and re-running N times.
             $findings = New-FindingList @(
-                (New-Finding -Status 'FAIL' -Label 'first thing' -Detail 'fix one'),
-                (New-Finding -Status 'PASS' -Label 'fine thing'),
-                (New-Finding -Status 'FAIL' -Label 'second thing' -Detail 'fix two')
+                (New-PreflightFinding -Status 'FAIL' -Label 'first thing' -Detail 'fix one'),
+                (New-PreflightFinding -Status 'PASS' -Label 'fine thing'),
+                (New-PreflightFinding -Status 'FAIL' -Label 'second thing' -Detail 'fix two')
             )
 
             $message = { Assert-PreflightFindings -Findings $findings -SwitchName 'Sw' } |
@@ -69,7 +64,7 @@ Describe 'Assert-PreflightFindings' {
         It 'carries each finding''s Detail - the message is the remedy, not a count' {
             $multiLineDetail = "Restart-Service SharedAccess`n        Restart-Computer"
             $findings = New-FindingList @(
-                (New-Finding -Status 'FAIL' `
+                (New-PreflightFinding -Status 'FAIL' `
                              -Label  'ICS DNS proxy answers' `
                              -Detail $multiLineDetail)
             )
@@ -85,8 +80,8 @@ Describe 'Assert-PreflightFindings' {
 
         It 'ignores WARN - only FAIL aborts the run' {
             $findings = New-FindingList @(
-                (New-Finding -Status 'WARN' -Label 'ICS host IP' -Detail 'Got 10.0.0.1.'),
-                (New-Finding -Status 'FAIL' -Label 'route missing' -Detail 'no route')
+                (New-PreflightFinding -Status 'WARN' -Label 'ICS host IP' -Detail 'Got 10.0.0.1.'),
+                (New-PreflightFinding -Status 'FAIL' -Label 'route missing' -Detail 'no route')
             )
 
             $message = { Assert-PreflightFindings -Findings $findings -SwitchName 'Sw' } |

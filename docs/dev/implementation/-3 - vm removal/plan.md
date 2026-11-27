@@ -35,7 +35,7 @@ See [problem.md](problem.md) for context and constraints.
 
 ## Target folder structure
 
-```
+```text
 hyper-v/ubuntu/
   provision.ps1          (updated dot-source paths)
   deprovision.ps1        (new)
@@ -120,6 +120,7 @@ caller owns nothing below that.
 **File**: `down/vm/remove-vm.ps1`
 
 **Behaviour**:
+
 - Accept a single validated VM config object (same shape as produced by
   `ConvertFrom-VmConfigJson`).
 - Check whether the VM exists in Hyper-V (`Get-VM -Name`).
@@ -197,6 +198,7 @@ Centralising the "are there remaining VMs?" check here keeps
 **File**: `down/network/teardown-network.ps1`
 
 **Behaviour**:
+
 - Accept the switch name and gateway IP as parameters, consistent with
   `up/network/setup-network.ps1`.
 - Count VMs still connected to the switch
@@ -251,6 +253,7 @@ are easy to read side-by-side.
 **File**: `hyper-v/ubuntu/deprovision.ps1`
 
 **Behaviour**:
+
 - Bootstrap `Common.PowerShell` (same minimum version check as
   `provision.ps1`).
 - Import `Microsoft.PowerShell.SecretManagement` and
@@ -269,6 +272,7 @@ are easy to read side-by-side.
 are not unit-testable; all logic is covered by Steps 2-3).
 
 **README**:
+
 - **What this repo does** - extend to mention removal alongside
   provisioning.
 - **Quick start** - add `deprovision.ps1` as step 3.

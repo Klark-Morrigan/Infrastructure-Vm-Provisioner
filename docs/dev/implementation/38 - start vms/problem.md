@@ -255,7 +255,7 @@ reboot needs the other four back up immediately.
 - **Migrating the bootstrap to `Get-InfrastructureSecret`.**
   `Infrastructure.Secrets` already ships
   [Get-InfrastructureSecret](../../../../../Infrastructure-Secrets/Infrastructure.Secrets/Public/Get-InfrastructureSecret.ps1)
-  + `Use-MicrosoftPowerShellSecretStoreProvider`, which would let
+  plus `Use-MicrosoftPowerShellSecretStoreProvider`, which would let
   `Read-VmProvisionerConfig` delete its direct `Get-SecretVault` /
   `Get-Secret` calls in favour of one provider registration + one
   read. Worth doing as a follow-up that touches the helper in one

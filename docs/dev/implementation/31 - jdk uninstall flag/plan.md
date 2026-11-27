@@ -82,7 +82,7 @@ graph TD
 - In the "Optional: install a JDK" subsection, add the `uninstall` row
   to the sub-field table with type `boolean?`, default `false`, and a
   one-line description: "Set to `true` on a previously provisioned VM
-  to remove the JDK on the next run. See [Removing a JDK](#removing-a-jdk)."
+  to remove the JDK on the next run. See [Removing a JDK](../../../../README.md#removing-a-jdk)."
 - Add a short "Removing a JDK" subsection right after the install
   subsection covering: set the flag, re-run `provision.ps1`, the flag
   stays after success (rationale: link to
@@ -103,11 +103,13 @@ want the install.
 
 - [hyper-v/ubuntu/up/acquire/Invoke-VmAcquisitions.ps1](../../../../hyper-v/ubuntu/up/acquire/Invoke-VmAcquisitions.ps1) -
   replace
+
   ```ps1
   if ($Vm.PSObject.Properties['javaDevKit']) {
       Invoke-JdkAcquisition -Vm $Vm
   }
   ```
+
   with a check that also skips when `javaDevKit.uninstall` is `$true`.
   Single-line guard; no helper.
 - [Tests/up/acquire/Invoke-VmAcquisitions.Tests.ps1](../../../../Tests/up/acquire/Invoke-VmAcquisitions.Tests.ps1) -
